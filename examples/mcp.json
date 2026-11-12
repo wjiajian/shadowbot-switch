@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "my-docs": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer ${MY_DOCS_TOKEN}" },
+      "enabled": false
+    },
+    "my-local-tools": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["C:/path/to/server.mjs"],
+      "enabled": false
+    }
+  }
+}

@@ -1,0 +1,19 @@
+# Build tools, output and dependencies
+/.tools/
+/dist/
+node_modules/
+
+# Local configuration and installation data
+/.codex/
+/.shadowbot-switch/
+.env
+.env.*
+!.env.example
+
+# Runtime databases, logs and temporary files
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.log
+*.tmp

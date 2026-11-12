@@ -1,0 +1,6 @@
+{
+  "enabledSkills": ["my-shadowbot-skill"],
+  "mcpPermission": {
+    "my-docs_*": "ask"
+  }
+}
