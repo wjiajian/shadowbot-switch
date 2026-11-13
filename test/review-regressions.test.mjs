@@ -99,3 +99,31 @@ test('Pi initializes its private agent directory before the first SDK import', t
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { env: { ...process.env, PI_CODING_AGENT_DIR: join(home, 'wrong') }, encoding: 'utf8', windowsHide: true });
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
+
+test('offline checks and imports reject ambiguous transport and unsupported OAuth without changing saved config', t => {
+  const { root, home, run, ok } = setup(t);
+  const path = join(home, 'agent', 'mcp.json'), bundle = join(root, 'invalid.json');
+  const saved = { mcpServers: { keep: { url: 'https://example.com/mcp' } } };
+  for (const mode of ['original', 'pi']) {
+    put(join(home, 'backend.json'), { mode });
+    for (const [raw, error] of [
+      [{ url: 'https://example.com/mcp', command: 'must-not-run', type: 'http' }, /command.*url/],
+      [{ url: 'https://example.com/mcp', oauth: { clientId: 'fixture', clientSecret: 'must-not-leak' } }, /不支持 OAuth/],
+    ]) {
+      const invalid = { mcpServers: { broken: raw } };
+      put(path, invalid);
+      const checked = run('config', 'check');
+      assert.equal(checked.status, 1, checked.stdout + checked.stderr);
+      assert.match(JSON.parse(checked.stdout).error, error);
+      assert.doesNotMatch(checked.stdout, /must-not-leak/);
+      put(path, saved);
+      const previous = readFileSync(path, 'utf8');
+      put(bundle, { format: 'shadowbot-switch-config', version: 1, entries: [{ path: 'agent/mcp.json', data: Buffer.from(JSON.stringify(invalid)).toString('base64') }] });
+      const imported = run('config', 'import', bundle, '--replace');
+      assert.equal(imported.status, 1, imported.stdout + imported.stderr);
+      assert.match(JSON.parse(imported.stdout).error, error);
+      assert.equal(readFileSync(path, 'utf8'), previous);
+    }
+    assert.equal(ok('config', 'check').valid, true);
+  }
+});

@@ -87,6 +87,8 @@ Skill 内容、增删和权限在下一轮读取。安装级菜单文件自动�
 
 安装级配置位于 `.shadowbot-switch/agent/mcp.json`，应用级位于 `<应用根目录>/.shadowbot-switch/mcp.json`。支持 stdio 和 Streamable HTTP。
 
+每个服务只能填写 `command`（stdio）或 `url`（HTTP）中的一个，同时填写会在检查、导入和连接前报错。当前不支持 OAuth 登录或令牌刷新，含 `oauth` 字段的配置会明确报错；若服务支持静态令牌，可通过 `headers` 配置，例如 `"Authorization": "Bearer ${MCP_TOKEN}"`。
+
 `command: "node"` 使用随附 Node；要指定其他 Node 版本，可填写其完整路径。其他外部程序需在本机安装或填写可执行文件路径。
 
 ```powershell

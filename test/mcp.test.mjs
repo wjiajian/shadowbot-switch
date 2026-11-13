@@ -1,6 +1,9 @@
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { json } from 'node:stream/consumers';
 import { setTimeout as delay } from 'node:timers/promises';
 import assert from 'node:assert/strict';
@@ -61,20 +64,20 @@ test('stdio and legacy SSE run real Pi MCP requests', { timeout: 15_000 }, async
   }
 });
 
-test('offline checks and Pi reload share custom MCP validation, including transport and OAuth boundaries', async () => {
+test('offline checks and Pi reload share custom MCP validation, including transport and unsupported OAuth', async () => {
   const cases = [
     ['stdio', { command: 'must-not-run', args: ['one'], env: { TOKEN: '${UNSET_TEST_TOKEN}' }, cwd: '.', timeout: 3 }, true],
     ['http', { type: 'streamable-http', url: '${UNSET_TEST_URL}/mcp', headers: { Authorization: '${UNSET_TEST_TOKEN}' } }, true],
-    ['oauth', { url: 'https://example.com/mcp', oauth: { clientId: 'client', callbackUrl: 'http://[::1]:8080/callback', callbackPort: 8080, clientRegistration: 'dcr', authServerMetadataUrl: 'http://localhost/metadata' } }, true],
+    ['oauth', { url: 'https://example.com/mcp', oauth: { clientId: 'client', callbackUrl: 'http://[::1]:8080/callback', callbackPort: 8080, clientRegistration: 'dcr', authServerMetadataUrl: 'http://localhost/metadata' } }, false],
     ['infinite_timeout', { command: 'must-not-run', timeout: Infinity }, false],
     ['negative_timeout', { command: 'must-not-run', timeout: -1 }, false],
     ['bad_args', { command: 'must-not-run', args: [1] }, false],
     ['bad_environment', { command: 'must-not-run', env: { TOKEN: 1 } }, false],
     ['bad_header', { url: 'https://example.com/mcp', headers: { Token: false } }, false],
     ['sse', { type: 'sse', url: 'https://example.com/mcp' }, false],
-    ['remote_callback', { url: 'https://example.com/mcp', oauth: { callbackUrl: 'http://example.com/callback' } }, false],
-    ['port_mismatch', { url: 'https://example.com/mcp', oauth: { callbackUrl: 'http://localhost:8080/callback', callbackPort: 8081 } }, false],
-    ['bad_metadata', { url: 'https://example.com/mcp', oauth: { authServerMetadataUrl: 'http://example.com/metadata' } }, false],
+    ['oauth_null', { url: 'https://example.com/mcp', oauth: null }, false],
+    ['oauth_false', { url: 'https://example.com/mcp', oauth: false }, false],
+    ['stdio_oauth', { command: 'must-not-run', oauth: {} }, false],
     ['unsupported_registration', { url: 'https://example.com/mcp', oauth: { clientRegistration: 'cimd' } }, false],
     ['studio-mcp', { command: 'must-not-run' }, false],
   ];
@@ -121,6 +124,65 @@ test('a dropped connection does not resend a dispatched MCP tool call', { timeou
     await hub.close();
     server.closeAllConnections();
     server.close();
+  }
+});
+
+test('conflicting MCP transports are rejected before launching a command', { timeout: 10_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'shadowbot-mcp-conflict-'));
+  const marker = join(root, 'launched'), executable = join(root, 'server.mjs');
+  writeFileSync(executable, `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(marker)}, 'launched');\nawait import(${JSON.stringify(pathToFileURL(resolve('test/fixtures/mcp-stdio.mjs')).href)});`);
+  const hub = new McpHub(root);
+  try {
+    const config = { type: 'http', url: 'http://127.0.0.1:1/mcp', command: process.execPath, args: [executable], timeout: 1 };
+    const report = await hub.reloadCustom(new Map([['conflict', config]]));
+    assert.equal(existsSync(marker), false, 'an HTTP entry must not execute an unvalidated command');
+    assert.match(report.failed.conflict, /command.*url/);
+    for (const type of [undefined, 'http', 'streamable-http', 'stdio']) {
+      for (const command of [process.execPath, null, 42, undefined]) {
+        assert.throws(() => validateCustomMcp('conflict', { ...config, type, command }), /command.*url/);
+      }
+    }
+    assert.throws(() => validateCustomMcp('conflict', { command: 'node', url: null }), /command.*url/);
+  } finally {
+    await hub.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('unsupported MCP OAuth is reported before connecting while explicit header tokens remain usable', { timeout: 10_000 }, async () => {
+  let requests = 0;
+  const server = createServer(async (req, res) => {
+    requests++;
+    if (req.headers.authorization !== 'Bearer fixture-token') { res.writeHead(401).end(); return; }
+    if (req.method !== 'POST') { res.writeHead(405).end(); return; }
+    const message = await json(req);
+    if (message.id === undefined) { res.writeHead(202).end(); return; }
+    const result = message.method === 'initialize'
+      ? { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'token-fixture', version: '1' } }
+      : { tools: [] };
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const hub = new McpHub(process.cwd());
+  try {
+    const config = { url: `http://127.0.0.1:${server.address().port}/mcp`, oauth: { clientId: 'fixture', clientSecret: 'must-not-leak' } };
+    const report = await hub.reloadCustom(new Map([['oauth', config]]));
+    assert.equal(requests, 0, 'unsupported OAuth must not silently fall through to an unauthenticated connection');
+    assert.match(report.failed.oauth, /不支持 OAuth/);
+    assert.doesNotMatch(report.failed.oauth, /must-not-leak/);
+    assert.throws(() => validateCustomMcp('oauth', config), /不支持 OAuth/);
+    const tokenConfig = { url: config.url, headers: { Authorization: 'Bearer fixture-token' } };
+    assert.deepEqual(validateCustomMcp('oauth', tokenConfig), tokenConfig);
+    assert.deepEqual((await hub.reloadCustom(new Map([['oauth', tokenConfig]]))).failed, {});
+    assert.equal(hub.status().oauth.status, 'connected');
+    const authenticatedRequests = requests;
+    assert.ok(authenticatedRequests > 0);
+    assert.match((await hub.reloadCustom(new Map([['oauth', config]]))).failed.oauth, /不支持 OAuth/);
+    assert.equal(requests, authenticatedRequests);
+    assert.equal(hub.status().oauth.status, 'connected', 'invalid auth changes must preserve the working connection');
+  } finally {
+    await hub.close(); server.closeAllConnections(); server.close();
   }
 });
 

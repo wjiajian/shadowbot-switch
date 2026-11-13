@@ -1,5 +1,12 @@
 # 验证记录
 
+## PR #1 MCP 传输歧义与认证声明修复（2026-11-13）
+
+- 修复前用隔离测试实际复现两项问题：同时提供 HTTP URL 和 command 会启动测试子进程，提供 OAuth 配置会发出未认证请求。修复后公共校验按字段是否存在要求 command/url 二选一，显式 type、null 或 undefined 都不能绕过检查。
+- 移除公共格式中未实现的 OAuth 类型及格式校验，改为明确报告不支持登录和令牌刷新。测试确认报错前不会发出网络请求；静态 headers 令牌仍可连接，更新为无效 OAuth 配置时保留原可用连接。
+- 在原版模式和适配器模块缺失时，config check/import 同样拒绝传输冲突及 OAuth 配置；失败导入不会覆盖已保存配置，错误信息不包含凭据。
+- Windows 本机完整执行 `scripts/build.ps1`（`SHADOWBOT_TEST_OBSERVE=1`）：39 项 Node 测试全部通过、无跳过，TypeScript/Go 构建、Go 测试和 PowerShell 激活、搬迁、等待及发布测试通过。本地原始日志：`.tools/review-mcp-transport-auth-build.log`。
+
 ## PR #1 公共校验与能力查询收敛（2026-11-13）
 
 - 自定义 MCP 的离线检查、导入与 Pi 加载共用 `validateCustomMcp`，删除适配器中重复的规则、只供旧测试使用的配置入口及无人调用的 `mcp.validate`。Pi 库的校验只用于宿主内置 MCP 的格式转换，公共层仍不依赖 Pi SDK。
