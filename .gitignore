@@ -5,6 +5,9 @@ node_modules/
 
 # Local configuration and installation data
 /.codex/
+/.claude/
+/.copilot/
+/.pi/
 /.shadowbot-switch/
 .env
 .env.*
