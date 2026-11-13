@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import type { AgentSession, AgentSessionEvent, ExtensionFactory, ToolDefinition } from '@earendil-works/pi-coding-agent';
@@ -14,6 +14,7 @@ import { atomicWrite } from '../../installation.js';
 import { McpHub } from './mcp.js';
 import { agentPrompt, ShadowBotContext, skills, userSettings } from '../../shadowbot.js';
 import { agentRules } from '../../agent-rules.js';
+import { outsideWorkspace } from '../../config-paths.js';
 import { databaseBusy, failure, id, Store } from '../../store.js';
 import type { Meta } from '../../store.js';
 import { modelError, UserError, userMessage } from '../../errors.js';
@@ -45,10 +46,6 @@ function filesystemPath(root: string, input: string) {
   if (path === '~' || /^~[/\\]/.test(path)) path = join(homedir(), path.slice(2));
   if (path.startsWith('file://')) path = fileURLToPath(path);
   return realpathSync.native(resolve(root, path));
-}
-
-function outsideWorkspace(fromRoot: string) {
-  return isAbsolute(fromRoot) || fromRoot === '..' || fromRoot.startsWith(`..${sep}`);
 }
 
 function alive(pid: number) {

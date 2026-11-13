@@ -108,8 +108,44 @@ test('rule reads tolerate access errors, deletion, replacement, truncation and g
         const result = loadAgentRules(f.agent, f.app);
         assert.match(result.instructions, /healthy-app-rule/);
         assert.doesNotMatch(result.instructions, /Installation rules|original-installation-rule|replacement-rule/);
-        if (scenario !== 'deleted') assert.equal(result.warnings.length, 1);
+        assert.equal(result.warnings.length, 1);
+        assert.doesNotMatch(result.warnings[0], /本轮/);
       } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
     });
   }
+});
+
+test('dangling root links are diagnosed and never activate fallback rules', t => {
+  const f = fixture(t);
+  const target = join(f.app, 'link-target');
+  fs.mkdirSync(target);
+  fs.symlinkSync(target, f.local, 'junction');
+  fs.rmdirSync(target);
+  fs.mkdirSync(join(f.app, '.shadowbot-switch'));
+  fs.writeFileSync(join(f.app, '.shadowbot-switch', 'AGENTS.md'), 'fallback-must-not-load');
+  const result = loadAgentRules(f.agent, f.app);
+  assert.equal(result.instructions, '');
+  assert.match(result.warnings[0], /断链/);
+  assert.doesNotMatch(result.warnings[0], /本轮/);
+});
+
+test('stable path and handle metadata may differ without rejecting valid rules', t => {
+  const f = fixture(t);
+  fs.writeFileSync(f.local, 'stable-rule');
+  const originalStat = fs.statSync;
+  t.mock.method(fs, 'statSync', (...args) => {
+    const stats = originalStat(...args);
+    if (args[1]?.bigint) {
+      // Simulate a filesystem reporting different metadata via path vs handle APIs.
+      stats.dev += 1n;
+      stats.ctimeNs += 1_000_000n;
+    }
+    return stats;
+  });
+  syncBuiltinESMExports();
+  try {
+    const result = loadAgentRules(f.agent, f.app);
+    assert.match(result.instructions, /stable-rule/);
+    assert.deepEqual(result.warnings, []);
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
 });

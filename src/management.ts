@@ -16,7 +16,7 @@ import { runtimeStates } from './runtime-state.js';
 import { skillInventory, userSettings, validateUserSettings, settingsFromFiles } from './shadowbot.js';
 import { syncSkillCommands } from './skill-commands.js';
 import { verifySchema } from './switch.js';
-import { loadAgentRules } from './agent-rules.js';
+import { decodeRuleContent, loadAgentRules } from './agent-rules.js';
 
 const help = `ShadowBot Switch
   use <harness>               安装或切换后端（例如 use pi / use original）
@@ -117,12 +117,14 @@ export function applicationList(home: string, install: Installation) {
   return [...paths].filter(existsSync).sort().map(path => ({ name: basename(path), path }));
 }
 
-function safeTree(root: string): { path: string; data: string }[] {
+function safeTree(root: string, omitRootRules = false): { path: string; data: string }[] {
   if (!existsSync(root)) return [];
   if (lstatSync(root).isSymbolicLink()) throw new UserError(`配置目录包含链接，不能复制：${root}`);
   const entries: { path: string; data: string }[] = [];
   const walk = (folder: string) => {
     for (const entry of readdirSync(folder, { withFileTypes: true })) {
+      // Rules are exported separately through the bounded, validating loader.
+      if (omitRootRules && folder === root && entry.name.toLowerCase() === 'agents.md') continue;
       const file = join(folder, entry.name);
       if (entry.isSymbolicLink()) throw new UserError(`配置目录包含链接，不能复制：${file}`);
       if (entry.isDirectory()) walk(file);
@@ -136,7 +138,7 @@ function safeTree(root: string): { path: string; data: string }[] {
 function applicationConfigTree(root: string) {
   const files = new Map<string, { path: string; data: string }>();
   for (const directory of appConfigDirectories(root)) {
-    for (const entry of safeTree(directory)) files.set(entry.path.toLowerCase(), entry);
+    for (const entry of safeTree(directory, true)) files.set(entry.path.toLowerCase(), entry);
   }
   // Runtime merges these documents across both application directories. Export that
   // same local layer (without baking in inherited installation configuration).
@@ -145,11 +147,9 @@ function applicationConfigTree(root: string) {
   // Export the same application rules the runtime selects. Import places this
   // in .shadowbot-switch/AGENTS.md, which is the loader's migration fallback.
   const rules = loadAgentRules(undefined, root);
-  if (rules.warnings.length) throw new UserError(rules.warnings.join('\n'));
-  files.delete('agents.md');
   const rule = rules.files[0];
   if (rule) files.set('agents.md', { path: 'AGENTS.md', data: Buffer.from(rule.content).toString('base64') });
-  return [...files.values()];
+  return { entries: [...files.values()], warnings: rules.warnings };
 }
 
 function within(root: string, name: string) {
@@ -158,10 +158,10 @@ function within(root: string, name: string) {
   if (!path.startsWith(resolve(root) + sep)) throw new UserError('配置路径越出了目标目录。');
   let cursor = root;
   for (const part of name.split('/')) {
-    if (existsSync(cursor) && lstatSync(cursor).isSymbolicLink()) throw new UserError(`目标目录包含链接：${cursor}`);
+    if (lstatSync(cursor, { throwIfNoEntry: false })?.isSymbolicLink()) throw new UserError(`目标目录包含链接：${cursor}`);
     cursor = join(cursor, part);
   }
-  if (existsSync(path) && lstatSync(path).isSymbolicLink()) throw new UserError(`目标文件是链接：${path}`);
+  if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new UserError(`目标文件是链接：${path}`);
   return path;
 }
 
@@ -382,12 +382,21 @@ export async function manage(home: string, install: Installation, input: string[
     if (action === 'export') {
       const path = resolve(required(target, '导出文件路径'));
       if (existsSync(path) && !opts.flags.has('replace')) throw new UserError('导出文件已存在。换一个路径或使用 --replace。');
-      const entries = app ? applicationConfigTree(app).map(e => ({ ...e, path: `agent/${e.path}` })) : [
-        ...safeTree(join(home, 'skills')).map(e => ({ ...e, path: `skills/${e.path}` })),
-        ...safeTree(join(home, 'agent')).map(e => ({ ...e, path: `agent/${e.path}` })),
+      let exported: ReturnType<typeof applicationConfigTree>;
+      if (app) exported = applicationConfigTree(app);
+      else {
+        const loaded = loadAgentRules(join(home, 'agent'));
+        exported = { entries: [
+          ...safeTree(join(home, 'agent'), true),
+          ...loaded.files.map(file => ({ path: 'AGENTS.md', data: Buffer.from(file.content).toString('base64') })),
+        ], warnings: loaded.warnings };
+      }
+      const entries = [
+        ...exported.entries.map(e => ({ ...e, path: `agent/${e.path}` })),
+        ...(!app ? safeTree(join(home, 'skills')).map(e => ({ ...e, path: `skills/${e.path}` })) : []),
       ];
       writeJson(path, { format: 'shadowbot-switch-config', version: 1, entries });
-      emit({ path, files: entries.length });
+      emit({ path, files: entries.length, warnings: exported.warnings.map(warning => `${warning}；未导出该规则文件，其余配置已导出。`) });
       return;
     }
     if (action === 'import') {
@@ -397,14 +406,20 @@ export async function manage(home: string, install: Installation, input: string[
       const importedWarnings: string[] = [];
       const prepared = bundle.entries.map(entry => {
         if (typeof entry.path !== 'string' || typeof entry.data !== 'string' || !/^(skills|agent)\//.test(entry.path)) throw new UserError('配置包中存在无效文件。');
-        const name = app ? entry.path.replace(/^agent\//, '') : entry.path;
+        const isRule = entry.path.toLowerCase() === 'agent/agents.md';
+        const normalized = isRule ? 'agent/AGENTS.md' : entry.path;
+        const name = app ? normalized.replace(/^agent\//, '') : normalized;
         // Preserve the root-level convention when updating an existing app.
-        const path = app && name === 'AGENTS.md' && existsSync(join(app, 'AGENTS.md'))
+        const path = app && isRule && lstatSync(join(app, 'AGENTS.md'), { throwIfNoEntry: false })
           ? within(app, name) : within(app ? directory : home, name);
         if (seen.has(path.toLowerCase())) throw new UserError(`配置包中存在重复文件：${name}`);
         seen.add(path.toLowerCase());
         if (existsSync(path) && !opts.flags.has('replace')) throw new UserError(`文件已存在：${path}。使用 --replace 时会先备份。`);
         const data = Buffer.from(entry.data, 'base64');
+        if (isRule) {
+          try { decodeRuleContent(data); }
+          catch (error) { throw new UserError(`${name}：${error instanceof Error ? error.message : '规则内容无效'}`); }
+        }
         if (name.endsWith('.json')) {
           let parsed: unknown;
           try { parsed = JSON.parse(data.toString('utf8').replace(/^\uFEFF/, '')); } catch { throw new UserError(`导入文件 JSON 无效：${name}`); }
