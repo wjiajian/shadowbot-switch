@@ -5,6 +5,7 @@ import { InMemoryCredentialStore } from '@earendil-works/pi-ai';
 import type { Api, Model as PiModel } from '@earendil-works/pi-ai';
 import type { Auth, Config, Model, Provider, ProviderConfig } from '@opencode-ai/sdk/v2';
 import { readJson } from './installation.js';
+import { UserError } from './errors.js';
 
 type ObjectMap = Record<string, unknown>;
 type ConfiguredModel = NonNullable<ProviderConfig['models']>[string];
@@ -70,7 +71,7 @@ function protocol(provider: ProviderConfig, model: ConfiguredModel, catalogAPI?:
   const explicit = provider.options?.api;
   if (typeof explicit === 'string' && apiNames.has(explicit as Api)) return explicit as Api;
   if (!npm && explicit === undefined && catalogAPI) return catalogAPI;
-  throw new Error('Unsupported model provider protocol');
+  throw new UserError('模型协议未受支持。请检查影刀模型配置中的 provider.npm 或 options.api。');
 }
 
 function catalogRuntime() {
@@ -165,7 +166,7 @@ export class HostConfig {
   async model(request?: { providerID: string; modelID: string }, agent = copilot) {
     const config = this.value;
     const selection = request ?? modelSelection(config.agent?.[agent]?.model ?? config.model);
-    if (!selection) throw new Error('No ShadowBot model selected');
+    if (!selection) throw new UserError('尚未选择模型。请在影刀 Copilot 的模型设置中选择一个模型。');
     const { providerID, modelID } = selection;
     const provider = config.provider?.[providerID] ?? {};
     const configuredModel = provider.models?.[modelID];
@@ -173,13 +174,14 @@ export class HostConfig {
     const actualID = model.id ?? modelID;
     const runtime = await catalogRuntime();
     const catalog = runtime.getModel(providerID, actualID);
-    if (!configuredModel && !catalog) throw new Error('Selected ShadowBot model is missing from the host configuration and Pi catalog');
+    if (!configuredModel && !catalog) throw new UserError(`模型 ${providerID}/${modelID} 不在宿主配置或当前 Pi 目录中。请重新选择模型，或补充模型配置。`);
     const api = protocol(provider, model, catalog?.api);
     const configuredBase = model.provider?.api ?? provider.options?.baseURL ?? provider.api;
     const base = configuredBase ?? catalog?.baseUrl;
-    if (typeof base !== 'string') throw new Error('Selected model has no endpoint');
-    const url = new URL(envValue(base));
-    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid model endpoint');
+    if (typeof base !== 'string') throw new UserError(`模型 ${providerID}/${modelID} 未配置 API 地址。请检查影刀模型设置。`);
+    let url: URL;
+    try { url = new URL(envValue(base)); } catch { throw new UserError('模型 API 地址无效。请填写完整的 http 或 https 地址。'); }
+    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw new UserError('模型 API 地址必须使用 http 或 https，凭据请放入认证设置。');
     const saved = this.auth.get(providerID);
     const options = provider.options ?? {};
     const key = (saved?.type === 'api' && saved.key) || (typeof options.apiKey === 'string' && envValue(options.apiKey)) ||
@@ -203,7 +205,7 @@ export class HostConfig {
       });
     }
     const noKeyRelay = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-    if (!key && !explicitAuth && !noKeyRelay) throw new Error('Selected model has no API credential');
+    if (!key && !explicitAuth && !noKeyRelay) throw new UserError(`模型 ${providerID}/${modelID} 缺少 API 凭据。请在影刀模型设置中填写凭据或配置对应环境变量。`);
     await runtime.setRuntimeApiKey(providerID, key || 'shadowbot-local-relay');
     const resolved = runtime.getModel(providerID, actualID);
     if (!resolved) throw new Error('Pi could not register the selected model');

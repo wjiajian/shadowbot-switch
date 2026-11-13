@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { UserError } from './errors.js';
 
 export const protocolVersion = '1.18.12';
 export const originalHash = 'de2e62ab0e3f27a3ea7ff9ef4c4fe7097f0d6df01118b2e7c5f57726256d6314';
@@ -32,7 +33,11 @@ export function installationHome(): string {
 }
 
 export function readJson<T>(path: string): T {
-  return JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')) as T;
+  let text: string;
+  try { text = readFileSync(path, 'utf8'); }
+  catch { throw new UserError(`无法读取 ${path}。检查文件是否存在及访问权限。`); }
+  try { return JSON.parse(text.replace(/^\uFEFF/, '')) as T; }
+  catch { throw new UserError(`JSON 格式错误：${path}。检查引号、逗号和括号。`); }
 }
 
 export function atomicWrite(path: string, data: string | Buffer) {

@@ -1,5 +1,5 @@
 {
-  "enabledSkills": ["my-shadowbot-skill"],
+  "disabledSkills": [],
   "mcpPermission": {
     "my-docs_*": "ask"
   }

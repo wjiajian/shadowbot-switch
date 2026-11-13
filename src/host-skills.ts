@@ -8,6 +8,8 @@ import type { Installation } from './installation.js';
 export function skillSources(home: string, installation: Installation) {
   return {
     bridge: join(runtimeDirectory(home, installation), 'skills'),
+    // Older installations stored bundled skills directly under home.
+    autoEnabled: installation.runtimeRelease ? join(home, 'skills') : undefined,
     resources: join(installation.resources, 'Skills'),
     runtime: installation.hostSkills,
     cache: join(home, 'host-skills'),

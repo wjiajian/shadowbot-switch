@@ -53,7 +53,14 @@ function Find-ShadowBotDirectory([string]$ManifestPath) {
         }
     }
     if ($directories.Count -gt 1) {
-        throw "Multiple ShadowBot installations found ($($directories -join ', ')). Choose one with -ShadowBotDirectory."
+        if ([Console]::IsInputRedirected) { throw "找到多个影刀安装：$($directories -join ', ')。使用 --shadowbot-dir 指定路径。" }
+        for ($i = 0; $i -lt $directories.Count; $i++) {
+            $version = (Get-Item -LiteralPath (Join-Path $directories[$i] 'ShadowBot.exe')).VersionInfo.ProductVersion
+            Write-Host "$($i + 1). $($directories[$i])（版本 $version）"
+        }
+        $selection = Read-Host '选择影刀安装编号'
+        if ($selection -notmatch '^\d+$' -or [int]$selection -lt 1 -or [int]$selection -gt $directories.Count) { throw '无效安装编号。' }
+        return $directories[[int]$selection - 1]
     }
     $directories | Select-Object -First 1
 }

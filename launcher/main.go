@@ -113,14 +113,15 @@ func runAt(home string, args []string) (int, error) {
 		runtime = filepath.Join(runtime, "releases", install.RuntimeRelease)
 	}
 	if _, err := os.Stat(filepath.Join(home, "activation.pending.json")); !errors.Is(err, os.ErrNotExist) &&
-		(len(args) == 0 || args[0] != "doctor") {
+		(len(args) == 0 || (args[0] != "doctor" && args[0] != "status" && args[0] != "help")) {
 		return 1, errors.New("installation activation requires recovery before starting the agent")
 	}
 	env := append(os.Environ(), "SHADOWBOT_PI_HOME="+home, "PI_CODING_AGENT_DIR="+filepath.Join(home, "agent"))
-	if len(args) > 0 && (args[0] == "doctor" || args[0] == "skills" || args[0] == "mcp" || args[0] == "reload") {
+	if len(args) > 0 && (args[0] == "doctor" || args[0] == "status" || args[0] == "help" || args[0] == "config" || args[0] == "apps" || args[0] == "skills" || args[0] == "mcp" || args[0] == "reload") {
 		cmd := exec.Command(filepath.Join(runtime, "node.exe"), append([]string{filepath.Join(runtime, "service", "control.js")}, args...)...)
 		cmd.Env = env
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		cmd.Stdin = os.Stdin
 		return supervise(cmd)
 	}
 	if _, err := os.Stat(filepath.Join(home, "switch.pending.json")); !errors.Is(err, os.ErrNotExist) {

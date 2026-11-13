@@ -8,41 +8,79 @@ import { decision } from './interactions.js';
 import { copilot, object } from './config.js';
 import { officialSkillDirectories } from './host-skills.js';
 import type { SkillSources } from './host-skills.js';
+import { UserError } from './errors.js';
 
-export type UserSettings = { enabledSkills?: string[]; mcpPermission?: Record<string, 'allow' | 'ask' | 'deny'> };
+export type UserSettings = { enabledSkills?: string[]; disabledSkills?: string[]; mcpPermission?: Record<string, 'allow' | 'ask' | 'deny'> };
 
-export function userSettings(agentDir: string, root: string): UserSettings {
-  let current: UserSettings = {};
-  for (const path of [join(agentDir, 'shadowbot.json'), join(root, '.pi', 'shadowbot.json')]) {
-    if (!existsSync(path)) continue;
-    const file = readJson<UserSettings>(path);
-    if (file.enabledSkills && (!Array.isArray(file.enabledSkills) || file.enabledSkills.some(name => typeof name !== 'string'))) {
-      throw new Error('enabledSkills must be a list of skill names');
+export function validateUserSettings(input: unknown, path: string): UserSettings {
+  if (!object(input)) throw new UserError(`${path} 必须是 JSON 对象。`);
+  for (const key of ['enabledSkills', 'disabledSkills']) {
+    if (input[key] !== undefined && (!Array.isArray(input[key]) || input[key].some(name => typeof name !== 'string'))) {
+      throw new UserError(`${path}：${key} 必须是 Skill 名称数组。`);
     }
+  }
+  if (input.mcpPermission !== undefined && (!object(input.mcpPermission) || Object.values(input.mcpPermission).some(v => typeof v !== 'string' || !['allow', 'ask', 'deny'].includes(v)))) {
+    throw new UserError(`${path}：mcpPermission 的值必须是 allow、ask 或 deny。`);
+  }
+  return input as UserSettings;
+}
+
+export function userSettings(agentDir: string, root?: string): UserSettings {
+  let current: UserSettings = {};
+  for (const path of [join(agentDir, 'shadowbot.json'), ...(root ? [join(root, '.pi', 'shadowbot.json')] : [])]) {
+    if (!existsSync(path)) continue;
+    const file = validateUserSettings(readJson(path), path);
     current = { enabledSkills: [...(current.enabledSkills ?? []), ...(file.enabledSkills ?? [])],
+      disabledSkills: [...new Set([...(current.disabledSkills ?? []).filter(name => !file.enabledSkills?.includes(name)), ...(file.disabledSkills ?? [])])],
       mcpPermission: { ...current.mcpPermission, ...file.mcpPermission } };
   }
   return current;
 }
 
-export function skills(agentDir: string, root: string, sources: SkillSources, config: Config, agent = copilot) {
-  const enabled = new Set(userSettings(agentDir, root).enabledSkills ?? []);
+export type SkillRow = { name: string; description: string; path: string; source: string; status: 'enabled' | 'disabled' | 'shadowed' | 'invalid' | 'warning'; reason?: string; skill?: Skill };
+
+export function skillInventory(agentDir: string, root: string | undefined, sources: SkillSources, config: Config, agent = copilot) {
+  const settings = userSettings(agentDir, root);
+  const enabled = new Set(settings.enabledSkills ?? []);
+  const disabled = new Set(settings.disabledSkills ?? []);
   const result = new Map<string, Skill>();
+  const rows: SkillRow[] = [];
   const stock = process.env.SHADOWBOT_OPENCODE_SKILLS_DIR;
   const builtin = [sources.bridge, ...officialSkillDirectories(sources), ...(stock ? [stock] : []), ...(config.skills?.paths ?? [])];
   for (const path of builtin) {
     if (!existsSync(path) || !isAbsolute(path)) continue;
-    for (const skill of loadSkillsFromDir({ dir: path, source: 'ShadowBot' }).skills) {
-      if (decision('skill', skill.name, 'allow', config.permission, config.agent?.[agent]?.permission) !== 'deny') result.set(skill.name, skill);
+    const loaded = loadSkillsFromDir({ dir: path, source: 'ShadowBot' });
+    for (const diagnostic of loaded.diagnostics) rows.push({ name: '', description: '', path: diagnostic.path ?? path, source: 'official',
+      status: diagnostic.type === 'warning' && loaded.skills.some(skill => skill.filePath === diagnostic.path) ? 'warning' : 'invalid', reason: diagnostic.message });
+    for (const skill of loaded.skills) {
+      const allowed = decision('skill', skill.name, 'allow', config.permission, config.agent?.[agent]?.permission) !== 'deny';
+      // Reserve official names even if the role cannot use them.
+      const previous = rows.find(row => row.source === 'official' && row.name === skill.name && row.status !== 'shadowed');
+      if (previous) { previous.status = 'shadowed'; previous.reason = `宿主后续来源优先：${skill.filePath}`; }
+      result.set(skill.name, skill);
+      rows.push({ name: skill.name, description: skill.description, path: skill.filePath, source: 'official', status: allowed ? 'enabled' : 'disabled', reason: allowed ? undefined : '宿主角色权限禁用', skill });
     }
   }
-  for (const path of [join(agentDir, 'skills'), join(root, '.pi', 'skills')]) {
-    if (!existsSync(path)) continue;
-    for (const skill of loadSkillsFromDir({ dir: path, source: 'custom' }).skills) {
-      if (enabled.has(skill.name) && !result.has(skill.name)) result.set(skill.name, skill);
+  const custom = [[root && join(root, '.pi', 'skills'), 'app'], [sources.autoEnabled, 'installation'], [join(agentDir, 'skills'), 'legacy']] as const;
+  for (const [path, source] of custom) {
+    if (!path || !existsSync(path)) continue;
+    const loaded = loadSkillsFromDir({ dir: path, source: 'custom' });
+    for (const diagnostic of loaded.diagnostics) rows.push({ name: '', description: '', path: diagnostic.path ?? path, source,
+      status: diagnostic.type === 'warning' && loaded.skills.some(skill => skill.filePath === diagnostic.path) ? 'warning' : 'invalid', reason: diagnostic.message });
+    for (const skill of loaded.skills) {
+      const previous = result.get(skill.name);
+      const active = !disabled.has(skill.name) && (source !== 'legacy' || enabled.has(skill.name));
+      rows.push({ name: skill.name, description: skill.description, path: skill.filePath, source, skill,
+        status: previous ? 'shadowed' : active ? 'enabled' : 'disabled',
+        reason: previous ? `同名来源优先：${previous.filePath}` : active ? undefined : '已禁用或旧目录尚未启用' });
+      if (!previous && active) result.set(skill.name, skill);
     }
   }
-  return [...result.values()];
+  return rows;
+}
+
+export function skills(agentDir: string, root: string, sources: SkillSources, config: Config, agent = copilot) {
+  return skillInventory(agentDir, root, sources, config, agent).filter(row => row.status === 'enabled' && row.skill).map(row => row.skill!);
 }
 
 export function workspace(requestDirectory?: string) {

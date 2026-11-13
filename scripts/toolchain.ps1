@@ -79,6 +79,7 @@ function Build-Bridge($Project, $Toolchain, [switch]$SkipTests) {
             & $Toolchain.go test ./launcher
             if ($LASTEXITCODE -ne 0) { throw 'Launcher tests failed.' }
             & ./test/activation.test.ps1
+            & ./test/experience.test.ps1
         }
     } finally {
         foreach ($name in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process') }

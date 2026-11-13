@@ -8,6 +8,7 @@ import type { McpLocalConfig, McpRemoteConfig, McpStatus } from '@opencode-ai/sd
 import { readJson } from './installation.js';
 import { object } from './config.js';
 import { limitToolText } from './context.js';
+import { connectionError, UserError } from './errors.js';
 
 const reserved = new Set(['studio-mcp', 'xbot-copilot', 'browser-use-mcp']);
 const serverName = /^[a-z0-9_-]{1,64}$/i;
@@ -87,21 +88,37 @@ class LegacySseTransport implements McpTransport {
   }
 }
 
-export function customMcp(agentDir: string, workspace: string) {
+export function customMcp(agentDir: string, workspace?: string) {
   const entries = new Map<string, unknown>();
-  for (const path of [join(agentDir, 'mcp.json'), join(workspace, '.pi', 'mcp.json')]) {
+  for (const path of [join(agentDir, 'mcp.json'), ...(workspace ? [join(workspace, '.pi', 'mcp.json')] : [])]) {
     if (!existsSync(path)) continue;
     const content = readJson<unknown>(path);
-    if (!object(content) || !object(content.mcpServers)) throw new Error('mcp.json must define mcpServers');
-    for (const [name, config] of Object.entries(content.mcpServers)) entries.set(name, config);
+    if (!object(content) || !object(content.mcpServers)) throw new UserError(`${path} 必须包含 mcpServers 对象。`);
+    for (const [name, config] of Object.entries(content.mcpServers)) {
+      const previous = entries.get(name);
+      entries.set(name, object(previous) && object(config) && !('command' in config) && !('url' in config) && !('type' in config)
+        ? { ...previous, ...config } : config);
+    }
   }
   return entries;
+}
+
+export function validateCustomMcp(name: string, raw: unknown) {
+  if (reserved.has(name.toLowerCase())) throw new UserError(`MCP 名称 ${name} 由影刀保留，请使用其他名称。`);
+  if (!serverName.test(name)) throw new UserError(`MCP 名称 ${name} 只能包含英文字母、数字、下划线和连字符，最长 64 字符。`);
+  // Validate URL shape without resolving credentials or requiring the caller's environment.
+  // Runtime expansion still reports a missing variable by name before connecting.
+  const template = object(raw) && typeof raw.url === 'string' ? raw.url : undefined;
+  const checked = template ? { ...raw as Record<string, unknown>, url: template.replace(/\$\{[A-Z_][A-Z0-9_]*\}/gi, (token, offset: number) => offset === 0 ? 'http://environment.invalid' : 'environment') } : raw;
+  const validated = validateMcpServerConfig(name, checked);
+  if (validated.kind === 'invalid') throw new UserError(`MCP ${name}：${validated.error}`);
+  return template && 'url' in validated.config ? { ...validated.config, url: template } : validated.config;
 }
 
 function substitute(value: string) {
   return value.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/gi, (_, name: string) => {
     const value = process.env[name];
-    if (value === undefined) throw new Error(`MCP configuration references an unset environment variable ${name}`);
+    if (value === undefined) throw new UserError(`缺少环境变量 ${name}。设置后重新连接 Copilot，再运行 mcp test。`);
     return value;
   });
 }
@@ -116,12 +133,13 @@ export class McpHub {
   private statuses = new Map<string, McpStatus>();
   private connecting = new Map<string, Promise<void>>();
   private builtinTail = Promise.resolve();
+  private reloadErrors = new Map<string, string>();
 
   constructor(private workspace: string) {}
 
   async configureCustom(entries: Map<string, unknown>) {
     for (const [name, raw] of entries) {
-      if (reserved.has(name.toLowerCase()) || this.definitions.get(name)?.builtin) throw new Error(`MCP server name is reserved: ${name}`);
+      if (reserved.has(name.toLowerCase()) || this.definitions.get(name)?.builtin) throw new UserError(`MCP server name is reserved: ${name}`);
       if (!serverName.test(name)) throw new Error('Invalid MCP server name');
       const validated = validateMcpServerConfig(name, raw);
       if (validated.kind === 'invalid') {
@@ -134,18 +152,55 @@ export class McpHub {
   }
 
   async reloadCustom(entries: Map<string, unknown>) {
-    for (const name of entries.keys()) {
-      if (!serverName.test(name) || reserved.has(name.toLowerCase()) || this.definitions.get(name)?.builtin) {
-        throw new Error('Invalid or reserved custom MCP server name');
+    const report = { added: 0, updated: 0, removed: 0, unchanged: 0, failed: {} as Record<string, string> };
+    this.reloadErrors.clear();
+    for (const [name, raw] of entries) {
+      let config: McpServerConfig;
+      try {
+        config = validateCustomMcp(name, raw);
+        if (this.definitions.get(name)?.builtin) throw new UserError(`MCP ${name} 由宿主管理。`);
+      } catch (error) {
+        const detail = error instanceof UserError ? error.message : 'MCP 配置无效。';
+        this.reloadErrors.set(name, detail);
+        report.failed[name] = detail;
+        if (!this.connections.has(name)) this.statuses.set(name, { status: 'failed', error: detail });
+        continue;
       }
+      const previous = this.definitions.get(name);
+      if (previous && JSON.stringify(previous.config) === JSON.stringify(config) &&
+          (this.connections.has(name) || config.enabled === false)) { report.unchanged++; continue; }
+      // Prepare the replacement before retiring a working connection. No tool is dispatched here.
+      const candidate = new McpHub(this.workspace);
+      candidate.definitions.set(name, { config, builtin: false });
+      await candidate.connect(name);
+      const status = candidate.statuses.get(name)!;
+      if (status.status === 'failed') {
+        this.reloadErrors.set(name, status.error);
+        report.failed[name] = status.error;
+        if (!this.connections.has(name)) this.statuses.set(name, status);
+        await candidate.close();
+        continue;
+      }
+      await this.disconnect(name);
+      this.definitions.set(name, { config, builtin: false });
+      this.statuses.set(name, status);
+      const connection = candidate.connections.get(name);
+      if (connection) {
+        candidate.connections.delete(name);
+        this.connections.set(name, connection);
+        this.watch(name, connection);
+      }
+      if (previous) report.updated++; else report.added++;
     }
-    for (const name of this.statuses.keys()) {
+    for (const name of [...this.statuses.keys()]) {
+      if (entries.has(name)) continue;
       if (this.definitions.get(name)?.builtin) continue;
       await this.disconnect(name);
       this.definitions.delete(name);
       this.statuses.delete(name);
+      report.removed++;
     }
-    await this.configureCustom(entries);
+    return report;
   }
 
   async addBuiltin(name: string, raw: McpLocalConfig | McpRemoteConfig) {
@@ -163,6 +218,16 @@ export class McpHub {
   }
 
   status() { return Object.fromEntries(this.statuses); }
+  configurationErrors() { return Object.fromEntries(this.reloadErrors); }
+
+  private watch(name: string, connection: Connection) {
+    connection.client.onClose(() => {
+      if (this.connections.get(name) === connection) {
+        this.connections.delete(name);
+        this.statuses.set(name, { status: 'failed', error: 'MCP 连接已关闭。下一轮将尝试重新连接，也可运行 reload。' });
+      }
+    });
+  }
 
   async disconnect(name: string) {
     await this.connecting.get(name);
@@ -195,8 +260,9 @@ export class McpHub {
       if ('command' in config) {
         const standardEnv = Object.fromEntries(Object.entries(process.env).filter(([key, value]) =>
           value !== undefined && /^(PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|TEMP|TMP|USERPROFILE|APPDATA|LOCALAPPDATA)$/i.test(key))) as Record<string, string>;
-        await client.connect(new StdioTransport({ command: config.command, args: config.args?.map(substitute),
-          cwd: resolve(this.workspace, config.cwd ?? '.'), inheritEnv: builtin,
+        const command = substitute(config.command);
+        await client.connect(new StdioTransport({ command: /^(node|node\.exe)$/i.test(command) ? process.execPath : command, args: config.args?.map(substitute),
+          cwd: resolve(this.workspace, substitute(config.cwd ?? '.')), inheritEnv: builtin,
           env: { ...(builtin ? {} : standardEnv), ...expanded(config.env) } }));
       } else {
         transport = 'streamable-http';
@@ -215,18 +281,13 @@ export class McpHub {
       }
       const tools = await client.listTools();
       const connection = { client, tools };
-      client.onClose(() => {
-        if (this.connections.get(name) === connection) {
-          this.connections.delete(name);
-          this.statuses.set(name, { status: 'failed', error: 'MCP connection closed' });
-        }
-      });
       this.connections.set(name, connection);
+      this.watch(name, connection);
       this.statuses.set(name, { status: 'connected' });
       if (builtin) console.error(`ShadowBotPi MCP ${name} transport=${transport}`);
-    } catch {
+    } catch (error) {
       if (client) await client.close().catch(() => undefined);
-      this.statuses.set(name, { status: 'failed', error: 'MCP connection or tool discovery failed' });
+      this.statuses.set(name, { status: 'failed', error: connectionError(error) });
     }
   }
 

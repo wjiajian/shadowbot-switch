@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { json as readJsonBody } from 'node:stream/consumers';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { syncSkillCommands } from '../dist/service/skill-commands.js';
 
 const schema = readFileSync('contract/schema.sql', 'utf8');
 
@@ -31,10 +32,12 @@ function modelFixture({ usageFor = () => 9, beforeReply, readPathFor } = {}) {
       const content = JSON.stringify(user?.content);
       if (await beforeReply?.(content, res)) return;
       const readPath = readPathFor?.(content);
+      const skillName = content.includes('probe-stock-skill') ? 'fixture-stock-allowed' :
+        content.includes('probe-skill') ? content.match(/probe-skill ([a-z-]+)/)?.[1] ?? 'fixture-skill' : undefined;
       const requestedTool = readPath ? 'read' : content.includes('probe-tool') ? 'studio-mcp_flow_blocks_list' :
         content.includes('probe-write') ? 'studio-mcp_flow_edit' :
         content.includes('probe-question') ? 'question' :
-        content.includes('probe-skill') || content.includes('probe-stock-skill') ? 'skill' :
+        skillName ? 'skill' :
         content.includes('probe-custom') ? 'fixture_echo' :
         content.includes('Capture synthetic page evidence') ? 'xbot-copilot_execute_cell' :
         content.includes('probe-explorer') ? 'task' : undefined;
@@ -46,7 +49,7 @@ function modelFixture({ usageFor = () => 9, beforeReply, readPathFor } = {}) {
       })}\n\n`);
       if (useTool) {
         const args = requestedTool === 'read' ? { path: readPath } :
-          requestedTool === 'skill' ? { name: content.includes('probe-stock-skill') ? 'fixture-stock-allowed' : 'fixture-skill' } :
+          requestedTool === 'skill' ? { name: skillName } :
           requestedTool === 'question' ? { questions: [{ header: 'Choice', question: 'Continue?', options: [{ label: 'Yes', description: 'Continue' }] }] } :
           requestedTool === 'task' ? { description: 'Fixture browser task', subagent_type: 'shadowbot-explorer', prompt: 'Capture synthetic page evidence' } : {};
         chunk({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_fixture', type: 'function', function: { name: requestedTool, arguments: JSON.stringify(args) } }] });
@@ -93,21 +96,23 @@ function mcpFixture(name, { beforeInitialize, dropToolResponse = false, extraToo
     hold: () => { held = Promise.withResolvers(); return held.promise; } };
 }
 
-function tempFixture() {
+function tempFixture(runtimeRelease) {
   const root = mkdtempSync(join(tmpdir(), 'shadowbot-pi-bridge-'));
   const home = join(root, 'home');
+  const runtime = runtimeRelease ? join(home, 'harnesses', 'pi', 'releases', runtimeRelease) : home;
   const database = join(home, 'opencode.db');
   const workspace = join(root, 'project');
   const other = join(root, 'other');
   const users = join(root, 'users');
-  for (const dir of [home, workspace, other, users]) mkdirSync(dir, { recursive: true });
+  for (const dir of [runtime, workspace, other, users]) mkdirSync(dir, { recursive: true });
   const db = new DatabaseSync(database);
   db.exec(schema);
   db.close();
-  writeFileSync(join(home, 'schema.sql'), schema);
-  writeFileSync(join(home, 'install.json'), JSON.stringify({ database, users, resources: root }));
+  writeFileSync(join(runtime, 'schema.sql'), schema);
+  writeFileSync(join(home, 'install.json'), JSON.stringify({ database, users, resources: root,
+    runtimeRelease, piVersion: runtimeRelease ? '1.5.2' : undefined }));
   writeFileSync(join(home, 'backend.json'), '{"mode":"pi"}');
-  return { root, home, database, workspace, other };
+  return { root, home, runtime, database, workspace, other };
 }
 
 async function start(fixture, config, extraEnv = {}) {
@@ -171,7 +176,7 @@ async function get(response, expected = 200) {
 }
 
 test('Pi chat, MCP, skills, permission, question, restore and revert', { timeout: 60_000 }, async () => {
-  const fixture = tempFixture();
+  const fixture = tempFixture('a'.repeat(64));
   const model = modelFixture();
   const modelURL = await listen(model.server);
   const studio = mcpFixture('flow_blocks_list');
@@ -179,7 +184,7 @@ test('Pi chat, MCP, skills, permission, question, restore and revert', { timeout
   const custom = mcpFixture('echo');
   const customURL = await listen(custom.server);
   for (const name of ['fixture-stock-allowed', 'fixture-stock-denied']) {
-    const stock = join(fixture.home, 'skills', name);
+    const stock = join(fixture.runtime, 'skills', name);
     mkdirSync(stock, { recursive: true });
     writeFileSync(join(stock, 'SKILL.md'), `---\nname: ${name}\ndescription: Fixture host skill.\n---\nHost skill instructions.\n`);
   }
@@ -232,6 +237,25 @@ test('Pi chat, MCP, skills, permission, question, restore and revert', { timeout
     assert.equal(skill.state.status, 'completed');
     assert.equal(skill.state.metadata.dir, skills);
     assert.ok(skill.state.output.includes(`Base directory for this skill: ${skills}`));
+
+    const autoSkill = join(fixture.home, 'skills', 'fixture-auto-skill');
+    const autoSkillFile = join(autoSkill, 'SKILL.md');
+    mkdirSync(autoSkill, { recursive: true });
+    writeFileSync(autoSkillFile, '---\nname: fixture-auto-skill\ndescription: Automatically enabled fixture.\n---\nDrop-in instructions.\n');
+    assert.deepEqual((await get(api('/skill', { directory: fixture.other }))).map(skill => skill.name).sort(),
+      ['fixture-auto-skill', 'fixture-stock-allowed']);
+    const autoSkills = join(fixture.home, 'skills');
+    syncSkillCommands(fixture.root, autoSkills);
+    const menuCommand = { command: 'skill-fixture-auto-skill', arguments: 'probe-skill fixture-auto-skill' };
+    await get(api(`${path}/command`, { method: 'POST', data: menuCommand }));
+    await events.until(event => event.type === 'session.idle');
+    assert.ok(events.history.every(event => event.type !== 'permission.asked'));
+    assert.match(JSON.stringify(model.requests.at(-1).request.messages), /读取 fixture-auto-skill/);
+    assert.match(JSON.stringify(model.requests.at(-1).request.messages), /Drop-in instructions/);
+    unlinkSync(autoSkillFile);
+    syncSkillCommands(fixture.root, autoSkills);
+    await get(api(`${path}/command`, { method: 'POST', data: menuCommand }), 404);
+    assert.deepEqual((await get(api('/skill'))).map(skill => skill.name).sort(), ['fixture-skill', 'fixture-stock-allowed']);
 
     await prompt('probe-stock-skill');
     const skillAsk = (await events.until(event => event.type === 'permission.asked')).properties;
@@ -467,7 +491,7 @@ test('Explorer closes its overlay after success, failure and cancellation', { ti
   }
 });
 
-test('concurrent prompts share one MCP reload and wait for its completed tool set', { timeout: 30_000 }, async () => {
+test('configuration edits automatically reload MCP once for concurrent prompts and preserve it on invalid edits', { timeout: 30_000 }, async () => {
   const fixture = tempFixture();
   const model = modelFixture();
   const modelURL = await listen(model.server);
@@ -486,7 +510,6 @@ test('concurrent prompts share one MCP reload and wait for its completed tool se
     const settings = join(fixture.workspace, '.pi');
     mkdirSync(settings);
     writeFileSync(join(settings, 'mcp.json'), JSON.stringify({ mcpServers: { fixture: { url: customURL } } }));
-    writeFileSync(join(fixture.home, 'reload.request'), 'reload-fixture');
     const prompt = session => get(api(`/session/${session.id}/message`, { method: 'POST', data: { parts: [{ type: 'text', text: 'Check tools' }] } }));
     const firstReply = prompt(first);
     await connecting.promise;
@@ -499,6 +522,12 @@ test('concurrent prompts share one MCP reload and wait for its completed tool se
     assert.equal(custom.initializations(), 1);
     assert.equal(model.requests.length, 2);
     assert.ok(model.requests.every(({ request }) => request.tools.some(tool => tool.function?.name === 'fixture_echo')));
+    await prompt(first);
+    assert.equal(custom.initializations(), 1, 'unchanged configuration must retain its connection');
+    writeFileSync(join(settings, 'mcp.json'), '{ malformed');
+    await prompt(first);
+    assert.ok(model.requests.at(-1).request.tools.some(tool => tool.function?.name === 'fixture_echo'));
+    assert.equal(custom.initializations(), 1, 'invalid configuration must preserve the working connection');
   } finally {
     proceed.resolve();
     await bridge?.stop();

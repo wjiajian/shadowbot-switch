@@ -1,13 +1,18 @@
+#requires -Version 7.0
 [CmdletBinding()]
 param(
     [string]$ShadowBotDirectory,
-    [ValidateSet('pi', 'opencode-origin')][string]$Harness
+    [ValidateSet('pi', 'opencode-origin')][string]$Harness,
+    [switch]$Update,
+    [switch]$Wait,
+    [ValidateRange(1, 86400)][int]$WaitTimeoutSeconds = 300
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'scripts/activation.ps1')
 . (Join-Path $PSScriptRoot 'scripts/discovery.ps1')
 . (Join-Path $PSScriptRoot 'scripts/toolchain.ps1')
+. (Join-Path $PSScriptRoot 'scripts/processes.ps1')
 
 $project = $PSScriptRoot
 $state = Join-Path $project '.shadowbot-switch'
@@ -20,16 +25,16 @@ $supportedVersion = '6.3.39'
 $pinnedHash = 'DE2E62AB0E3F27A3EA7FF9EF4C4FE7097F0D6DF01118B2E7C5F57726256D6314'
 
 if (!$Harness) {
-    Write-Host '1. pi'
-    Write-Host '2. opencode-origin (restore the bundled OpenCode)'
-    $Harness = switch (Read-Host 'Select a harness') {
+    Write-Host '1. Pi（启用 Pi）'
+    Write-Host '2. 影刀原版（恢复原聊天记录）'
+    $Harness = switch (Read-Host '选择后端') {
         { $_ -in '1', 'pi' } { 'pi'; break }
         { $_ -in '2', 'opencode-origin' } { 'opencode-origin'; break }
         default { throw 'Select pi or opencode-origin.' }
     }
 }
 if (!$ShadowBotDirectory) { $ShadowBotDirectory = Find-ShadowBotDirectory $manifest }
-if (!$ShadowBotDirectory) { $ShadowBotDirectory = Read-Host 'ShadowBot installation directory' }
+if (!$ShadowBotDirectory -and ![Console]::IsInputRedirected) { $ShadowBotDirectory = Read-Host '影刀安装目录（包含 ShadowBot.exe）' }
 if (!$ShadowBotDirectory) { throw 'A ShadowBot installation directory is required.' }
 
 $shadowBot = (Resolve-Path -LiteralPath $ShadowBotDirectory).Path
@@ -43,11 +48,7 @@ $hostSkills = Join-Path $local 'ShadowBot/opencode/runtime/shared/skills'
 $users = Join-Path $local 'ShadowBot/users'
 
 function Assert-HostStopped {
-    $browserBridge = Join-Path $local 'ShadowBot/support_X64/Chrome/ShadowBot.ChromeBridge.exe'
-    $running = Get-Process -Name 'ShadowBot*', 'opencode' -ErrorAction SilentlyContinue | Where-Object {
-        $_.ProcessName -ne 'shadowbot-pi' -and ($_.ProcessName -ne 'ShadowBot.ChromeBridge' -or $_.Path -ne $browserBridge)
-    }
-    if ($running) { throw 'Exit ShadowBot and OpenCode before switching harnesses.' }
+    Assert-SwitchProcessesStopped
 }
 
 function Read-Installation($StateDirectory) {
@@ -70,52 +71,14 @@ function Remove-ProjectStage($Path) {
     Remove-Item -LiteralPath $target -Recurse -Force
 }
 
-function Install-PiHarness($Toolchain) {
-    $path = Join-Path $state 'harnesses/pi'
-    $package = 'node_modules/@earendil-works/pi-coding-agent/package.json'
-    if (Test-Path -LiteralPath (Join-Path $path $package)) {
-        return (Get-Content -LiteralPath (Join-Path $path $package) -Raw | ConvertFrom-Json).version
-    }
-    $lock = Join-Path $path 'package-lock.json'
-    if (Test-Path -LiteralPath $lock) {
-        Invoke-ProjectNpm $Toolchain $path @('ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund') | Out-Host
-        return (Get-Content -LiteralPath (Join-Path $path $package) -Raw | ConvertFrom-Json).version
-    }
-
-    $stage = "$path.$PID.tmp"
-    New-Item -ItemType Directory -Path $stage -Force | Out-Null
-    try {
-        $published = Invoke-ProjectNpm $Toolchain $stage @('view', '@earendil-works/pi-coding-agent@latest', 'version', 'dependencies', '--json') |
-            Out-String | ConvertFrom-Json
-        if (!$published.version -or !$published.dependencies.'@earendil-works/pi-ai' -or !$published.dependencies.'@earendil-works/pi-mcp') {
-            throw 'The published Pi harness has an unexpected dependency manifest.'
-        }
-        Write-AtomicJson (Join-Path $stage 'package.json') @{ private = $true; dependencies = @{
-            '@earendil-works/pi-coding-agent' = $published.version
-            '@earendil-works/pi-ai' = $published.dependencies.'@earendil-works/pi-ai'
-            '@earendil-works/pi-mcp' = $published.dependencies.'@earendil-works/pi-mcp'
-            'yaml' = '2.9.0'
-        } }
-        Invoke-ProjectNpm $Toolchain $stage @('install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund') | Out-Host
-        $installed = (Get-Content -LiteralPath (Join-Path $stage $package) -Raw | ConvertFrom-Json).version
-        if ($installed -ne $published.version) { throw 'Installed Pi version does not match the registry.' }
-        [IO.Directory]::Move($stage, $path)
-        Write-Host "Installed Pi $installed in $path"
-        return $installed
-    } finally {
-        Remove-ProjectStage $stage
-    }
-}
-
 function New-RuntimeRelease($Toolchain, $PiVersion) {
     $skillSources = Join-Path $project 'skills'
     $inputs = @((Get-ChildItem -File -Recurse -LiteralPath @(
         (Join-Path $project 'launcher'), (Join-Path $project 'src'), $skillSources
     )).FullName)
-    $inputs += @('package.json', 'package-lock.json', 'go.mod', 'go.sum', 'tsconfig.json', 'contract/schema.sql', 'scripts/toolchain.ps1',
-        '.shadowbot-switch/harnesses/pi/package-lock.json' | ForEach-Object { Join-Path $project $_ })
+    $inputs += @('package.json', 'package-lock.json', 'go.mod', 'go.sum', 'tsconfig.json', 'contract/schema.sql', 'scripts/toolchain.ps1', 'install.ps1' | ForEach-Object { Join-Path $project $_ })
     $fingerprint = @($Toolchain.nodeHash, $PiVersion) + @(foreach ($path in ($inputs | Sort-Object)) {
-        "$path $((Get-FileHash -LiteralPath $path).Hash)"
+        "$([IO.Path]::GetRelativePath($project, $path)) $((Get-FileHash -LiteralPath $path).Hash)"
     })
     $id = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($fingerprint -join "`n")))).ToLowerInvariant()
     $release = Get-ReleasePath $state $id $PiVersion
@@ -128,7 +91,8 @@ function New-RuntimeRelease($Toolchain, $PiVersion) {
             Copy-Item -LiteralPath (Join-Path $project 'dist/opencode.exe') -Destination (Join-Path $stage 'launcher.exe')
             Copy-Item -LiteralPath $Toolchain.node -Destination (Join-Path $stage 'node.exe')
             Copy-Item -LiteralPath (Join-Path $project 'contract/schema.sql') -Destination $stage
-            Write-AtomicJson (Join-Path $stage 'package.json') @{ type = 'module' }
+            Copy-Item -LiteralPath (Join-Path $project 'package.json'), (Join-Path $project 'package-lock.json') -Destination $stage
+            Invoke-ProjectNpm $Toolchain $stage @('ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund') | Out-Host
             Get-ChildItem -LiteralPath (Join-Path $project 'dist/service') -File -Filter '*.js' | Copy-Item -Destination $service
             Get-ChildItem -LiteralPath $skillSources -Directory | Copy-Item -Destination (Join-Path $stage 'skills') -Recurse
             [IO.Directory]::Move($stage, $release)
@@ -189,16 +153,32 @@ if ((Get-Item -LiteralPath $hostExe).VersionInfo.ProductVersion -ne $supportedVe
 }
 
 Invoke-InstallationLock $agentExe {
-    Assert-HostStopped
+    $projectInstall = Read-Installation $state
+    $restoreOriginalAfterUpdate = $Update -and (Test-Path -LiteralPath $mode) -and (Get-Content -LiteralPath $mode -Raw | ConvertFrom-Json).mode -ne 'pi'
+    # Preparation only writes a new immutable release; the active process keeps its own dependencies.
+    if ($Harness -eq 'pi') {
+        if ($projectInstall -and !$Update) {
+            $release = $projectInstall
+            $piVersion = $release.piVersion
+            Write-Host "复用已安装的 Pi $piVersion。运行 switch.ps1 update 应用当前源码。"
+        } else {
+            Write-Host '正在准备源码运行时，下载和编译期间可以继续使用影刀…'
+            $toolchain = Initialize-Toolchain $project
+            $piVersion = (Get-Content -LiteralPath (Join-Path $project 'package.json') -Raw | ConvertFrom-Json).dependencies.'@earendil-works/pi-coding-agent'
+            $release = New-RuntimeRelease $toolchain $piVersion
+        }
+    }
+    Wait-SwitchProcesses -Wait:$Wait -TimeoutSeconds $WaitTimeoutSeconds
     Complete-Activation $state $agentExe $pinnedHash ${function:Assert-HostStopped}
     $projectInstall = Read-Installation $state
+    if ($Harness -eq 'pi' -and !$Update -and $projectInstall) { $release = $projectInstall; $piVersion = $release.piVersion }
     $activeHash = (Get-FileHash -LiteralPath $agentExe).Hash
     $activeHome = $null
     $activeInstall = $null
     if ($activeHash -ne $pinnedHash) {
         if (!(Test-Path -LiteralPath $locator)) { throw 'Active OpenCode is neither the bundled binary nor a recognized launcher.' }
         $activeHome = (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json).home
-        if ($activeHome -notin $state, $legacy) { throw 'This ShadowBot installation is managed by a different project directory.' }
+        if ($activeHome -notin $state, $legacy) { throw '此影刀安装由其他项目目录管理。如果移动了本项目，请运行 .\switch.ps1 repair。' }
         Complete-Activation $activeHome $agentExe $pinnedHash ${function:Assert-HostStopped}
         $activeHash = (Get-FileHash -LiteralPath $agentExe).Hash
         $activeInstall = Read-Installation $activeHome
@@ -241,9 +221,6 @@ Invoke-InstallationLock $agentExe {
         $recovery = if ($current -eq 'pi') { 'pi' } else { 'original' }
         Invoke-RuntimeControl $activeHome $activeInstall @('backend', $recovery) | Out-Host
     }
-    $toolchain = Initialize-Toolchain $project
-    $piVersion = Install-PiHarness $toolchain
-    $release = New-RuntimeRelease $toolchain $piVersion
     Assert-HostStopped
     if ($migrateLegacy) { Copy-LegacyState }
     if (!(Test-Path -LiteralPath $original)) {
@@ -252,7 +229,7 @@ Invoke-InstallationLock $agentExe {
         Set-CheckedExecutable $agentExe $original $pinnedHash
     }
     if (!(Test-Path -LiteralPath $mode)) { Write-AtomicJson $mode @{ mode = 'original' } }
-    New-Item -ItemType Directory -Force -Path (Join-Path $state 'agent') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $state 'agent'), (Join-Path $state 'skills') | Out-Null
     $runtime = Get-ReleasePath $state $release.runtimeRelease $release.piVersion
     if ((& (Join-Path $runtime 'launcher.exe') --version | Out-String).Trim() -ne '1.18.12') { throw 'Launcher protocol mismatch.' }
     Write-AtomicJson (Join-Path $state 'prepared.json') $release
@@ -261,6 +238,13 @@ Invoke-InstallationLock $agentExe {
     if ($activeHome -ne $state -or $activeHash -ne $release.launcherHash -or $projectInstall.runtimeRelease -ne $release.runtimeRelease) {
         Write-AtomicJson (Join-Path $state 'activation.pending.json') @{ previousHash = $activeHash; release = $release }
         Complete-Activation $state $agentExe $pinnedHash ${function:Assert-HostStopped}
+    }
+    if ($restoreOriginalAfterUpdate) {
+        Invoke-RuntimeControl $state $release @('backend', 'original') | Out-Host
+        Set-CheckedExecutable $original $agentExe $pinnedHash $release.launcherHash ${function:Assert-HostStopped}
+        if (Test-Path -LiteralPath $locator) { Remove-Item -LiteralPath $locator -Force }
+        Write-Output "已更新 Pi $piVersion，当前继续使用影刀原版。"
+        return
     }
     Invoke-RuntimeControl $state $release @('backend', 'pi') | Out-Host
     Write-Output "Active harness: pi ($piVersion)"

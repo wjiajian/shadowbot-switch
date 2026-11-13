@@ -15,6 +15,7 @@ import { McpHub } from './mcp.js';
 import { agentPrompt, ShadowBotContext, skills, userSettings } from './shadowbot.js';
 import { databaseBusy, failure, id, Store } from './store.js';
 import type { Meta } from './store.js';
+import { modelError, UserError, userMessage } from './errors.js';
 
 export type Prompt = NonNullable<SessionPromptAsyncData['body']>;
 type Reply = ReturnType<Store['message']>;
@@ -385,7 +386,7 @@ export class Runs {
       await pi.prompt(text, { images, expandPromptTemplates: false, source: 'rpc' });
       if (projection.error) throw projection.error;
       signal.throwIfAborted();
-      error = projection.last?.error ? new Error('Pi model request failed') : undefined;
+      error = projection.last?.error ? new UserError('message' in projection.last.error.data ? String(projection.last.error.data.message) : '模型请求失败。') : undefined;
     } catch (caught) { error = caught; }
     finally {
       unsubscribe?.();
@@ -396,7 +397,7 @@ export class Runs {
           : active.uncertainTool ? `MCP tool ${active.uncertainTool} did not confirm its outcome. Check the result in ShadowBot before retrying.`
           : active.contextRefreshFailed ? 'Pi compacted the conversation, but could not refresh or save the ShadowBot runtime context. Check the workspace connection before retrying.'
           : databaseBusy(error) ? 'The ShadowBot session database became busy. Refresh session status and review any external tool operations before retrying.'
-          : 'Pi run failed. Inspect the backend or model configuration.';
+          : userMessage(error, 'Pi 请求失败。检查影刀中的模型设置，运行 .\\switch.ps1 doctor 和 mcp status 查看诊断。');
         projection ??= new Projection(this.store, session, user, manager, selection, this.root, active);
         projection.finishError(detail, active.cancelled === true);
         this.store.event(session.id, 'session.error', { sessionID: session.id, error: failure(detail, active.cancelled === true) });
@@ -652,7 +653,7 @@ class Projection {
     info.tokens = { total: native.usage.totalTokens, input: native.usage.input, output: native.usage.output,
       reasoning: native.usage.reasoning ?? 0, cache: { read: native.usage.cacheRead, write: native.usage.cacheWrite } };
     info.finish = native.stopReason === 'toolUse' ? 'tool-calls' : native.stopReason;
-    if (native.stopReason === 'error' || native.stopReason === 'aborted') info.error = failure('Pi model request failed', native.stopReason === 'aborted');
+    if (native.stopReason === 'error' || native.stopReason === 'aborted') info.error = failure(modelError(native.errorMessage), native.stopReason === 'aborted');
     this.store.putPart({ ...this.partRef(), type: 'step-finish', reason: info.finish, cost: info.cost, tokens: info.tokens });
     this.store.putMessage(info);
   }

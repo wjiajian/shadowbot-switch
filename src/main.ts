@@ -20,6 +20,10 @@ import { ShadowBotContext, skills, workspace } from './shadowbot.js';
 import { databaseBusy, id, Store } from './store.js';
 import type { Frame } from './store.js';
 import { verifySchema } from './switch.js';
+import { configurationRevision, publishRuntimeState } from './runtime-state.js';
+import { skillInventory } from './shadowbot.js';
+import { skillCommand, syncSkillCommands } from './skill-commands.js';
+import { UserError, userMessage } from './errors.js';
 
 function flags(args: string[]) {
   if (args[0] !== 'serve') throw new Error('Expected serve');
@@ -66,7 +70,7 @@ function value(input: unknown, field: string) {
 }
 
 type Listener = { res: ServerResponse; global: boolean; root: string };
-type Workspace = { mcp: McpHub; runs: Runs; revision: string; queue: Promise<void> };
+type Workspace = { mcp: McpHub; runs: Runs; revision: string; queue: Promise<void>; configurationError?: string; menuReconnect?: boolean };
 
 class Bridge {
   readonly server;
@@ -77,14 +81,12 @@ class Bridge {
   private context = new ShadowBotContext();
   private agentDir: string;
   private skillSources: SkillSources;
-  private readonly reloadFile;
   private readonly credential = process.env.OPENCODE_SERVER_PASSWORD ?
     createHash('sha256').update(`Basic ${Buffer.from(`${process.env.OPENCODE_SERVER_USERNAME || 'opencode'}:${process.env.OPENCODE_SERVER_PASSWORD}`).toString('base64')}`).digest() : undefined;
 
   constructor(private home: string, private installation: Installation, private cors: Set<string>) {
     this.agentDir = join(home, 'agent');
     this.skillSources = skillSources(home, installation);
-    this.reloadFile = join(home, 'reload.request');
     this.store = new Store(installation.database, join(home, 'backends', 'pi', 'adapter.db'), (event, directory, root) => {
       for (const client of this.listeners) {
         if (root.toLowerCase() === client.root.toLowerCase()) this.frame(client, event, directory);
@@ -109,12 +111,18 @@ class Bridge {
       loading = (async () => {
         const mcp = new McpHub(root);
         try {
-          const revision = this.revision();
+          const revision = configurationRevision(this.home, root);
           for (const [name, config] of Object.entries(this.config.value.mcp ?? {})) {
             if ('type' in config) await mcp.addBuiltin(name, config);
           }
-          await mcp.configureCustom(customMcp(this.agentDir, root));
-          return { mcp, runs: new Runs(this.store, this.config, root, mcp, this.context, this.home, this.installation.resources, this.skillSources), revision, queue: Promise.resolve() };
+          let configurationError: string | undefined;
+          try { await mcp.reloadCustom(customMcp(this.agentDir, root)); }
+          catch (error) { configurationError = userMessage(error); }
+          const local: Workspace = { mcp, runs: new Runs(this.store, this.config, root, mcp, this.context, this.home, this.installation.resources, this.skillSources), revision, queue: Promise.resolve(), configurationError };
+          this.publish(root, local);
+          const heartbeat = setInterval(() => this.publish(root, local), 2000);
+          heartbeat.unref();
+          return local;
         } catch (error) { await mcp.close(); throw error; }
       })();
       this.workspaces.set(key, loading);
@@ -123,12 +131,30 @@ class Bridge {
     catch (error) { this.workspaces.delete(key); throw error; }
   }
 
-  private revision() {
-    try { return readFileSync(this.reloadFile, 'utf8'); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
-      throw error;
+  private publish(root: string, local: Workspace) {
+    try { publishRuntimeState(this.home, { root, active: local.runs.active.size, revision: local.revision,
+      mcp: local.mcp.status(), errors: local.mcp.configurationErrors(), configurationError: local.configurationError, menuReconnect: local.menuReconnect }); }
+    catch { console.error('ShadowBotPi 无法写入运行状态，请检查安装数据目录的权限。'); }
+  }
+
+  private async refresh(root: string, local: Workspace) {
+    if (local.runs.active.size) return;
+    const revision = configurationRevision(this.home, root);
+    const disconnected = Object.values(local.mcp.status()).some(status => status.status === 'failed');
+    if (local.revision !== revision || disconnected || local.configurationError || Object.keys(local.mcp.configurationErrors()).length) {
+      try {
+        await local.mcp.reloadCustom(customMcp(this.agentDir, root));
+        local.revision = revision;
+        local.configurationError = undefined;
+      } catch (error) { local.configurationError = userMessage(error); }
     }
+    try {
+      const global = skillInventory(this.agentDir, undefined, this.skillSources, this.config.value)
+        .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!);
+      const menu = syncSkillCommands(this.installation.resources, global);
+      if (menu.added + menu.updated + menu.removed) local.menuReconnect = true;
+    } catch (error) { local.configurationError = userMessage(error, 'Skill 菜单同步失败。检查影刀 Resources/Copilot/commands 目录权限。'); }
+    this.publish(root, local);
   }
 
   private enqueue<T>(workspace: Workspace, operation: () => T | Promise<T>) {
@@ -151,6 +177,8 @@ class Bridge {
       json(res, { name, data: { message: error.message }, message: error.message }, error.status);
     } else if (databaseBusy(error)) {
       json(res, { name: 'DatabaseBusyError', data: { message: 'The ShadowBot session database is busy. Refresh session status before retrying.' } }, 503);
+    } else if (error instanceof UserError) {
+      json(res, { name: 'ConfigurationError', data: { message: error.message } }, 400);
     } else {
       console.error('ShadowBotPi request failed', error instanceof Error ? error.name : 'UnknownError');
       json(res, { name: 'UnknownError', data: { message: 'ShadowBotPi request failed' } }, 500);
@@ -237,7 +265,13 @@ class Bridge {
         model: modelSelection(role?.model), permission: [...permissionRules(config.permission, role?.permission)],
         prompt: role?.prompt, variant: role?.variant, options: role?.options ?? {}, steps: role?.steps ?? role?.maxSteps };
     }));
-    const commands = this.config.value.command ?? {};
+    const commands = { ...this.config.value.command };
+    if (path === '/command' || action === 'command') {
+      for (const skill of skills(this.agentDir, root, this.skillSources, this.config.value)) {
+        const name = `skill-${skill.name}`;
+        if (!commands[name]) commands[name] = { template: skillCommand(skill.name), description: skill.description, agent: copilot };
+      }
+    }
     if (path === '/command' && method === 'GET') return json(res, Object.entries(commands).map(([name, command]) => ({ ...command, name, hints: [] })));
     if (path === '/skill' && method === 'GET') return json(res, skills(this.agentDir, root, this.skillSources, this.config.value));
 
@@ -339,11 +373,7 @@ class Bridge {
         const input = await body(req);
         const prompt = action === 'command' ? this.expandCommand(input, commands) : input as Prompt;
         const { result } = await this.enqueue(local, async () => {
-          const revision = this.revision();
-          if (!runs.active.size && local.revision !== revision) {
-            await mcp.reloadCustom(customMcp(this.agentDir, root));
-            local.revision = revision;
-          }
+          await this.refresh(root, local);
           // The queue ends at admission. Permission, question and abort requests remain available during the run.
           const current = this.store.get(identifier);
           if (!current) throw new RequestError(404, 'Session not found in this workspace');

@@ -137,3 +137,43 @@ test('the host flow and browser tools use one workspace queue', { timeout: 15_00
     server.close();
   }
 });
+
+test('incremental MCP reload preserves healthy connections, replaces only changed services, and reports failed replacements', { timeout: 15_000 }, async () => {
+  const initializes = new Map();
+  const server = createServer(async (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405).end(); return; }
+    const message = await json(req);
+    if (message.id === undefined) { res.writeHead(202).end(); return; }
+    if (req.url === '/broken') { res.writeHead(401).end('secret credential must not leak'); return; }
+    if (message.method === 'initialize') initializes.set(req.url, (initializes.get(req.url) ?? 0) + 1);
+    const result = message.method === 'initialize' ? { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } }
+      : message.method === 'tools/list' ? { tools: [{ name: 'echo', inputSchema: { type: 'object', properties: {} } }] }
+      : { content: [{ type: 'text', text: req.url }] };
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const hub = new McpHub(process.cwd());
+  try {
+    const entries = new Map([['a', { url: `${url}/a` }], ['b', { url: `${url}/b` }]]);
+    assert.equal((await hub.reloadCustom(entries)).added, 2);
+    assert.equal((await hub.reloadCustom(entries)).unchanged, 2);
+    assert.deepEqual(Object.fromEntries(initializes), { '/a': 1, '/b': 1 });
+    entries.set('b', { url: `${url}/updated` });
+    assert.equal((await hub.reloadCustom(entries)).updated, 1);
+    assert.equal(initializes.get('/a'), 1);
+    entries.set('b', { url: `${url}/broken`, headers: { Authorization: 'private-token' } });
+    const failed = await hub.reloadCustom(entries);
+    assert.match(failed.failed.b, /401/);
+    assert.doesNotMatch(JSON.stringify(failed), /private-token|secret credential/);
+    assert.equal(hub.status().b.status, 'connected');
+    assert.equal((await hub.tools().get('b_echo').definition.execute('test', {})).content[0].text, '/updated');
+    entries.set('b', { url: '${SHADOWBOT_FIXTURE_UNSET_VARIABLE}' });
+    assert.match((await hub.reloadCustom(entries)).failed.b, /SHADOWBOT_FIXTURE_UNSET_VARIABLE/);
+    entries.delete('b');
+    assert.equal((await hub.reloadCustom(entries)).removed, 1);
+    assert.equal(hub.tools().has('b_echo'), false);
+    assert.equal(hub.status().a.status, 'connected');
+  } finally { await hub.close(); server.closeAllConnections(); server.close(); }
+});

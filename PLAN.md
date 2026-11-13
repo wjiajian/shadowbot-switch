@@ -108,8 +108,8 @@ flowchart TD
 
 ### Skills
 
-- [x] 使用独立用户级 agent 目录及项目级 `.pi/skills`，不污染其他 Pi 安装。
-- [x] 同时加载影刀内置 skill 与用户明确启用的自定义 skill。
+- [x] 使用安装级 `.shadowbot-switch/skills` 与应用级 `.pi/skills`，放入即用，旧 `agent/skills` 目录兼容显式启用。
+- [x] 同时加载影刀内置 Skill 与自定义 Skill，提供禁用配置、来源和冲突诊断。
 - [x] 提供流程编辑、运行诊断、网页探索三个工作流 skill，引用现有知识库和工具说明。
 - [x] 保留内置角色限制，为自定义 skill 提供单独启用列表，避免被影刀现有通配拒绝规则全部屏蔽。
 - [x] 保持 skill 与工具权限分离，skill 不授予工具权限，工具调用仍经过权限层。
@@ -130,7 +130,7 @@ flowchart TD
 - [x] 迁移 Explorer 浮层的启动、结束及异常清理行为。
 - [x] 实现 Copilot 主会话和 Explorer 子会话，各自保留工具白名单。
 - [x] 兼容宿主插件健康检查，仅在对应功能真实初始化成功后报告就绪。
-- [x] 提供 `doctor`、`skills list`、`mcp list`、`reload`。使用 `install.ps1` 选择 `pi` 或 `opencode-origin`。
+- [x] 提供根目录 `switch.ps1` 统一入口及 `doctor`、Skills/MCP 配置管理、`reload`、状态和迁移命令；保留旧安装命令。
 - [x] 在安全边界应用配置重载，不直接修改影刀自动生成的配置。
 
 ## 5 实施顺序与验收

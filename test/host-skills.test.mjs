@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { parse } from 'yaml';
 import { skillSources } from '../dist/service/host-skills.js';
 import { skills } from '../dist/service/shadowbot.js';
+import { syncSkillCommands } from '../dist/service/skill-commands.js';
 
 test('official skills follow the live runtime and refresh archive contents without reinstalling', {
   skip: process.platform !== 'win32',
@@ -47,6 +49,33 @@ test('official skills follow the live runtime and refresh archive contents witho
     assert.notEqual(second['fixture-sdk'].filePath, first['fixture-sdk'].filePath);
     assert.equal(readFileSync(join(second['fixture-sdk'].baseDir, 'references', 'api.md'), 'utf8'), 'second');
     assert.equal(readFileSync(join(first['fixture-sdk'].baseDir, 'references', 'api.md'), 'utf8'), 'first');
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('skill menu sync updates its own command and preserves existing command files', () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'shadowbot-skill-commands-'));
+  const resources = join(fixture, 'Resources');
+  const commands = join(resources, 'Copilot', 'commands');
+  const skills = join(fixture, 'skills');
+  const generated = join(commands, 'skill-fixture.md');
+  try {
+    mkdirSync(commands, { recursive: true });
+    writeFileSync(join(commands, 'spec.md'), 'official preset');
+    writeFileSync(join(commands, 'skill-existing.md'), 'user command');
+    for (const name of ['fixture', 'existing']) {
+      mkdirSync(join(skills, name), { recursive: true });
+      writeFileSync(join(skills, name, 'SKILL.md'), `---\nname: ${name}\ndescription: >-\n  A description\n  on two lines.\n---\nSkill content.`);
+    }
+    syncSkillCommands(resources, skills);
+    assert.equal(parse(readFileSync(generated, 'utf8').split('---')[1]).description, 'A description on two lines.');
+    assert.equal(readFileSync(join(commands, 'skill-existing.md'), 'utf8'), 'user command');
+    writeFileSync(join(skills, 'fixture', 'SKILL.md'), '---\nname: fixture\ndescription: Updated description.\n---\nSkill content.');
+    syncSkillCommands(resources, skills);
+    assert.equal(parse(readFileSync(generated, 'utf8').split('---')[1]).description, 'Updated description.');
+    syncSkillCommands(resources);
+    assert.deepEqual(readdirSync(commands).sort(), ['skill-existing.md', 'spec.md']);
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
