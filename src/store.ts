@@ -11,7 +11,7 @@ type Row = { id: string; data: string };
 type MessageRow = Row & { time_created: number; session_id: string };
 type PartRow = Row & { message_id: string; session_id: string };
 export type Meta = {
-  id: string; root: string; session: string; pi_file: string | null; pi_leaf: string | null;
+  id: string; root: string; session: string; native_file: string | null; native_leaf: string | null;
   running: number; owner_pid: number; sequence: number; revert_leaf: string | null; cutoff: string | null;
 };
 
@@ -57,13 +57,13 @@ export class Store {
       PRAGMA main.synchronous=FULL;
       PRAGMA adapter.synchronous=FULL;
       CREATE TABLE IF NOT EXISTS adapter.session (
-        id TEXT PRIMARY KEY, root TEXT NOT NULL, session TEXT NOT NULL, pi_file TEXT, pi_leaf TEXT,
+        id TEXT PRIMARY KEY, root TEXT NOT NULL, session TEXT NOT NULL, native_file TEXT, native_leaf TEXT,
         running INTEGER NOT NULL DEFAULT 0, owner_pid INTEGER NOT NULL DEFAULT 0,
         sequence INTEGER NOT NULL DEFAULT 0, revert_leaf TEXT, cutoff TEXT
       );
       CREATE TABLE IF NOT EXISTS adapter.message_map (
         session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
-        message_id TEXT NOT NULL, pi_entry TEXT NOT NULL, PRIMARY KEY (session_id, message_id)
+        message_id TEXT NOT NULL, native_entry TEXT NOT NULL, PRIMARY KEY (session_id, message_id)
       );
       CREATE TABLE IF NOT EXISTS adapter.removed_message (
         session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
@@ -74,12 +74,20 @@ export class Store {
         call_id TEXT NOT NULL, part_id TEXT NOT NULL, PRIMARY KEY (session_id, call_id)
       );
     `);
+    // Preserve existing Pi transcripts while giving the shared projection neutral columns.
+    this.transaction(() => {
+      for (const [table, previous, next] of [['session', 'pi_file', 'native_file'], ['session', 'pi_leaf', 'native_leaf'], ['message_map', 'pi_entry', 'native_entry']]) {
+        if (this.db.prepare(`PRAGMA adapter.table_info(${table})`).all().some(column => column.name === previous)) {
+          this.db.exec(`ALTER TABLE adapter.${table} RENAME COLUMN ${previous} TO ${next}`);
+        }
+      }
+    });
     if (!this.db.prepare('PRAGMA adapter.table_info(session)').all().some(column => column.name === 'owner_pid')) {
       this.db.exec('ALTER TABLE adapter.session ADD COLUMN owner_pid INTEGER NOT NULL DEFAULT 0');
     }
     if (this.db.prepare('SELECT 1 FROM main.session s LEFT JOIN adapter.session a ON s.id=a.id WHERE a.id IS NULL LIMIT 1').get()) {
       this.db.close();
-      throw new Error('Active history contains sessions that do not belong to Pi');
+      throw new Error('Active history contains sessions that do not belong to this harness');
     }
   }
 
@@ -197,12 +205,12 @@ export class Store {
 
   mapMessage(sessionID: string, messageID: string, entryID: string) {
     this.db.prepare(`INSERT INTO adapter.message_map VALUES (?,?,?) ON CONFLICT (session_id,message_id)
-      DO UPDATE SET pi_entry=excluded.pi_entry`).run(sessionID, messageID, entryID);
+      DO UPDATE SET native_entry=excluded.native_entry`).run(sessionID, messageID, entryID);
   }
 
   mapped(sessionID: string, messageID: string) {
-    const row = this.db.prepare('SELECT pi_entry FROM adapter.message_map WHERE session_id=? AND message_id=?').get(sessionID, messageID);
-    return row ? String(row.pi_entry) : undefined;
+    const row = this.db.prepare('SELECT native_entry FROM adapter.message_map WHERE session_id=? AND message_id=?').get(sessionID, messageID);
+    return row ? String(row.native_entry) : undefined;
   }
 
   mapTool(sessionID: string, callID: string, partID: string) {
@@ -219,12 +227,12 @@ export class Store {
   }
 
   native(sessionID: string, file: string | undefined, leaf: string | null) {
-    this.db.prepare('UPDATE adapter.session SET pi_file=?, pi_leaf=? WHERE id=?').run(file ?? null, leaf, sessionID);
+    this.db.prepare('UPDATE adapter.session SET native_file=?, native_leaf=? WHERE id=?').run(file ?? null, leaf, sessionID);
   }
 
   setRevert(session: Session, leaf: string | null, previous: string | null) {
     this.transaction(() => {
-      this.db.prepare('UPDATE adapter.session SET pi_leaf=?, cutoff=?, revert_leaf=? WHERE id=?')
+      this.db.prepare('UPDATE adapter.session SET native_leaf=?, cutoff=?, revert_leaf=? WHERE id=?')
         .run(leaf, session.revert?.messageID ?? null, previous, session.id);
       this.writeSession(session);
     });
@@ -239,7 +247,7 @@ export class Store {
   commitRevert(sessionID: string) {
     const meta = this.meta(sessionID);
     if (!meta?.cutoff) return;
-    this.removeMessages(this.get(sessionID)!, meta.cutoff, meta.pi_leaf);
+    this.removeMessages(this.get(sessionID)!, meta.cutoff, meta.native_leaf);
   }
 
   removeMessages(session: Session, cutoff: string, leaf: string | null) {
@@ -251,7 +259,7 @@ export class Store {
         (SELECT rowid FROM main.message WHERE session_id=? AND id=?) RETURNING id`).all(sessionID, sessionID, cutoff) as { id: string }[];
       const remember = this.db.prepare('INSERT OR IGNORE INTO adapter.removed_message VALUES (?,?)');
       for (const { id } of rows) remember.run(sessionID, id);
-      this.db.prepare('UPDATE adapter.session SET pi_leaf=?, cutoff=NULL, revert_leaf=NULL WHERE id=?').run(leaf, sessionID);
+      this.db.prepare('UPDATE adapter.session SET native_leaf=?, cutoff=NULL, revert_leaf=NULL WHERE id=?').run(leaf, sessionID);
       this.writeSession(updated);
       return rows;
     });

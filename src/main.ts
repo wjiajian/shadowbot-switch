@@ -5,17 +5,19 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
 import { join, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { VERSION as piVersion } from '@earendil-works/pi-coding-agent';
+import { HarnessRegistry, loadAdapter } from './harnesses.js';
+import type { Harness } from './harnesses.js';
+import { NoMcp } from './adapter.js';
+import type { HarnessAdapter, HarnessRuns, McpConnection, Prompt } from './adapter.js';
 import type { Agent, Auth, McpLocalConfig, McpRemoteConfig, Session, SessionCreateData } from '@opencode-ai/sdk/v2';
 import { commandTemplate, copilot, explorer, HostConfig, modelSelection, object } from './config.js';
 import { skillSources } from './host-skills.js';
 import type { SkillSources } from './host-skills.js';
-import { installationHome, mode, protocolVersion, readJson, runtimeDirectory } from './installation.js';
+import { installationHome, mode, protocolVersion, readJson, installedVersion, runtimeDirectory } from './installation.js';
 import type { Installation } from './installation.js';
 import { permissionRules } from './interactions.js';
-import { customMcp, McpHub } from './mcp.js';
-import { RequestError, Runs } from './runner.js';
-import type { Prompt } from './runner.js';
+import { customMcp } from './mcp-config.js';
+import { RequestError } from './errors.js';
 import { ShadowBotContext, skills, workspace } from './shadowbot.js';
 import { databaseBusy, id, Store } from './store.js';
 import type { Frame } from './store.js';
@@ -70,11 +72,11 @@ function value(input: unknown, field: string) {
 }
 
 type Listener = { res: ServerResponse; global: boolean; root: string };
-type Workspace = { mcp: McpHub; runs: Runs; revision: string; queue: Promise<void>; configurationError?: string; menuReconnect?: boolean };
+type Workspace = { mcp: McpConnection; runs: HarnessRuns; revision: string; queue: Promise<void>; configurationError?: string; menuReconnect?: boolean };
 
 class Bridge {
   readonly server;
-  private config = new HostConfig();
+  private config: HostConfig;
   private listeners = new Set<Listener>();
   private workspaces = new Map<string, Promise<Workspace>>();
   private store: Store;
@@ -84,10 +86,11 @@ class Bridge {
   private readonly credential = process.env.OPENCODE_SERVER_PASSWORD ?
     createHash('sha256').update(`Basic ${Buffer.from(`${process.env.OPENCODE_SERVER_USERNAME || 'opencode'}:${process.env.OPENCODE_SERVER_PASSWORD}`).toString('base64')}`).digest() : undefined;
 
-  constructor(private home: string, private installation: Installation, private cors: Set<string>) {
+  constructor(private home: string, private installation: Installation, private cors: Set<string>, private harness: Harness, private adapter: HarnessAdapter) {
+    this.config = adapter.createConfig();
     this.agentDir = join(home, 'agent');
-    this.skillSources = skillSources(home, installation);
-    this.store = new Store(installation.database, join(home, 'backends', 'pi', 'adapter.db'), (event, directory, root) => {
+    this.skillSources = skillSources(home, installation, harness.id);
+    this.store = new Store(installation.database, join(home, 'backends', harness.id, 'adapter.db'), (event, directory, root) => {
       for (const client of this.listeners) {
         if (root.toLowerCase() === client.root.toLowerCase()) this.frame(client, event, directory);
       }
@@ -109,16 +112,16 @@ class Bridge {
     let loading = this.workspaces.get(key);
     if (!loading) {
       loading = (async () => {
-        const mcp = new McpHub(root);
+        const mcp = this.harness.capabilities.mcp && this.adapter.mcp ? this.adapter.mcp.create(root) : new NoMcp();
         try {
           const revision = configurationRevision(this.home, root);
-          for (const [name, config] of Object.entries(this.config.value.mcp ?? {})) {
+          for (const [name, config] of Object.entries(this.harness.capabilities.mcp ? this.config.value.mcp ?? {} : {})) {
             if ('type' in config) await mcp.addBuiltin(name, config);
           }
           let configurationError: string | undefined;
-          try { await mcp.reloadCustom(customMcp(this.agentDir, root)); }
+          try { if (this.harness.capabilities.mcp) await mcp.reloadCustom(customMcp(this.agentDir, root)); }
           catch (error) { configurationError = userMessage(error); }
-          const local: Workspace = { mcp, runs: new Runs(this.store, this.config, root, mcp, this.context, this.home, this.installation.resources, this.skillSources), revision, queue: Promise.resolve(), configurationError };
+          const local: Workspace = { mcp, runs: this.adapter.createRuns({ store: this.store, config: this.config, root, mcp, context: this.context, home: this.home, resources: this.installation.resources, skillSources: this.skillSources }), revision, queue: Promise.resolve(), configurationError };
           this.publish(root, local);
           const heartbeat = setInterval(() => this.publish(root, local), 2000);
           heartbeat.unref();
@@ -132,9 +135,9 @@ class Bridge {
   }
 
   private publish(root: string, local: Workspace) {
-    try { publishRuntimeState(this.home, { root, active: local.runs.active.size, revision: local.revision,
+    try { publishRuntimeState(this.home, { harness: this.harness.id, root, active: local.runs.active.size, revision: local.revision,
       mcp: local.mcp.status(), errors: local.mcp.configurationErrors(), configurationError: local.configurationError, menuReconnect: local.menuReconnect }); }
-    catch { console.error('ShadowBotPi 无法写入运行状态，请检查安装数据目录的权限。'); }
+    catch { console.error('ShadowBot Switch 无法写入运行状态，请检查安装数据目录的权限。'); }
   }
 
   private async refresh(root: string, local: Workspace) {
@@ -143,14 +146,14 @@ class Bridge {
     const disconnected = Object.values(local.mcp.status()).some(status => status.status === 'failed');
     if (local.revision !== revision || disconnected || local.configurationError || Object.keys(local.mcp.configurationErrors()).length) {
       try {
-        await local.mcp.reloadCustom(customMcp(this.agentDir, root));
+        if (this.harness.capabilities.mcp) await local.mcp.reloadCustom(customMcp(this.agentDir, root));
         local.revision = revision;
         local.configurationError = undefined;
       } catch (error) { local.configurationError = userMessage(error); }
     }
     try {
-      const global = skillInventory(this.agentDir, undefined, this.skillSources, this.config.value)
-        .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!);
+      const global = this.harness.capabilities.skills ? skillInventory(this.agentDir, undefined, this.skillSources, this.config.value)
+        .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined;
       const menu = syncSkillCommands(this.installation.resources, global);
       if (menu.added + menu.updated + menu.removed) local.menuReconnect = true;
     } catch (error) { local.configurationError = userMessage(error, 'Skill 菜单同步失败。检查影刀 Resources/Copilot/commands 目录权限。'); }
@@ -180,8 +183,8 @@ class Bridge {
     } else if (error instanceof UserError) {
       json(res, { name: 'ConfigurationError', data: { message: error.message } }, 400);
     } else {
-      console.error('ShadowBotPi request failed', error instanceof Error ? error.name : 'UnknownError');
-      json(res, { name: 'UnknownError', data: { message: 'ShadowBotPi request failed' } }, 500);
+      console.error('ShadowBot Switch request failed', error instanceof Error ? error.name : 'UnknownError');
+      json(res, { name: 'UnknownError', data: { message: 'ShadowBot Switch request failed' } }, 500);
     }
   }
 
@@ -266,18 +269,19 @@ class Bridge {
         prompt: role?.prompt, variant: role?.variant, options: role?.options ?? {}, steps: role?.steps ?? role?.maxSteps };
     }));
     const commands = { ...this.config.value.command };
-    if (path === '/command' || action === 'command') {
+    if (this.harness.capabilities.skills && (path === '/command' || action === 'command')) {
       for (const skill of skills(this.agentDir, root, this.skillSources, this.config.value)) {
         const name = `skill-${skill.name}`;
         if (!commands[name]) commands[name] = { template: skillCommand(skill.name), description: skill.description, agent: copilot };
       }
     }
     if (path === '/command' && method === 'GET') return json(res, Object.entries(commands).map(([name, command]) => ({ ...command, name, hints: [] })));
-    if (path === '/skill' && method === 'GET') return json(res, skills(this.agentDir, root, this.skillSources, this.config.value));
+    if (path === '/skill' && method === 'GET') return json(res, this.harness.capabilities.skills ? skills(this.agentDir, root, this.skillSources, this.config.value) : []);
 
     const local = await this.local(root);
     const { mcp, runs } = local;
     if (resource === 'mcp') {
+      if (!this.harness.capabilities.mcp) throw new RequestError(501, 'This harness does not support MCP');
       if (path === '/mcp' && method === 'GET') return json(res, mcp.status());
       if (path === '/mcp' && method === 'POST') {
         const input = await body(req);
@@ -380,14 +384,14 @@ class Bridge {
           return { result: runs.start(current, prompt) };
         });
         if (action === 'prompt_async') {
-          void result.catch(error => console.error('ShadowBotPi run persistence failed', error instanceof Error ? error.name : 'UnknownError'));
+          void result.catch(error => console.error('ShadowBot Switch run persistence failed', error instanceof Error ? error.name : 'UnknownError'));
           res.writeHead(204).end();
           return;
         }
         return json(res, await result);
       }
     }
-    throw new RequestError(501, 'This OpenCode operation is unavailable in Pi mode');
+    throw new RequestError(501, 'This OpenCode operation is unavailable in the active harness');
   }
 
   private expandCommand(input: Record<string, unknown>, commands: NonNullable<HostConfig['value']['command']>): Prompt {
@@ -419,19 +423,23 @@ async function main() {
   const options = flags(process.argv.slice(2));
   const home = installationHome();
   const installation = readJson<Installation>(join(home, 'install.json'));
-  if (mode(home) !== 'pi' || existsSync(join(home, 'switch.pending.json')) || existsSync(join(home, 'activation.pending.json'))) throw new Error('Pi backend is not active');
-  verifySchema(installation.database, readFileSync(join(runtimeDirectory(home, installation), 'schema.sql'), 'utf8'));
-  const bridge = new Bridge(home, installation, options.cors);
+  const registered = new HarnessRegistry().get(mode(home));
+  const harness = { ...registered, capabilities: installation.harnesses?.[registered.id]?.capabilities ?? registered.capabilities };
+  if (harness.kind !== 'managed' || existsSync(join(home, 'switch.pending.json')) || existsSync(join(home, 'activation.pending.json'))) throw new Error('Harness is not ready');
+  verifySchema(installation.database, readFileSync(join(runtimeDirectory(home, installation, harness.id), 'schema.sql'), 'utf8'));
+  const adapter = await loadAdapter(home, installation, harness);
+  await adapter.verify(installedVersion(installation, harness.id));
+  const bridge = new Bridge(home, installation, options.cors, harness, adapter);
   await bridge.ready();
   bridge.server.listen(options.port, options.hostname, () => {
     const address = bridge.server.address() as AddressInfo;
     const host = isIP(address.address) === 6 ? `[${address.address}]` : address.address;
     console.log(`opencode server listening on http://${host}:${address.port}`);
-    console.error(`ShadowBotPi backend Pi ${piVersion}, OpenCode protocol ${protocolVersion}`);
+    console.error(`ShadowBot Switch backend ${harness.name}, OpenCode protocol ${protocolVersion}`);
   });
 }
 
 void main().catch(error => {
-  console.error(`ShadowBotPi startup failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+  console.error(`ShadowBot Switch startup failed: ${error instanceof Error ? error.message : 'unknown error'}`);
   process.exitCode = 1;
 });

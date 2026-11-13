@@ -8,6 +8,27 @@ import { parse } from 'yaml';
 import { skillSources } from '../dist/service/host-skills.js';
 import { skills } from '../dist/service/shadowbot.js';
 import { syncSkillCommands } from '../dist/service/skill-commands.js';
+import { loadSkillsFromDir } from '../dist/service/skills.js';
+
+test('shared skill discovery retains ignore rules, root markdown and non-fatal naming diagnostics', () => {
+  const root = mkdtempSync(join(tmpdir(), 'shadowbot-skill-discovery-'));
+  const put = (folder, name) => {
+    mkdirSync(join(root, folder), { recursive: true });
+    writeFileSync(join(root, folder, 'SKILL.md'), `---\nname: ${name}\ndescription: Fixture skill.\n---\nInstructions`);
+  };
+  try {
+    put('ignored', 'ignored'); put('node_modules/dependency', 'dependency'); put('warning', 'Mixed_Case');
+    put('parent/hidden', 'hidden'); put('parent/visible', 'visible');
+    writeFileSync(join(root, '.gitignore'), 'ignored/\n');
+    writeFileSync(join(root, 'parent', '.ignore'), 'hidden/\n');
+    writeFileSync(join(root, 'flat.md'), '---\nname: flat\ndescription: Root markdown.\n---\nInstructions');
+    writeFileSync(join(root, 'notes.md'), 'Ordinary notes without skill metadata.');
+    const loaded = loadSkillsFromDir({ dir: root, source: 'custom' });
+    assert.deepEqual(loaded.skills.map(s => s.name).sort(), ['Mixed_Case', 'flat', 'visible']);
+    assert.ok(loaded.diagnostics.some(d => d.type === 'warning' && d.path.includes('warning')));
+    assert.equal(loaded.diagnostics.some(d => d.path.endsWith('notes.md')), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test('official skills follow the live runtime and refresh archive contents without reinstalling', {
   skip: process.platform !== 'win32',

@@ -23,9 +23,11 @@ const protocolVersion = "1.18.12"
 const originalHash = "de2e62ab0e3f27a3ea7ff9ef4c4fe7097f0d6df01118b2e7c5f57726256d6314"
 
 type installation struct {
-	OriginalHash   string `json:"originalHash"`
-	RuntimeRelease string `json:"runtimeRelease"`
-	PiVersion      string `json:"piVersion"`
+	OriginalHash   string                    `json:"originalHash"`
+	RuntimeRelease string                    `json:"runtimeRelease"`
+	PiVersion      string                    `json:"piVersion"` // Legacy manifests only.
+	Runtime        *runtimePointer           `json:"runtime"`
+	Harnesses      map[string]harnessRelease `json:"harnesses"`
 }
 
 var releaseID = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -56,7 +58,7 @@ func hashFile(path string) (string, error) {
 func main() {
 	code, err := run(os.Args[1:])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ShadowBotPi:", err)
+		fmt.Fprintln(os.Stderr, "ShadowBot Switch:", err)
 	}
 	os.Exit(code)
 }
@@ -102,22 +104,16 @@ func runAt(home string, args []string) (int, error) {
 	if err := readJSON(filepath.Join(home, "install.json"), &install); err != nil {
 		return 1, fmt.Errorf("read installation manifest: %w", err)
 	}
-	runtime := home
-	if install.RuntimeRelease != "" {
-		if !releaseID.MatchString(install.RuntimeRelease) {
-			return 1, errors.New("invalid installation release ID")
-		}
-		if install.PiVersion != "" {
-			runtime = filepath.Join(home, "harnesses", "pi")
-		}
-		runtime = filepath.Join(runtime, "releases", install.RuntimeRelease)
+	runtime, err := controlRuntime(home, install)
+	if err != nil {
+		return 1, err
 	}
 	if _, err := os.Stat(filepath.Join(home, "activation.pending.json")); !errors.Is(err, os.ErrNotExist) &&
 		(len(args) == 0 || (args[0] != "doctor" && args[0] != "status" && args[0] != "help")) {
 		return 1, errors.New("installation activation requires recovery before starting the agent")
 	}
-	env := append(os.Environ(), "SHADOWBOT_PI_HOME="+home, "PI_CODING_AGENT_DIR="+filepath.Join(home, "agent"))
-	if len(args) > 0 && (args[0] == "doctor" || args[0] == "status" || args[0] == "help" || args[0] == "config" || args[0] == "apps" || args[0] == "skills" || args[0] == "mcp" || args[0] == "reload") {
+	env := append(os.Environ(), "SHADOWBOT_SWITCH_HOME="+home)
+	if len(args) > 0 && (args[0] == "doctor" || args[0] == "status" || args[0] == "help" || args[0] == "config" || args[0] == "apps" || args[0] == "skills" || args[0] == "mcp" || args[0] == "reload" || args[0] == "harnesses") {
 		cmd := exec.Command(filepath.Join(runtime, "node.exe"), append([]string{filepath.Join(runtime, "service", "control.js")}, args...)...)
 		cmd.Env = env
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
@@ -137,14 +133,39 @@ func runAt(home string, args []string) (int, error) {
 	if args[0] != "serve" {
 		return 2, errors.New("unsupported OpenCode command")
 	}
-	if state.Mode == "pi" {
-		cmd := exec.Command(filepath.Join(runtime, "node.exe"), append([]string{filepath.Join(runtime, "service", "main.js")}, args...)...)
-		cmd.Env = env
+	if state.Mode != "original" && state.Mode != "observe" {
+		record, ok := install.Harnesses[state.Mode]
+		if !ok {
+			record, ok = legacyHarness(install, state.Mode)
+		}
+		if !ok {
+			return 1, errors.New("selected harness is not installed")
+		}
+		if record.Legacy && install.Runtime == nil {
+			runtime, err = legacyRuntime(home, install)
+		} else {
+			runtime, err = releaseDirectory(home, runtimePointer{Harness: state.Mode, Release: record.Release})
+		}
+		if err != nil {
+			return 1, err
+		}
+		if !safeRelative(record.Launch.Executable) {
+			return 1, errors.New("invalid harness executable")
+		}
+		launchArgs := make([]string, 0, len(record.Launch.Args)+len(args))
+		for _, arg := range record.Launch.Args {
+			launchArgs = append(launchArgs, strings.ReplaceAll(arg, "{runtime}", runtime))
+		}
+		cmd := exec.Command(filepath.Join(runtime, record.Launch.Executable), append(launchArgs, args...)...)
+		cmd.Env = append(env, "SHADOWBOT_HARNESS="+state.Mode)
+		if record.Legacy {
+			cmd.Env = legacyEnvironment(cmd.Env, home)
+		}
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 		return supervise(cmd)
 	}
-	if state.Mode != "original" && (state.Mode != "observe" || install.PiVersion != "") {
-		return 1, errors.New("unknown backend mode")
+	if state.Mode == "observe" && (install.Runtime != nil || install.PiVersion != "") {
+		return 1, errors.New("observe is only available for legacy installations")
 	}
 	backup := filepath.Join(home, "original", "opencode.exe")
 	hash, err := hashFile(backup)

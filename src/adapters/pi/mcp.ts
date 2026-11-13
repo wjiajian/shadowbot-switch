@@ -1,14 +1,12 @@
-import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { McpClient, McpHttpError, StdioTransport, StreamableHttpTransport, normalizeMcpInputSchema, validateMcpServerConfig, toLlmContent, parseJsonRpcMessage } from '@earendil-works/pi-mcp';
 import type { McpServerConfig, McpTransport, JsonRpcMessage, McpTransportSendOptions, Tool } from '@earendil-works/pi-mcp';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { McpLocalConfig, McpRemoteConfig, McpStatus } from '@opencode-ai/sdk/v2';
-import { readJson } from './installation.js';
 import { object } from './config.js';
 import { limitToolText } from './context.js';
-import { connectionError, UserError } from './errors.js';
+import { connectionError, UserError } from '../../errors.js';
 
 const reserved = new Set(['studio-mcp', 'xbot-copilot', 'browser-use-mcp']);
 const serverName = /^[a-z0-9_-]{1,64}$/i;
@@ -88,20 +86,7 @@ class LegacySseTransport implements McpTransport {
   }
 }
 
-export function customMcp(agentDir: string, workspace?: string) {
-  const entries = new Map<string, unknown>();
-  for (const path of [join(agentDir, 'mcp.json'), ...(workspace ? [join(workspace, '.pi', 'mcp.json')] : [])]) {
-    if (!existsSync(path)) continue;
-    const content = readJson<unknown>(path);
-    if (!object(content) || !object(content.mcpServers)) throw new UserError(`${path} 必须包含 mcpServers 对象。`);
-    for (const [name, config] of Object.entries(content.mcpServers)) {
-      const previous = entries.get(name);
-      entries.set(name, object(previous) && object(config) && !('command' in config) && !('url' in config) && !('type' in config)
-        ? { ...previous, ...config } : config);
-    }
-  }
-  return entries;
-}
+export { customMcp } from '../../mcp-config.js';
 
 export function validateCustomMcp(name: string, raw: unknown) {
   if (reserved.has(name.toLowerCase())) throw new UserError(`MCP 名称 ${name} 由影刀保留，请使用其他名称。`);

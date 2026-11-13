@@ -1,7 +1,8 @@
+. (Join-Path $PSScriptRoot 'harnesses.ps1')
 function Write-AtomicJson($Path, $Data) {
     $temp = "$Path.$PID.tmp"
     try {
-        $contents = [Text.Encoding]::UTF8.GetBytes(($Data | ConvertTo-Json -Depth 8))
+        $contents = [Text.Encoding]::UTF8.GetBytes(($Data | ConvertTo-Json -Depth 16))
         $file = [IO.File]::Open($temp, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
         try { $file.Write($contents, 0, $contents.Length); $file.Flush($true) }
         finally { $file.Dispose() }
@@ -41,14 +42,18 @@ function Invoke-InstallationLock($AgentPath, [scriptblock]$Action) {
     } finally { $mutex.Dispose() }
 }
 
-function Get-ReleasePath($State, $Id, $PiVersion) {
+function Get-ReleasePath($State, $Id, $PiVersion, $Harness) {
     if ($Id -cnotmatch '^[0-9a-f]{64}$') { throw 'Invalid installation release ID.' }
+    if ($Harness) {
+        if ($Harness -cnotmatch '^[a-z][a-z0-9-]{0,63}$') { throw 'Invalid harness ID.' }
+        return Join-Path $State "harnesses/$Harness/releases/$Id"
+    }
     if ($PiVersion) { Join-Path $State "harnesses/pi/releases/$Id" }
     else { Join-Path $State "releases/$Id" }
 }
 
 function Publish-Release($State, $Release) {
-    $launcher = Join-Path (Get-ReleasePath $State $Release.runtimeRelease $Release.piVersion) 'launcher.exe'
+    $launcher = Join-Path (Get-InstallationRuntime $State $Release) 'launcher.exe'
     Set-CheckedExecutable $launcher (Join-Path $State 'shadowbot-pi.exe') $Release.launcherHash
     Write-AtomicJson (Join-Path $State 'install.json') $Release
 }
@@ -58,12 +63,12 @@ function Complete-Activation($State, $AgentPath, $OriginalHash, [scriptblock]$Ch
     if (!(Test-Path -LiteralPath $path)) { return }
     & $CheckStopped
     $pending = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-    $release = $pending.release
+    $release = $pending.release | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
     if ($release.agentPath -ne $AgentPath -or $release.originalHash -ne $OriginalHash -or
         $release.launcherHash -notmatch '^[0-9a-f]{64}$' -or $pending.previousHash -notmatch '^[0-9a-f]{64}$') {
         throw 'Activation journal does not match this installation.'
     }
-    $launcher = Join-Path (Get-ReleasePath $State $release.runtimeRelease $release.piVersion) 'launcher.exe'
+    $launcher = Join-Path (Get-InstallationRuntime $State $release) 'launcher.exe'
     if ((Get-FileHash -LiteralPath $launcher).Hash -ne $release.launcherHash) { throw 'Staged launcher checksum mismatch.' }
     $active = (Get-FileHash -LiteralPath $AgentPath).Hash
     if ($active -ne $release.launcherHash -and $active -ne $pending.previousHash) {

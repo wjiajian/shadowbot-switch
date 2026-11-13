@@ -1,0 +1,8 @@
+{
+  "id": "original",
+  "name": "影刀原版 OpenCode",
+  "aliases": ["opencode-origin"],
+  "kind": "bundled",
+  "version": "1.18.12",
+  "capabilities": { "skills": false, "mcp": false }
+}

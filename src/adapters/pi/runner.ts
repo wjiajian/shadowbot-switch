@@ -8,14 +8,14 @@ import type { AssistantMessage as PiAssistant, ImageContent } from '@earendil-wo
 import type { AssistantMessage, Part, QuestionInfo, Session, SessionPromptAsyncData, ToolPart, UserMessage } from '@opencode-ai/sdk/v2';
 import { copilot, emptyTokens, explorer, HostConfig, object } from './config.js';
 import { contextSettings, limitToolText, projectToolContext, runtimeContextEntry, withRuntimeContext } from './context.js';
-import type { SkillSources } from './host-skills.js';
-import { decision, Interactions, permissionMayAllow } from './interactions.js';
-import { atomicWrite } from './installation.js';
+import type { SkillSources } from '../../host-skills.js';
+import { decision, Interactions, permissionMayAllow } from '../../interactions.js';
+import { atomicWrite } from '../../installation.js';
 import { McpHub } from './mcp.js';
-import { agentPrompt, ShadowBotContext, skills, userSettings } from './shadowbot.js';
-import { databaseBusy, failure, id, Store } from './store.js';
-import type { Meta } from './store.js';
-import { modelError, UserError, userMessage } from './errors.js';
+import { agentPrompt, ShadowBotContext, skills, userSettings } from '../../shadowbot.js';
+import { databaseBusy, failure, id, Store } from '../../store.js';
+import type { Meta } from '../../store.js';
+import { modelError, UserError, userMessage } from '../../errors.js';
 
 export type Prompt = NonNullable<SessionPromptAsyncData['body']>;
 type Reply = ReturnType<Store['message']>;
@@ -26,9 +26,8 @@ type Active = {
   cancelled?: boolean; uncertainTool?: string; contextRefreshFailed?: boolean;
 };
 
-export class RequestError extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
-}
+export { RequestError } from '../../errors.js';
+import { RequestError } from '../../errors.js';
 
 function string(value: unknown) { return typeof value === 'string' ? value : ''; }
 function schema(properties: Record<string, unknown>, required: string[]) {
@@ -62,10 +61,12 @@ export class Runs {
   readonly interactions: Interactions;
   private readonly sessionsDir: string;
   private readonly agentDir: string;
+  private readonly nativeAgentDir: string;
   constructor(private store: Store, private config: HostConfig, private root: string, private mcp: McpHub,
     private context: ShadowBotContext, home: string, private resources: string, private skillSources: SkillSources) {
     this.sessionsDir = join(home, 'backends', 'pi', 'sessions');
     this.agentDir = join(home, 'agent');
+    this.nativeAgentDir = join(home, 'harnesses', 'pi', 'agent');
     mkdirSync(this.sessionsDir, { recursive: true });
     this.interactions = new Interactions((sessionID, event, fields) => store.event(sessionID, event, fields));
     this.running();
@@ -94,9 +95,9 @@ export class Runs {
   }
 
   private transcriptPath(meta: Meta) {
-    if (!meta.pi_file) return undefined;
-    const name = basename(meta.pi_file);
-    const folder = dirname(meta.pi_file);
+    if (!meta.native_file) return undefined;
+    const name = basename(meta.native_file);
+    const folder = dirname(meta.native_file);
     // The adapter recorded absolute paths before the installation became project-local.
     if (!name.endsWith('.jsonl') || basename(folder) !== meta.id || basename(dirname(folder)) !== 'sessions') {
       throw new Error('Invalid Pi native session location');
@@ -108,17 +109,17 @@ export class Runs {
     const dir = join(this.sessionsDir, meta.id);
     const file = this.transcriptPath(meta);
     if (!file || !existsSync(file)) {
-      if (meta.pi_leaf) throw new Error('Pi native session is missing');
+      if (meta.native_leaf) throw new Error('Pi native session is missing');
       return SessionManager.create(this.root, dir);
     }
     const manager = SessionManager.open(file, dir, this.root);
-    if (meta.pi_leaf) manager.branch(meta.pi_leaf);
+    if (meta.native_leaf) manager.branch(meta.native_leaf);
     else manager.resetLeaf();
     return manager;
   }
 
   private recoverContext(meta: Meta, detail: string) {
-    if (!meta.pi_file) return;
+    if (!meta.native_file) return;
     const manager = this.manager(meta);
     const pending = new Map<string, string>();
     for (const entry of manager.getBranch()) {
@@ -324,7 +325,7 @@ export class Runs {
               input.path = pathToFileURL(path).href;
             } catch { return { block: true, reason: 'The filesystem path is unavailable' }; }
           }
-          const rule = skill?.sourceInfo.source === 'custom' ? 'allow' : custom && !custom.builtin
+          const rule = skill?.source === 'custom' ? 'allow' : custom && !custom.builtin
             ? decision(name, target, 'ask', customPolicy)
             : decision(permission, target, name === 'question' || skill ? 'allow' : 'ask', ...policies);
           if (rule === 'deny') return { block: true, reason: 'Tool denied by the workspace permission policy' };
@@ -372,12 +373,12 @@ export class Runs {
       const instructions = [agentPrompt(config, this.root, agent), prompt.system,
         `ShadowBot reference directory: ${join(this.resources, 'Copilot', 'knowledge')}`,
         summary && `Available skills. Use the skill tool to read their instructions.\n${summary}`].filter((value): value is string => Boolean(value));
-      const resourceLoader = new DefaultResourceLoader({ cwd: this.root, agentDir: this.agentDir, settingsManager: settings,
+      const resourceLoader = new DefaultResourceLoader({ cwd: this.root, agentDir: this.nativeAgentDir, settingsManager: settings,
         noExtensions: true, noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true,
         disabledBuiltinExtensions: ['mcp', 'codemode', 'tool_search'], extensionFactories: [extension], appendSystemPrompt: instructions,
       });
       await resourceLoader.reload();
-      const { session: pi } = await createAgentSession({ cwd: this.root, agentDir: this.agentDir, settingsManager: settings,
+      const { session: pi } = await createAgentSession({ cwd: this.root, agentDir: this.nativeAgentDir, settingsManager: settings,
         resourceLoader, sessionManager: manager, modelRuntime: runtime, model: resolved, tools: toolNames.filter(enabled) });
       active.pi = pi;
       unsubscribe = pi.subscribe(event => projection!.handle(event));
@@ -484,7 +485,7 @@ export class Runs {
     const meta = this.store.meta(session.id)!;
     const leaf = this.branchBefore(meta, anchor.info.id);
     const reverted = { ...session, revert: { messageID: anchor.info.id }, time: { ...session.time, updated: Date.now() } };
-    return this.store.setRevert(reverted, leaf, meta.cutoff ? meta.revert_leaf : meta.pi_leaf);
+    return this.store.setRevert(reverted, leaf, meta.cutoff ? meta.revert_leaf : meta.native_leaf);
   }
 
   deleteMessage(session: Session, messageID: string) {

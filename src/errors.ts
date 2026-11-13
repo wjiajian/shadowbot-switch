@@ -25,3 +25,6 @@ export function modelError(message = '') {
   if (/context.{0,30}(limit|length)|maximum context/i.test(message)) return '模型上下文超出限制。请缩短附件或新建会话后重试。';
   return '模型请求失败。请检查影刀模型配置及服务状态。';
 }
+export class RequestError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}

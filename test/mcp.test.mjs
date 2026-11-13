@@ -5,7 +5,7 @@ import { json } from 'node:stream/consumers';
 import { setTimeout as delay } from 'node:timers/promises';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { McpHub } from '../dist/service/mcp.js';
+import { McpHub } from '../dist/service/adapters/pi/mcp.js';
 
 test('stdio and legacy SSE run real Pi MCP requests', { timeout: 15_000 }, async () => {
   let sse;

@@ -105,3 +105,53 @@ fs.writeFileSync(path.join(process.env.SHADOWBOT_PI_HOME, 'launch.json'), JSON.s
 		t.Fatalf("unexpected launch parameters: %+v", launch)
 	}
 }
+
+func TestRegisteredHarnessSelectsOwnRuntime(t *testing.T) {
+	node, err := os.ReadFile(filepath.Join("..", ".tools", "node", "node.exe"))
+	if os.IsNotExist(err) {
+		t.Skip("pinned Node is required")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	id := strings.Repeat("d", 64)
+	runtime := filepath.Join(home, "harnesses", "fixture", "releases", id)
+	if err := os.MkdirAll(filepath.Join(runtime, "service"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path string, contents []byte) {
+		t.Helper()
+		if err := os.WriteFile(path, contents, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(runtime, "node.exe"), node)
+	write(filepath.Join(runtime, "service", "fixture.js"), []byte(`
+const fs = require('node:fs');
+fs.writeFileSync(require('node:path').join(process.env.SHADOWBOT_SWITCH_HOME, 'fixture-launch.json'), JSON.stringify({
+ harness: process.env.SHADOWBOT_HARNESS, args: process.argv.slice(2), nativeDir: process.env.PI_CODING_AGENT_DIR
+}));`))
+	// The control service lives in another release. Serve must select the active harness's record.
+	write(filepath.Join(home, "install.json"), []byte(`{"runtime":{"harness":"manager","release":"`+strings.Repeat("e", 64)+`"},"harnesses":{"fixture":{"release":"`+id+`","launch":{"executable":"node.exe","args":["{runtime}/service/fixture.js"]}}}}`))
+	write(filepath.Join(home, "backend.json"), []byte(`{"mode":"fixture"}`))
+	t.Setenv("PI_CODING_AGENT_DIR", "must-not-be-replaced")
+	if code, err := runAt(home, []string{"serve", "--port", "0"}); code != 0 || err != nil {
+		t.Fatalf("generic launch: %d %v", code, err)
+	}
+	var actual struct {
+		Harness   string
+		Args      []string
+		NativeDir string
+	}
+	if err := readJSON(filepath.Join(home, "fixture-launch.json"), &actual); err != nil {
+		t.Fatal(err)
+	}
+	if actual.Harness != "fixture" || actual.NativeDir != "must-not-be-replaced" || !reflect.DeepEqual(actual.Args, []string{"serve", "--port", "0"}) {
+		t.Fatalf("unexpected launch: %+v", actual)
+	}
+	write(filepath.Join(home, "backend.json"), []byte(`{"mode":"unknown"}`))
+	if code, err := runAt(home, []string{"serve"}); code != 1 || err == nil {
+		t.Fatal("uninstalled harness was accepted")
+	}
+}

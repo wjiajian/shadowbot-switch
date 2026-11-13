@@ -54,11 +54,15 @@ test('management CLI scopes resources, records choices, edits config, and export
     assert.equal(run('mcp')[0].name, 'offline');
     assert.equal(existsSync(marker), false, 'mcp list must not start the configured process');
     run('mcp', 'disable', 'offline', '--app', app);
+    assert.ok(existsSync(join(app, '.shadowbot-switch', 'mcp.json')), 'new application configuration must use the neutral directory');
     assert.equal(run('mcp', '--app', app)[0].state, '已禁用');
     assert.equal(run('mcp')[0].state, '已配置');
     failure('mcp', 'add', 'studio-mcp', '--url', 'http://127.0.0.1/mcp');
     assert.deepEqual(run('mcp', 'status'), []);
     const bundle = join(root, 'config.json');
+    const appBundle = join(root, 'app-config.json');
+    run('config', 'export', appBundle, '--app', app);
+    assert.ok(JSON.parse(readFileSync(appBundle, 'utf8')).entries.some(entry => entry.path === 'agent/skills/fixture/SKILL.md'), 'exports must include existing legacy application skills');
     run('config', 'export', bundle);
     run('skills', 'remove', 'fixture');
     run('mcp', 'remove', 'offline');

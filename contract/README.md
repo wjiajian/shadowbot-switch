@@ -19,3 +19,22 @@
 [opencode-fixture.jsonl](opencode-fixture.jsonl) 由本机原版 `opencode.exe` 和本地模拟模型生成。启动器转发 Basic Auth、`GET /global/health`、`POST /session`、`GET /event` 和 `POST /session/{id}/prompt_async`。`prompt_async` 返回 204。事件包括 `message.updated`、`message.part.updated`、`message.part.delta`、`session.status` 和 `session.idle`。样本保留已识别的结构，移除了时间戳和未识别的事件。
 
 类型基线来自锁定的 `@opencode-ai/sdk@1.18.12`。Pi 侧使用锁定的 `@earendil-works/pi-coding-agent@1.5.2` 和 `@earendil-works/pi-mcp@1.5.2`。Pi 实机已通过影刀本地转发完成平台模型交互。
+
+
+## Harness 接入约定
+
+公共管理与宿主兼容层不直接引用引擎 SDK。`src/adapter.ts` 定义适配器契约，`src/harnesses.ts` 按注册信息延迟加载当前适配器。Pi 的执行、模型目录、上下文及 MCP 实现位于 `src/adapters/pi/`。
+
+新增托管 harness：
+
+1. 添加 `harnesses/<id>/harness.json`，声明唯一小写 ID、名称、别名、`kind: "managed"`、版本、适配器入口、启动参数与 Skills/MCP 能力。
+2. 实现 `src/adapters/<id>/index.ts`，导出 `adapter: HarnessAdapter`。`createConfig` 接收宿主模型与认证，`createRuns` 负责执行、取消、原生上下文及会话操作；`mcp` 为可选能力。界面事件和历史通过传入的 `Store` 写入，授权/提问使用 `Interactions`。
+3. 如需依赖，在 `harnesses/<id>/package.json` 与锁文件中声明；`versionPackage` 可指定用哪个依赖版本作为适配器版本，否则使用注册中的 `version`。编译测试需要的依赖放在根包的 `devDependencies`，生产 SDK 只安装到该适配器子目录。
+4. `launch.executable` 相对于发布目录；参数中的 `{runtime}` 替换为该 harness 已提交的发布目录。使用公共兼容服务时设置 `args: ["{runtime}/service/main.js"]`。运行环境提供 `SHADOWBOT_SWITCH_HOME` 和 `SHADOWBOT_HARNESS`，SDK 专属环境变量由适配器设置。
+5. 在隔离测试中注册适配器并验证启动、会话隔离、更新、能力拒绝和恢复；不修改安装器、启动器或切换核心来识别新 ID。
+
+安装记录 `format: 2` 使用 `runtime: { harness, release }` 指向管理运行时，`harnesses[id]` 分别记录各引擎的版本、发布 ID、适配器入口、启动方式与能力。启动器从当前选择对应的记录启动，更新其他 harness 不改变选择。原版属于 `bundled` 类型，由影刀维护二进制和版本。
+
+`agent/` 与应用 `.shadowbot-switch/` 保存公共配置，`harnesses/<id>/agent/` 保存适配器私有配置，`backends/<id>/` 保存兼容数据库快照及适配器原生会话。旧 `.pi/` 应用配置仍可读取，新目录优先；旧安装记录、定位文件和 `shadowbot-pi.exe` 名称保留兼容。旧适配数据库的 `pi_file/pi_leaf/pi_entry` 在事务中迁移为中立的 `native_*` 列。
+
+测试夹具 `test/fixtures/harness/` 不接真实模型，也不作为产品引擎注册。它在没有 Pi SDK 的临时运行目录中使用公共 HTTP/SSE 与持久层，作为新增 harness 无需修改公共流程的验收证据。

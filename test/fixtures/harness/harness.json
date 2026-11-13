@@ -1,0 +1,10 @@
+{
+  "id": "fixture",
+  "name": "Test harness",
+  "aliases": ["test-engine"],
+  "kind": "managed",
+  "version": "1.0.0",
+  "adapter": "adapters/fixture/index.js",
+  "launch": { "executable": "node.exe", "args": ["{runtime}/service/main.js"] },
+  "capabilities": { "skills": false, "mcp": false }
+}

@@ -627,7 +627,7 @@ test('Pi compaction refreshes and persists the current ShadowBot runtime context
     assert.ok(model.requests.length >= 3, 'A separate summary request should have completed');
     const db = new DatabaseSync(join(fixture.home, 'backends', 'pi', 'adapter.db'), { readOnly: true });
     let file;
-    try { file = db.prepare('SELECT pi_file FROM session WHERE id=?').get(session.id).pi_file; }
+    try { file = db.prepare('SELECT native_file FROM session WHERE id=?').get(session.id).native_file; }
     finally { db.close(); }
     const entries = readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
     const compaction = entries.findLast(entry => entry.type === 'compaction');

@@ -3,20 +3,23 @@ import { randomUUID } from 'node:crypto';
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, unlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
-import { loadSkillsFromDir, VERSION as piVersion } from '@earendil-works/pi-coding-agent';
+import { loadSkillsFromDir } from './skills.js';
 import { HostConfig, object } from './config.js';
 import { UserError, userMessage } from './errors.js';
 import { skillSources } from './host-skills.js';
-import { atomicWrite, mode, originalHash, protocolVersion, readJson, runtimeDirectory, sha256 } from './installation.js';
+import { atomicWrite, mode, originalHash, readJson, installedVersion, runtimeDirectory, sha256 } from './installation.js';
 import type { Installation } from './installation.js';
-import { customMcp, McpHub, validateCustomMcp } from './mcp.js';
+import { customMcp } from './mcp-config.js';
+import { HarnessRegistry, loadAdapter } from './harnesses.js';
+import { appConfigDirectory, appConfigDirectories } from './config-paths.js';
 import { runtimeStates } from './runtime-state.js';
 import { skillInventory, userSettings, validateUserSettings } from './shadowbot.js';
 import { syncSkillCommands } from './skill-commands.js';
 import { verifySchema } from './switch.js';
 
 const help = `ShadowBot Switch
-  use pi | use original       安装或切换后端
+  use <harness>               安装或切换后端（例如 use pi / use original）
+  harnesses                   列出已注册的 harness 及能力
   status / doctor             状态摘要 / 完整诊断
   reload                      同步菜单并安排配置刷新
   skills [list]               列出所有 Skill、来源和未启用原因
@@ -33,7 +36,7 @@ const help = `ShadowBot Switch
   config export <文件>        导出安装级或所选应用配置
   config import <文件> [--replace]
   apps [list|select|clear]     选择并记住应用；clear 恢复安装级范围
-  update                      应用当前源码及其锁定的 Pi 版本
+  update [harness]            更新指定或当前 harness，保持当前选择
   repair                      修复本项目搬迁后的定位，再完成待恢复操作
   help                        此帮助不要求已安装
 
@@ -95,10 +98,11 @@ function selectedApp(home: string, opts: Options) {
   return realpathSync.native(path);
 }
 function skillRows(home: string, install: Installation, app?: string) {
-  return skillInventory(join(home, 'agent'), app, skillSources(home, install), new HostConfig().value);
+  return skillInventory(join(home, 'agent'), app, skillSources(home, install, mode(home) === 'observe' ? 'original' : mode(home)), new HostConfig().value);
 }
 function menuSync(home: string, install: Installation) {
-  return syncSkillCommands(install.resources, mode(home) === 'pi'
+  const harness = new HarnessRegistry().get(mode(home) === 'observe' ? 'original' : mode(home));
+  return syncSkillCommands(install.resources, (install.harnesses?.[harness.id]?.capabilities ?? harness.capabilities).skills
     ? skillRows(home, install).filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined);
 }
 
@@ -125,6 +129,14 @@ function safeTree(root: string): { path: string; data: string }[] {
   return entries;
 }
 
+function applicationConfigTree(root: string) {
+  const files = new Map<string, { path: string; data: string }>();
+  for (const directory of appConfigDirectories(root)) {
+    for (const entry of safeTree(directory)) files.set(entry.path.toLowerCase(), entry);
+  }
+  return [...files.values()];
+}
+
 function within(root: string, name: string) {
   if (!name || name.includes('\\') || name.split('/').some(p => !p || p === '.' || p === '..' || /[:\x00-\x1f]/.test(p))) throw new UserError(`无效配置路径：${name}`);
   const path = resolve(root, name);
@@ -148,7 +160,16 @@ export async function manage(home: string, install: Installation, input: string[
   const opts = options(input);
   const [command, action = 'list', target] = opts.args;
   const app = ['skills', 'mcp', 'config', 'doctor'].includes(command) ? selectedApp(home, opts) : undefined;
-  const directory = app ? join(app, '.pi') : join(home, 'agent');
+  const directory = app ? appConfigDirectory(app) : join(home, 'agent');
+  const registry = new HarnessRegistry();
+  const harness = registry.get(mode(home) === 'observe' ? 'original' : mode(home));
+  const capabilities = install.harnesses?.[harness.id]?.capabilities ?? harness.capabilities;
+  if (command === 'skills' && !capabilities.skills || command === 'mcp' && !capabilities.mcp || command === 'reload' && !capabilities.skills && !capabilities.mcp) throw new UserError(`${harness.name} 不支持此管理能力。运行 harnesses 查看支持情况。`);
+  const mcp = capabilities.mcp && ['mcp', 'config'].includes(command) ? (await loadAdapter(home, install, harness)).mcp : undefined;
+  const validateCustomMcp = (name: string, raw: unknown) => {
+    if (!mcp) throw new UserError(`${harness.name} 不支持 MCP 配置验证。`);
+    return mcp.validate(name, raw);
+  };
   const scope = app ? `应用：${app}` : '此安装下的所有应用';
   const emit = (value: unknown, title = scope) => {
     if (opts.flags.has('json')) console.log(JSON.stringify({ scope, data: value }, null, 2));
@@ -166,12 +187,13 @@ export async function manage(home: string, install: Installation, input: string[
   if (command === 'help') { console.log(help); return; }
   if (command === 'status') {
     const states = runtimeStates(home);
-    emit({ backend: mode(home) === 'pi' ? `Pi ${install.piVersion ?? piVersion}` : `影刀原版 OpenCode ${protocolVersion}`,
+    emit({ harness: harness.id, backend: `${harness.name} ${installedVersion(install, harness.id) ?? harness.version ?? ''}`, capabilities,
       recoveryPending: ['activation.pending.json', 'switch.pending.json'].some(file => existsSync(join(home, file))),
       applications: states.map(s => ({ app: s.root, active: s.active, configuration: s.configurationError || Object.keys(s.errors).length ? '失败（原可用连接已保留）' : s.pending ? '待应用' : '已应用', errors: s.errors })),
-      next: '运行 doctor 查看完整诊断；use pi / use original 切换后端。' }, 'ShadowBot Switch 状态');
+      next: '运行 doctor 查看完整诊断；use <harness> 切换后端。' }, 'ShadowBot Switch 状态');
     return;
   }
+  if (command === 'harnesses') { emit(registry.list().map(spec => ({ ...spec, installed: spec.kind === 'bundled' || Boolean(install.harnesses?.[spec.id]), selected: spec.id === harness.id }))); return; }
   if (command === 'apps') {
     if (action === 'clear') { writeJson(join(home, 'preferences.json'), {}); emit('已恢复安装级默认范围。'); return; }
     const apps = applicationList(home, install);
@@ -259,7 +281,7 @@ export async function manage(home: string, install: Installation, input: string[
     }
     if (action === 'test') {
       if (target && !entries.has(target)) throw new UserError(`MCP ${target} 未配置。运行 mcp list 查看名称。`);
-      const hub = new McpHub(app ?? dirname(home));
+      const hub = mcp!.create(app ?? dirname(home));
       try {
         await hub.reloadCustom(target ? new Map([[target, entries.get(target)]]) : entries);
         emit(Object.entries(hub.status()).map(([name, state]) => ({ name, ...state })), '独立连接检查：使用当前终端环境，不代表 Copilot 的现有连接');
@@ -321,7 +343,7 @@ export async function manage(home: string, install: Installation, input: string[
     if (action === 'export') {
       const path = resolve(required(target, '导出文件路径'));
       if (existsSync(path) && !opts.flags.has('replace')) throw new UserError('导出文件已存在。换一个路径或使用 --replace。');
-      const entries = app ? safeTree(directory).map(e => ({ ...e, path: `agent/${e.path}` })) : [
+      const entries = app ? applicationConfigTree(app).map(e => ({ ...e, path: `agent/${e.path}` })) : [
         ...safeTree(join(home, 'skills')).map(e => ({ ...e, path: `skills/${e.path}` })),
         ...safeTree(join(home, 'agent')).map(e => ({ ...e, path: `agent/${e.path}` })),
       ];
@@ -380,12 +402,12 @@ export async function manage(home: string, install: Installation, input: string[
       try { await fn(); checks.push({ check: name, status: '通过', detail: '' }); }
       catch (error) { checks.push({ check: name, status: '失败', detail: userMessage(error, hint) }); }
     };
-    await check('原程序备份', () => { if (sha256(join(home, 'original', 'opencode.exe')) !== originalHash) throw new Error(); }, '原程序备份缺失或校验不符。恢复正确安装包后运行 use pi。');
-    await check('运行时', async () => { if (process.version !== 'v24.22.3' || (install.piVersion && install.piVersion !== piVersion)) throw new Error(); await import('./runner.js'); }, '运行时版本或依赖不匹配。运行 update 从当前源码重建。');
-    await check('活动程序', () => { const expected = mode(home) === 'pi' ? install.launcherHash.toLowerCase() : originalHash; if (sha256(install.agentPath) !== expected) throw new Error(); }, '活动程序与当前后端不匹配。关闭影刀后运行 repair。');
+    await check('原程序备份', () => { if (sha256(join(home, 'original', 'opencode.exe')) !== originalHash) throw new Error(); }, '原程序备份缺失或校验不符。恢复正确安装包后运行 use <harness>。');
+    await check('运行时', async () => { if (process.version !== 'v24.22.3') throw new Error(); if (harness.kind === 'managed') await (await loadAdapter(home, install, harness)).verify(installedVersion(install, harness.id)); }, '运行时版本或依赖不匹配。运行 update 从当前源码重建。');
+    await check('活动程序', () => { const expected = harness.kind === 'managed' ? install.launcherHash.toLowerCase() : originalHash; if (sha256(install.agentPath) !== expected) throw new Error(); }, '活动程序与当前后端不匹配。关闭影刀后运行 repair。');
     await check('会话数据库', () => verifySchema(install.database, readFileSync(join(runtimeDirectory(home, install), 'schema.sql'), 'utf8')), '会话库结构或完整性不匹配。确认影刀版本为 6.3.39，并保留数据进行恢复。');
-    await check('Skills 配置', () => { const errors = skillRows(home, install, app).filter(r => r.status === 'invalid'); if (errors.length) throw new UserError(errors.map(r => `${r.path}：${r.reason}`).join('\n')); }, '运行 skills 查看配置问题。');
-    await check('MCP 配置', () => { for (const [name, raw] of customMcp(join(home, 'agent'), app)) validateCustomMcp(name, raw); }, '运行 config open mcp 修复配置。');
+    if (capabilities.skills) await check('Skills 配置', () => { const errors = skillRows(home, install, app).filter(r => r.status === 'invalid'); if (errors.length) throw new UserError(errors.map(r => `${r.path}：${r.reason}`).join('\n')); }, '运行 skills 查看配置问题。');
+    if (capabilities.mcp) await check('MCP 配置', async () => { const feature = (await loadAdapter(home, install, harness)).mcp!; for (const [name, raw] of customMcp(join(home, 'agent'), app)) feature.validate(name, raw); }, '运行 config open mcp 修复配置。');
     await check('恢复状态', () => { if (['activation.pending.json', 'switch.pending.json'].some(file => existsSync(join(home, file)))) throw new UserError('上次操作尚未完成。关闭影刀后运行 repair。'); }, '运行 repair。');
     emit(checks, `安装诊断 · ${scope}`);
     if (checks.some(c => c.status === '失败')) process.exitCode = 1;
