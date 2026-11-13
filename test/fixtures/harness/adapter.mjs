@@ -18,7 +18,7 @@ export const adapter = {
       rename: (session, title) => store.update({ ...session, title }),
       delete(session) { store.delete(session); return true; },
       revert: unsupported, unrevert: unsupported, deleteMessage: unsupported, patchPart: unsupported,
-      async start(session, prompt) {
+      async start(session, prompt, run) {
         const userID = id('msg'), replyID = id('msg'), now = Date.now();
         store.putMessage({ id: userID, sessionID: session.id, role: 'user', time: { created: now }, agent: copilot, model: { providerID: 'fixture', modelID: 'fixture' } });
         store.putPart({ id: id('prt'), sessionID: session.id, messageID: userID, type: 'text', text: prompt.parts.map(p => p.text ?? '').join('') });
@@ -27,7 +27,8 @@ export const adapter = {
         store.putPart({ id: id('prt'), sessionID: session.id, messageID: replyID, type: 'text', text: 'fixture reply' });
         const directory = join(home, 'backends', 'fixture', 'sessions');
         mkdirSync(directory, { recursive: true });
-        writeFileSync(join(directory, `${session.id}.json`), JSON.stringify(prompt));
+        // Record what the shared layer handed over, so tests can check per-turn instructions.
+        writeFileSync(join(directory, `${session.id}.json`), JSON.stringify({ prompt, instructions: run.instructions }));
         return store.message(session.id, replyID);
       },
     };

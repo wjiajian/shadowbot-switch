@@ -6,6 +6,15 @@ import type { ShadowBotContext } from './shadowbot.js';
 import type { SkillSources } from './host-skills.js';
 
 export type Prompt = NonNullable<SessionPromptAsyncData['body']>;
+/** Per-turn input that the shared layer prepares for every harness, separate from the host prompt. */
+export type RunInput = {
+  /**
+   * AGENTS.md rules for this workspace, reread for every turn and already bounded and validated.
+   * Append them to the model's system instructions. Keep them out of `prompt.system`, which is
+   * persisted and echoed back to the host. Empty when no rules apply.
+   */
+  instructions: string;
+};
 export interface McpConnection {
   addBuiltin(name: string, config: McpLocalConfig | McpRemoteConfig): Promise<void>;
   reloadCustom(entries: Map<string, unknown>): Promise<unknown>;
@@ -19,7 +28,7 @@ export interface HarnessRuns {
   active: ReadonlyMap<string, unknown>;
   interactions: Interactions;
   running(): { id: string }[];
-  start(session: Session, prompt: Prompt): Promise<ReturnType<Store['message']>>;
+  start(session: Session, prompt: Prompt, run: RunInput): Promise<ReturnType<Store['message']>>;
   abort(sessionID: string): Promise<boolean>;
   rename(session: Session, title: string): Session;
   delete(session: Session): boolean;

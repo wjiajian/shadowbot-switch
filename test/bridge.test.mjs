@@ -518,14 +518,18 @@ test('AGENTS rules reach the model, refresh each turn and stay scoped to the app
     const session = await get(bridge.api('/session', { method: 'POST' }));
     const prompt = async (id = session.id, directory = fixture.workspace) => {
       await get(bridge.api(`/session/${id}/message`, { method: 'POST', directory,
-        data: { parts: [{ type: 'text', text: 'Check rules' }] } }));
+        data: { system: 'host-system-marker', parts: [{ type: 'text', text: 'Check rules' }] } }));
       return JSON.stringify(model.requests.at(-1).request.messages.filter(message => message.role === 'system'));
     };
     const initial = await prompt();
     assert.match(initial, /installation-rule-marker/);
     assert.match(initial, /application-rule-marker/);
     assert.ok(initial.indexOf('installation-rule-marker') < initial.indexOf('application-rule-marker'));
+    assert.ok(initial.indexOf('application-rule-marker') < initial.indexOf('host-system-marker'));
     assert.doesNotMatch(initial, /parent-rule-must-not-load/);
+    // The host's system prompt is stored and echoed unchanged; rules travel separately.
+    const stored = (await get(bridge.api(`/session/${session.id}/message`))).filter(message => message.info.role === 'user');
+    assert.deepEqual(stored.map(message => message.info.system), ['host-system-marker']);
     writeFileSync(join(fixture.workspace, 'AGENTS.md'), 'updated-application-marker');
     const updated = await prompt();
     assert.match(updated, /updated-application-marker/);

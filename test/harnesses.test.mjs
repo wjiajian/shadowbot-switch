@@ -65,10 +65,27 @@ test('a registered non-Pi adapter launches the shared host, persists its history
       const address = (async () => { for await (const line of lines) { const match = /listening on (http:\/\/\S+)/.exec(line); if (match) return match[1]; } throw new Error(errors); })();
       return Promise.race([address, closed.then(() => { throw new Error(errors); })]);
     };
+    // AGENTS.md rules are loaded by the shared layer, so a non-Pi adapter receives them without its own loader.
+    put(join(home, 'agent', 'AGENTS.md'), 'fixture-installation-rule');
+    put(join(workspace, 'AGENTS.md'), 'fixture-application-rule');
     const base = await start();
     const session = await fetch(base + '/session', { method: 'POST', body: JSON.stringify({ title: 'fixture history' }) }).then(r => r.json());
-    const reply = await fetch(`${base}/session/${session.id}/message`, { method: 'POST', body: JSON.stringify({ parts: [{ type: 'text', text: 'hello' }] }) }).then(r => r.json());
+    const send = body => fetch(`${base}/session/${session.id}/message`, { method: 'POST', body: JSON.stringify(body) }).then(r => r.json());
+    const recorded = () => JSON.parse(readFileSync(join(home, 'backends', 'fixture', 'sessions', `${session.id}.json`), 'utf8'));
+    const reply = await send({ system: 'host-system-marker', parts: [{ type: 'text', text: 'hello' }] });
     assert.equal(reply.parts[0].text, 'fixture reply');
+    let handed = recorded();
+    assert.match(handed.instructions, /fixture-installation-rule[\s\S]*fixture-application-rule/);
+    assert.equal(handed.prompt.system, 'host-system-marker', 'rules must not be merged into the host system prompt');
+    put(join(workspace, 'AGENTS.md'), 'fixture-updated-rule');
+    await send({ parts: [{ type: 'text', text: 'again' }] });
+    handed = recorded();
+    assert.match(handed.instructions, /fixture-updated-rule/);
+    assert.doesNotMatch(handed.instructions, /fixture-application-rule/);
+    rmSync(join(home, 'agent', 'AGENTS.md'));
+    rmSync(join(workspace, 'AGENTS.md'));
+    await send({ parts: [{ type: 'text', text: 'no rules' }] });
+    assert.equal(recorded().instructions, '');
     assert.equal((await fetch(base + '/mcp')).status, 501);
     assert.deepEqual(await fetch(base + '/skill').then(r => r.json()), []);
     process.kill(); await closed; process = undefined;
@@ -78,7 +95,7 @@ test('a registered non-Pi adapter launches the shared host, persists its history
     await switchBackend(home, install, 'fixture', schema, () => {}, registry);
     const restarted = await start();
     assert.equal((await fetch(restarted + '/session').then(r => r.json()))[0].id, session.id);
-    assert.equal((await fetch(`${restarted}/session/${session.id}/message`).then(r => r.json())).length, 2);
+    assert.equal((await fetch(`${restarted}/session/${session.id}/message`).then(r => r.json())).length, 6);
     process.kill(); await closed; process = undefined;
     // Simulate an interruption after the database replacement, before committing the mode.
     put(join(home, 'switch.pending.json'), { previous: 'original', source: 'original', destination: 'fixture' });

@@ -13,7 +13,7 @@ import { decision, Interactions, permissionMayAllow } from '../../interactions.j
 import { atomicWrite } from '../../installation.js';
 import { McpHub } from './mcp.js';
 import { agentPrompt, ShadowBotContext, skills, userSettings } from '../../shadowbot.js';
-import { agentRules } from '../../agent-rules.js';
+import type { RunInput } from '../../adapter.js';
 import { outsideWorkspace } from '../../config-paths.js';
 import { databaseBusy, failure, id, Store } from '../../store.js';
 import type { Meta } from '../../store.js';
@@ -24,7 +24,7 @@ type Reply = ReturnType<Store['message']>;
 type ToolReference = { messageID: string; callID: string };
 type InteractionTarget = { sessionID: string; tool: ToolReference };
 type Active = {
-  abort: AbortController; done: Promise<Reply>; interaction?: InteractionTarget; pi?: AgentSession;
+  abort: AbortController; done: Promise<Reply>; instructions: string; interaction?: InteractionTarget; pi?: AgentSession;
   cancelled?: boolean; uncertainTool?: string; contextRefreshFailed?: boolean;
 };
 
@@ -139,7 +139,7 @@ export class Runs {
     if (this.active.has(session.id) || (meta?.running && !this.recover(meta))) throw new RequestError(409, 'The session is busy');
   }
 
-  start(session: Session, prompt: Prompt, interaction?: InteractionTarget) {
+  start(session: Session, prompt: Prompt, run: RunInput, interaction?: InteractionTarget) {
     this.assertIdle(session);
     if (!Array.isArray(prompt.parts) || !prompt.parts.length) throw new RequestError(400, 'The prompt requires parts');
     if (prompt.messageID && !/^msg_[a-zA-Z0-9]{6,64}$/.test(prompt.messageID)) throw new RequestError(400, 'Invalid message ID');
@@ -164,7 +164,7 @@ export class Runs {
     const manager = this.manager(this.store.meta(session.id)!);
     const abort = new AbortController();
     const done = Promise.withResolvers<Reply>();
-    const active: Active = { abort, done: done.promise, interaction };
+    const active: Active = { abort, done: done.promise, instructions: run.instructions, interaction };
     if (!this.store.claim(session.id)) throw new RequestError(409, 'The session is busy');
     try {
       this.store.commitRevert(session.id);
@@ -294,7 +294,7 @@ export class Runs {
           } });
         if (agent === copilot) pi.registerTool({ name: 'task', label: 'Explorer', description: 'Delegate a web exploration task to shadowbot-explorer.',
           parameters: schema({ description: textSchema, prompt: textSchema, subagent_type: textSchema, task_id: { type: 'string' } }, ['description', 'prompt', 'subagent_type']),
-          execute: (callID, args) => this.explore(session, projection!.reference(callID), object(args) ? args : {}, signal),
+          execute: (callID, args) => this.explore(session, projection!.reference(callID), object(args) ? args : {}, signal, active.instructions),
         });
         pi.on('tool_call', async event => {
           const name = event.toolName;
@@ -368,9 +368,9 @@ export class Runs {
         });
       };
       const summary = loadedSkills.map(skill => `${skill.name}: ${skill.description}`).join('\n');
-      // The host workspace is the application root. session.directory can be a
-      // temporary OpenCode transport directory and must not supply app rules.
-      const instructions = [agentPrompt(config, this.root, agent), agentRules(this.agentDir, this.root), prompt.system,
+      // AGENTS.md rules come from the shared layer (run.instructions). prompt.system stays
+      // exactly what the host sent, because it is persisted and echoed back to the host.
+      const instructions = [agentPrompt(config, this.root, agent), active.instructions, prompt.system,
         `ShadowBot reference directory: ${join(this.resources, 'Copilot', 'knowledge')}`,
         summary && `Available skills. Use the skill tool to read their instructions.\n${summary}`].filter((value): value is string => Boolean(value));
       const resourceLoader = new DefaultResourceLoader({ cwd: this.root, agentDir: this.nativeAgentDir, settingsManager: settings,
@@ -415,7 +415,8 @@ export class Runs {
     return projection?.last ? this.store.message(session.id, projection.last.id) : undefined;
   }
 
-  private async explore(parent: Session, tool: ToolReference, args: Record<string, unknown>, signal: AbortSignal) {
+  // The Explorer child runs inside the parent's turn, so it reuses that turn's rules snapshot.
+  private async explore(parent: Session, tool: ToolReference, args: Record<string, unknown>, signal: AbortSignal, instructions: string) {
     if (!['explore', explorer].includes(string(args.subagent_type)) || !string(args.prompt)) throw new Error('Invalid Explorer task');
     const prior = string(args.task_id);
     const child = prior ? this.store.get(prior) : this.store.create(this.root, parent.directory, { parentID: parent.id, title: string(args.description) });
@@ -428,7 +429,7 @@ export class Runs {
     try {
       await this.context.overlay('start', parent.id, tool.callID).catch(() => console.error('ShadowBotPi Explorer overlay start failed'));
       signal.throwIfAborted();
-      reply = await this.start(child, { agent: explorer, parts: [{ type: 'text', text: string(args.prompt) }] }, { sessionID: parent.id, tool });
+      reply = await this.start(child, { agent: explorer, parts: [{ type: 'text', text: string(args.prompt) }] }, { instructions }, { sessionID: parent.id, tool });
       if (reply?.info.role !== 'assistant' || reply.info.error) throw new Error('Explorer task failed');
     } finally {
       signal.removeEventListener('abort', cancel);

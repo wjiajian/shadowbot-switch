@@ -26,6 +26,7 @@ import { configurationRevision, publishRuntimeState } from './runtime-state.js';
 import { skillInventory } from './shadowbot.js';
 import { skillCommand, syncSkillCommands } from './skill-commands.js';
 import { userMessage } from './errors.js';
+import { agentRules } from './agent-rules.js';
 
 function flags(args: string[]) {
   if (args[0] !== 'serve') throw new Error('Expected serve');
@@ -381,7 +382,10 @@ class Bridge {
           // The queue ends at admission. Permission, question and abort requests remain available during the run.
           const current = this.store.get(identifier);
           if (!current) throw new RequestError(404, 'Session not found in this workspace');
-          return { result: runs.start(current, prompt) };
+          // Every harness receives the same per-turn AGENTS.md rules from the shared layer.
+          // root is the host workspace, never a temporary session directory.
+          const instructions = prompt.noReply ? '' : agentRules(this.agentDir, root);
+          return { result: runs.start(current, prompt, { instructions }) };
         });
         if (action === 'prompt_async') {
           void result.catch(error => console.error('ShadowBot Switch run persistence failed', error instanceof Error ? error.name : 'UnknownError'));

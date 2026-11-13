@@ -178,7 +178,7 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 
 ## Agent 规则（AGENTS.md）
 
-Pi 接入支持自动加载两层规则：
+托管 harness（目前为 Pi）会自动加载两层规则。规则由公共层统一读取，再交给当前 harness，新增的 harness 无需自行实现：
 
 - 安装级：本项目的 `.shadowbot-switch/agent/AGENTS.md`，适用于所有影刀应用。
 - 应用级：`<影刀应用根目录>/AGENTS.md`，只适用于当前应用；冲突时优先于安装级规则。
@@ -193,7 +193,7 @@ Pi 接入支持自动加载两层规则：
 
 规则文件须使用 UTF-8，每层最多 32 KiB。无法读取、编码无效、超限、读取期间变化或链接目标越出对应目录的文件会被跳过，并记录诊断；不会截断规则内容。可运行 `.\switch.ps1 config check` 或 `.\switch.ps1 doctor` 检查，应用级检查加 `--app <应用根目录>`。
 
-这里的应用根目录是影刀传给接入层的工作区（优先使用 `SHADOWBOT_OPENCODE_WORKSPACE_ROOT`），不是本仓库目录，也不是可能指向临时运行目录的会话 `directory`。此功能属于 Pi 接入，切回原版 OpenCode 不使用这套加载逻辑。首次使用需执行 `.\switch.ps1 update pi --wait` 更新运行时。
+这里的应用根目录是影刀传给接入层的工作区（优先使用 `SHADOWBOT_OPENCODE_WORKSPACE_ROOT`），不是本仓库目录，也不是可能指向临时运行目录的会话 `directory`。影刀原版 OpenCode 不经过公共层，切回原版后不使用这套规则。更新本项目后需执行 `.\switch.ps1 update <harness> --wait`（例如 `update pi --wait`）重建运行时。
 
 ## 更新与迁移
 
