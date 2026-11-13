@@ -51,6 +51,17 @@ export interface HarnessAdapter {
   };
 }
 
+/**
+ * TypeScript lets an implementation declare fewer parameters, so a legacy `start(session, prompt)`
+ * still type-checks and silently drops `run.instructions`. Reject such runs when they are created.
+ */
+export function assertRunsContract<T extends HarnessRuns>(runs: T, harness: string): T {
+  if (typeof runs?.start !== 'function' || runs.start.length < 3) {
+    throw new Error(`Harness ${harness} must declare start(session, prompt, run) and append run.instructions to its system prompt`);
+  }
+  return runs;
+}
+
 export class NoMcp implements McpConnection {
   async addBuiltin() { throw new Error('This harness does not support MCP'); }
   async reloadCustom(entries: Map<string, unknown>) { if (entries.size) throw new Error('This harness does not support MCP'); }

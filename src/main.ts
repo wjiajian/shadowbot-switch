@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { HarnessRegistry, harnessCapabilities, loadAdapter } from './harnesses.js';
 import type { Harness } from './harnesses.js';
-import { NoMcp } from './adapter.js';
+import { assertRunsContract, NoMcp } from './adapter.js';
 import type { HarnessAdapter, HarnessRuns, McpConnection, Prompt } from './adapter.js';
 import type { Agent, Auth, McpLocalConfig, McpRemoteConfig, Session, SessionCreateData } from '@opencode-ai/sdk/v2';
 import { commandTemplate, copilot, explorer, HostConfig, modelSelection, object } from './config.js';
@@ -122,7 +122,8 @@ class Bridge {
           let configurationError: string | undefined;
           try { if (this.harness.capabilities.mcp) await mcp.reloadCustom(customMcp(this.agentDir, root)); }
           catch (error) { configurationError = userMessage(error); }
-          const local: Workspace = { mcp, runs: this.adapter.createRuns({ store: this.store, config: this.config, root, mcp, context: this.context, home: this.home, resources: this.installation.resources, skillSources: this.skillSources }), revision, queue: Promise.resolve(), configurationError };
+          const runs = assertRunsContract(this.adapter.createRuns({ store: this.store, config: this.config, root, mcp, context: this.context, home: this.home, resources: this.installation.resources, skillSources: this.skillSources }), this.harness.id);
+          const local: Workspace = { mcp, runs, revision, queue: Promise.resolve(), configurationError };
           this.publish(root, local);
           const heartbeat = setInterval(() => this.publish(root, local), 2000);
           heartbeat.unref();

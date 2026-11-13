@@ -11,6 +11,7 @@ import { HarnessRegistry } from '../dist/service/harnesses.js';
 import { runtimeDirectory } from '../dist/service/installation.js';
 import { switchBackend } from '../dist/service/switch.js';
 import { Store } from '../dist/service/store.js';
+import { assertRunsContract } from '../dist/service/adapter.js';
 
 const schema = readFileSync('contract/schema.sql', 'utf8');
 const put = (path, value) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, typeof value === 'string' ? value : JSON.stringify(value)); };
@@ -108,6 +109,15 @@ test('a registered non-Pi adapter launches the shared host, persists its history
     if (process) { process.kill(); await closed; }
     rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
+});
+
+test('runs that drop the per-turn run argument are rejected instead of silently ignoring AGENTS.md rules', () => {
+  // A two-parameter start() still type-checks against HarnessRuns, so the shared layer checks it at runtime.
+  const accepted = { start(session, prompt, run) { return run; } };
+  assert.equal(assertRunsContract(accepted, 'current'), accepted);
+  assert.doesNotThrow(() => assertRunsContract({ start(session, prompt, run, interaction) {} }, 'extended'));
+  assert.throws(() => assertRunsContract({ start(session, prompt) {} }, 'legacy'), /legacy.*run\.instructions/);
+  assert.throws(() => assertRunsContract({}, 'missing'), /missing/);
 });
 
 test('opening an already migrated store does not acquire a write lock on host history', () => {

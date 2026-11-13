@@ -28,7 +28,7 @@
 新增托管 harness：
 
 1. 添加 `harnesses/<id>/harness.json`，声明唯一小写 ID、名称、别名、`kind: "managed"`、版本、适配器入口、启动参数与 Skills/MCP 能力。
-2. 实现 `src/adapters/<id>/index.ts`，导出 `adapter: HarnessAdapter`；需要初始化环境时可改为导出 `async initialize(home): Promise<HarnessAdapter>`，在函数中设置环境后动态导入 SDK。`createConfig` 接收宿主模型与认证，`createRuns` 负责执行、取消、原生上下文及会话操作。可选的 `mcp` 实现承载宿主 MCP；`capabilities.mcp` 控制自定义 MCP 的加载，不关闭宿主服务。界面事件和历史通过传入的 `Store` 写入，授权/提问使用 `Interactions`。`start(session, prompt, run)` 的 `run.instructions` 是公共层每轮读取的 AGENTS.md 规则，已经过范围、大小和编码检查；适配器只需把它追加到模型的系统提示，不要自行加载 AGENTS.md，也不要并入 `prompt.system`（该字段会原样保存并回显给宿主）。适配器内部发起的子会话（如 Pi 的 Explorer）沿用同一轮的 `instructions`。
+2. 实现 `src/adapters/<id>/index.ts`，导出 `adapter: HarnessAdapter`；需要初始化环境时可改为导出 `async initialize(home): Promise<HarnessAdapter>`，在函数中设置环境后动态导入 SDK。`createConfig` 接收宿主模型与认证，`createRuns` 负责执行、取消、原生上下文及会话操作。可选的 `mcp` 实现承载宿主 MCP；`capabilities.mcp` 控制自定义 MCP 的加载，不关闭宿主服务。界面事件和历史通过传入的 `Store` 写入，授权/提问使用 `Interactions`。`start(session, prompt, run)` 的 `run.instructions` 是公共层每轮读取的 AGENTS.md 规则，已经过范围、大小和编码检查；适配器只需把它追加到模型的系统提示，不要自行加载 AGENTS.md，也不要并入 `prompt.system`（该字段会原样保存并回显给宿主）。适配器内部发起的子会话（如 Pi 的 Explorer）沿用同一轮的 `instructions`。TypeScript 允许实现方法少声明参数，类型检查拦不住旧的 `start(session, prompt)`，因此公共层创建 runs 时会检查 `start` 至少声明三个参数，不满足即拒绝启动。这项检查只能确认参数已声明，适配器是否真正用到 `run.instructions` 仍需在各自的测试中验证。
 3. 如需依赖，在 `harnesses/<id>/package.json` 与锁文件中声明；`versionPackage` 可指定用哪个依赖版本作为适配器版本，否则使用注册中的 `version`。编译测试需要的依赖放在根包的 `devDependencies`，生产 SDK 只安装到该适配器子目录。
 4. `launch.executable` 相对于发布目录；参数中的 `{runtime}` 替换为该 harness 已提交的发布目录。使用公共兼容服务时设置 `args: ["{runtime}/service/main.js"]`。运行环境提供 `SHADOWBOT_SWITCH_HOME` 和 `SHADOWBOT_HARNESS`，SDK 专属环境变量由适配器设置。
 5. 在隔离测试中注册适配器并验证启动、会话隔离、更新、能力拒绝和恢复；不修改安装器、启动器或切换核心来识别新 ID。
