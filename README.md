@@ -10,7 +10,7 @@
 [![Pi](https://img.shields.io/badge/Pi-1.5.2-333333?style=flat-square)](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 [![License](https://img.shields.io/github/license/wjiajian/shadowbot-switch?style=flat-square)](LICENSE)
 
-[功能](#功能) • [开始使用](#开始使用) • [日常命令](#日常命令) • [Skills](#skills) • [MCP](#mcp) • [更新与迁移](#更新与迁移) • [开发](#开发)
+[功能](#功能) • [开始使用](#开始使用) • [日常命令](#日常命令) • [Skills](#skills) • [MCP](#mcp) • [Agent 规则](#agent-规则agentsmd) • [更新与迁移](#更新与迁移) • [开发](#开发)
 
 </div>
 
@@ -175,6 +175,25 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 配置保存后，应用在下一次空闲请求时自动应用改动：只重连新增或变化的服务；新连接失败时保留原来可用的连接，失败原因显示在 `status` / `mcp status` 中。`mcp test` 使用当前终端的环境变量，结果不等同于 Copilot 内的运行状态；`mcp status` 读取运行实例的记录，约有 2 秒延迟。
 
 示例：[examples/mcp.json](examples/mcp.json) · [examples/shadowbot.json](examples/shadowbot.json)
+
+## Agent 规则（AGENTS.md）
+
+Pi 接入支持自动加载两层规则：
+
+- 安装级：本项目的 `.shadowbot-switch/agent/AGENTS.md`，适用于所有影刀应用。
+- 应用级：`<影刀应用根目录>/AGENTS.md`，只适用于当前应用；冲突时优先于安装级规则。
+
+应用根目录没有 `AGENTS.md` 时，读取 `<影刀应用根目录>/.shadowbot-switch/AGENTS.md`，以支持配置导入。根目录文件存在但为空或无效时，不启用备用文件。`config export --app` 会包含当前应用规则；导入到新应用时写入 `.shadowbot-switch/AGENTS.md`，目标应用已有根目录规则时则遵循文件冲突检查，使用 `--replace` 才会备份并覆盖。
+
+安装级和应用级导出都会跳过无效规则，并在导出结果中列出警告，其余配置正常导出；部分导出返回退出码 `1`，生成的配置包仍可使用。导入会统一规则文件名为 `AGENTS.md`，并在写入任何文件前校验大小及 UTF-8 编码。根目录规则为断链时会报告诊断，导入不会绕过断链写入备用位置；请先修复或移除断链。
+
+规则会在每轮对话自动发送给模型，所以安装级也拒绝目录外链接，避免链接改动把其他本地文件带入提示。加载器允许读取目录内链接；配置迁移沿用不跟随链接写入、不递归复制链接目录的约定，即使 `--replace` 也不会覆盖链接目标。使用链接规则或链接配置目录时，迁移前应将它们整理为普通文件和目录。
+
+每次发起请求时重新读取，保存后下一轮对话生效，无需 reload。主 Agent 和浏览器探索 Agent 都会加载。文件不存在或内容为空时忽略，不会向上扫描父目录或自动加载子目录规则；规则不会改变工具授权。
+
+规则文件须使用 UTF-8，每层最多 32 KiB。无法读取、编码无效、超限、读取期间变化或链接目标越出对应目录的文件会被跳过，并记录诊断；不会截断规则内容。可运行 `.\switch.ps1 config check` 或 `.\switch.ps1 doctor` 检查，应用级检查加 `--app <应用根目录>`。
+
+这里的应用根目录是影刀传给接入层的工作区（优先使用 `SHADOWBOT_OPENCODE_WORKSPACE_ROOT`），不是本仓库目录，也不是可能指向临时运行目录的会话 `directory`。此功能属于 Pi 接入，切回原版 OpenCode 不使用这套加载逻辑。首次使用需执行 `.\switch.ps1 update pi --wait` 更新运行时。
 
 ## 更新与迁移
 

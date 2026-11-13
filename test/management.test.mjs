@@ -1,16 +1,126 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { skillInventory } from '../dist/service/shadowbot.js';
 import { skillSources } from '../dist/service/host-skills.js';
 import { configurationRevision, publishRuntimeState, runtimeStates } from '../dist/service/runtime-state.js';
+import { loadAgentRules, maxRuleBytes } from '../dist/service/agent-rules.js';
+import { manage } from '../dist/service/management.js';
+import { UserError } from '../dist/service/errors.js';
 
 const control = resolve('dist/service/control.js');
 const put = (path, data) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, typeof data === 'string' ? data : JSON.stringify(data)); };
 const skill = (path, name, body = 'Instructions') => put(join(path, 'SKILL.md'), `---\nname: ${name}\ndescription: ${name} instructions.\n---\n${body}\n`);
+
+test('rule migration diagnoses skipped exports and validates imports before writing', { timeout: 30_000 }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'shadowbot-rule-migration-'));
+  const home = join(root, 'state'), app = join(root, 'app');
+  const install = { runtimeRelease: 'a'.repeat(64), piVersion: '1.5.2', resources: join(root, 'resources'), users: join(root, 'users') };
+  put(join(home, 'install.json'), install);
+  put(join(home, 'backend.json'), { mode: 'pi' });
+  const settings = join(app, '.shadowbot-switch', 'shadowbot.json');
+  put(settings, { disabledSkills: ['original'] });
+  const env = { ...process.env, SHADOWBOT_PI_HOME: home, OPENCODE_CONFIG_CONTENT: '{}', OPENCODE_CONFIG: '', OPENCODE_CONFIG_DIR: '', XDG_CONFIG_HOME: '' };
+  const run = (expected, ...args) => {
+    const result = spawnSync(process.execPath, [control, ...args, '--json'], { env, cwd: root, encoding: 'utf8', windowsHide: true });
+    assert.equal(result.status, expected, result.stderr + result.stdout);
+    return JSON.parse(result.stdout);
+  };
+  const bundle = join(root, 'bundle.json');
+  const rulePath = join(app, 'AGENTS.md');
+  const writeBundle = (name, data) => put(bundle, { format: 'shadowbot-switch-config', version: 1, entries: [
+    { path: 'agent/shadowbot.json', data: Buffer.from('{"disabledSkills":["changed"]}').toString('base64') },
+    { path: `agent/${name}`, data: data.toString('base64') },
+  ] });
+  try {
+    put(join(home, 'agent', 'shadowbot.json'), { disabledSkills: [] });
+    for (const [scope, file] of [
+      [['--app', app], rulePath],
+      [['--app', app], join(app, '.shadowbot-switch', 'AGENTS.md')],
+      [['--global'], join(home, 'agent', 'AGENTS.md')],
+    ]) {
+      for (const bad of [Buffer.from([0xff]), Buffer.alloc(maxRuleBytes + 1, 97)]) {
+        writeFileSync(file, bad);
+        const result = run(1, 'config', 'export', bundle, ...scope, '--replace').data;
+        assert.match(result.warnings.join(''), /未导出.*其余配置已导出/);
+        assert.doesNotMatch(result.warnings.join(''), /本轮/);
+        const entries = JSON.parse(readFileSync(bundle, 'utf8')).entries;
+        assert.ok(entries.some(e => e.path === 'agent/shadowbot.json'));
+        assert.ok(!entries.some(e => e.path.toLowerCase() === 'agent/agents.md'));
+      }
+      unlinkSync(file);
+    }
+    writeFileSync(rulePath, 'existing-root-rule');
+    for (const bad of [Buffer.from([0xff]), Buffer.alloc(maxRuleBytes + 1, 97)]) {
+      writeBundle('agents.md', bad);
+      for (const scope of [['--app', app], ['--global']]) {
+        const before = readFileSync(settings, 'utf8');
+        const globalBefore = readFileSync(join(home, 'agent', 'shadowbot.json'), 'utf8');
+        run(1, 'config', 'import', bundle, ...scope, '--replace');
+        assert.equal(readFileSync(settings, 'utf8'), before);
+        assert.equal(readFileSync(join(home, 'agent', 'shadowbot.json'), 'utf8'), globalBefore);
+        assert.equal(readFileSync(rulePath, 'utf8'), 'existing-root-rule');
+      }
+    }
+    // Import lower-case names into an app with existing root rules.
+    put(bundle, { format: 'shadowbot-switch-config', version: 1,
+      entries: [{ path: 'agent/agents.md', data: Buffer.from('imported-rule').toString('base64') }] });
+    assert.match(JSON.stringify(run(1, 'config', 'import', bundle, '--app', app)), /文件已存在/);
+    run(0, 'config', 'import', bundle, '--app', app, '--replace');
+    assert.equal(readFileSync(rulePath, 'utf8'), 'imported-rule');
+    assert.equal(existsSync(join(app, '.shadowbot-switch', 'AGENTS.md')), false);
+    unlinkSync(rulePath);
+    const missing = join(app, 'missing-target');
+    mkdirSync(missing);
+    symlinkSync(missing, rulePath, 'junction');
+    rmdirSync(missing);
+    assert.match(JSON.stringify(run(1, 'config', 'check', '--app', app)), /断链/);
+    assert.match(JSON.stringify(run(1, 'doctor', '--app', app)), /断链/);
+    assert.match(JSON.stringify(run(1, 'config', 'import', bundle, '--app', app, '--replace')), /目标文件是链接/);
+    assert.equal(existsSync(join(app, '.shadowbot-switch', 'AGENTS.md')), false);
+    // An intermediate regular file must be reported by name, before any writes.
+    const blocked = join(app, '.shadowbot-switch', 'skills');
+    writeFileSync(blocked, 'not-a-directory');
+    put(bundle, { format: 'shadowbot-switch-config', version: 1,
+      entries: [{ path: 'agent/skills/example/SKILL.md', data: Buffer.from('test').toString('base64') }] });
+    const pathError = run(1, 'config', 'import', bundle, '--app', app);
+    assert.match(pathError.error, /目标路径不是目录/);
+    assert.ok(pathError.error.includes(blocked));
+    assert.equal(readFileSync(blocked, 'utf8'), 'not-a-directory');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('import path inspection reports permission errors with the affected path', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'shadowbot-path-error-'));
+  const home = join(root, 'state');
+  const target = join(home, 'agent', 'AGENTS.md');
+  const bundle = join(root, 'bundle.json');
+  put(bundle, { format: 'shadowbot-switch-config', version: 1,
+    entries: [{ path: 'agent/AGENTS.md', data: Buffer.from('test').toString('base64') }] });
+  const originalStat = fs.lstatSync;
+  t.mock.method(fs, 'lstatSync', (...args) => {
+    if (args[0] === target) throw Object.assign(new Error('synthetic denied'), { code: 'EACCES' });
+    return originalStat(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(manage(home, {}, ['config', 'import', bundle, '--global']), error => {
+      assert.ok(error instanceof UserError);
+      assert.ok(error.message.includes(target));
+      assert.match(error.message, /EACCES/);
+      return true;
+    });
+    assert.equal(existsSync(target), false);
+  } finally {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('management CLI scopes resources, records choices, edits config, and exports/imports without running MCP', { timeout: 45_000 }, () => {
   const root = mkdtempSync(join(tmpdir(), 'shadowbot-management-'));
@@ -77,6 +187,30 @@ test('management CLI scopes resources, records choices, edits config, and export
     const checks = failure('doctor');
     const diagnostics = JSON.parse(checks.stdout).data;
     assert.ok(diagnostics.filter(row => row.status === '失败').length >= 3, 'doctor must collect independent failures');
+    put(join(home, 'agent', 'AGENTS.md'), 'global-migration-rule');
+    put(join(app, 'AGENTS.md'), 'app-migration-rule');
+    const ruleBundle = join(root, 'rules.json');
+    run('config', 'export', ruleBundle, '--app', app);
+    const copiedApp = join(root, 'copied-app');
+    mkdirSync(copiedApp);
+    run('config', 'import', ruleBundle, '--app', copiedApp);
+    assert.match(loadAgentRules(undefined, copiedApp).instructions, /app-migration-rule/);
+    assert.ok(existsSync(join(copiedApp, '.shadowbot-switch', 'AGENTS.md')));
+    const copiedBundle = join(root, 'copied-rules.json');
+    run('config', 'export', copiedBundle, '--app', copiedApp);
+    assert.ok(JSON.parse(readFileSync(copiedBundle, 'utf8')).entries.some(entry => entry.path === 'agent/AGENTS.md'));
+    const globalRules = join(root, 'global-rules.json');
+    run('config', 'export', globalRules, '--global');
+    run('config', 'import', globalRules, '--app', copiedApp, '--replace');
+    assert.match(loadAgentRules(undefined, copiedApp).instructions, /global-migration-rule/);
+    failure('config', 'import', globalRules, '--app', app);
+    run('config', 'import', globalRules, '--app', app, '--replace');
+    assert.equal(readFileSync(join(app, 'AGENTS.md'), 'utf8'), 'global-migration-rule');
+    writeFileSync(join(app, 'AGENTS.md'), Buffer.from([0xff]));
+    const badRules = JSON.parse(failure('config', 'check', '--app', app).stdout).data;
+    assert.ok(badRules.warnings.some(warning => /AGENTS.md.*UTF-8/.test(warning)));
+    const ruleDiagnostics = JSON.parse(failure('doctor', '--app', app).stdout).data;
+    assert.equal(ruleDiagnostics.find(row => row.check === 'AGENTS.md 规则').status, '失败');
     const reload = run('reload');
     assert.equal(reload.menu.added + reload.menu.updated + reload.menu.removed, 0);
     assert.equal(existsSync(join(home, 'reload.request')), true);

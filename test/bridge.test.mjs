@@ -358,6 +358,10 @@ test('Pi chat, MCP, skills, permission, question, restore and revert', { timeout
 test('Explorer closes its overlay after success, failure and cancellation', { timeout: 30_000 }, async () => {
   const fixture = tempFixture();
   writeFileSync(join(fixture.workspace, 'reference.md'), 'delegated reference');
+  mkdirSync(join(fixture.home, 'agent'), { recursive: true });
+  writeFileSync(join(fixture.home, 'agent', 'AGENTS.md'), 'explorer-installation-rule');
+  writeFileSync(join(fixture.workspace, 'AGENTS.md'), 'authoritative-app-rule');
+  writeFileSync(join(fixture.other, 'AGENTS.md'), 'transport-directory-rule-must-not-load');
   let scenario = 'success';
   const childStarted = Promise.withResolvers();
   const model = modelFixture({ readPathFor: content => scenario === 'permission' && content.includes('Capture synthetic page evidence') ? 'reference.md' : undefined,
@@ -430,6 +434,12 @@ test('Explorer closes its overlay after success, failure and cancellation', { ti
     assert.match(card.state.output, /fixture-selector/);
     assert.match(card.state.output, /"evidence_role":"authoritative"/);
     assert.match(JSON.stringify(model.requests[1].request.messages), /fixture host context.*SHADOWBOT_BROWSER_PREFERENCE.*Fixture Chrome.*Fixture Edge/s);
+    for (const { request } of model.requests.slice(0, 2)) {
+      const system = JSON.stringify(request.messages.filter(message => message.role === 'system'));
+      assert.match(system, /explorer-installation-rule/);
+      assert.match(system, /authoritative-app-rule/);
+      assert.doesNotMatch(system, /transport-directory-rule-must-not-load/);
+    }
     assert.doesNotMatch(JSON.stringify(model.requests[0].request.messages), /SHADOWBOT_BROWSER_PREFERENCE/);
     assert.doesNotMatch(JSON.stringify(model.requests[0].request.tools ?? []), /"name":"xbot-copilot_execute_cell"/);
     assert.match(JSON.stringify(model.requests[1].request.tools ?? []), /"name":"xbot-copilot_execute_cell"/);
@@ -488,6 +498,57 @@ test('Explorer closes its overlay after success, failure and cancellation', { ti
     await bridge?.stop();
     for (const server of [host, model.server, xbot.server]) { server.closeAllConnections(); server.close(); }
     rmSync(fixture.root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  }
+});
+
+test('AGENTS rules reach the model, refresh each turn and stay scoped to the application', { timeout: 30_000 }, async () => {
+  const fixture = tempFixture();
+  const model = modelFixture();
+  const modelURL = await listen(model.server);
+  const config = { model: 'fixture/model', provider: { fixture: { npm: '@ai-sdk/openai-compatible',
+    options: { baseURL: modelURL, apiKey: 'fixture-model-key' }, models: { model: { name: 'Fixture' } } } } };
+  const agentDir = join(fixture.home, 'agent');
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, 'AGENTS.md'), 'installation-rule-marker');
+  writeFileSync(join(fixture.workspace, 'AGENTS.md'), 'application-rule-marker');
+  writeFileSync(join(fixture.root, 'AGENTS.md'), 'parent-rule-must-not-load');
+  let bridge;
+  try {
+    bridge = await start(fixture, config);
+    const session = await get(bridge.api('/session', { method: 'POST' }));
+    const prompt = async (id = session.id, directory = fixture.workspace) => {
+      await get(bridge.api(`/session/${id}/message`, { method: 'POST', directory,
+        data: { parts: [{ type: 'text', text: 'Check rules' }] } }));
+      return JSON.stringify(model.requests.at(-1).request.messages.filter(message => message.role === 'system'));
+    };
+    const initial = await prompt();
+    assert.match(initial, /installation-rule-marker/);
+    assert.match(initial, /application-rule-marker/);
+    assert.ok(initial.indexOf('installation-rule-marker') < initial.indexOf('application-rule-marker'));
+    assert.doesNotMatch(initial, /parent-rule-must-not-load/);
+    writeFileSync(join(fixture.workspace, 'AGENTS.md'), 'updated-application-marker');
+    const updated = await prompt();
+    assert.match(updated, /updated-application-marker/);
+    assert.doesNotMatch(updated, /application-rule-marker/);
+    const other = await get(bridge.api('/session', { method: 'POST', directory: fixture.other }));
+    const isolated = await prompt(other.id, fixture.other);
+    assert.match(isolated, /installation-rule-marker/);
+    assert.doesNotMatch(isolated, /application-rule-marker|updated-application-marker/);
+    unlinkSync(join(fixture.workspace, 'AGENTS.md'));
+    writeFileSync(join(agentDir, 'AGENTS.md'), '  \n');
+    const removed = await prompt();
+    assert.doesNotMatch(removed, /application-rule-marker|updated-application-marker|installation-rule-marker|Project instructions from AGENTS.md/);
+    writeFileSync(join(agentDir, 'AGENTS.md'), Buffer.from([0xff, 0xfe, 0x61]));
+    writeFileSync(join(fixture.workspace, 'AGENTS.md'), 'valid-app-after-bad-installation');
+    const invalid = await prompt();
+    assert.match(invalid, /valid-app-after-bad-installation/);
+    assert.doesNotMatch(invalid, /Installation rules|\uFFFD/);
+    assert.match(bridge.processLog.join(''), /AGENTS.md.*UTF-8/);
+  } finally {
+    await bridge?.stop();
+    model.server.closeAllConnections();
+    await new Promise(resolve => model.server.close(resolve));
+    rmSync(fixture.root, { recursive: true, force: true });
   }
 });
 

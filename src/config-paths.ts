@@ -1,5 +1,9 @@
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, sep } from 'node:path';
+
+export function outsideWorkspace(fromRoot: string) {
+  return isAbsolute(fromRoot) || fromRoot === '..' || fromRoot.startsWith(`..${sep}`);
+}
 
 export const appConfigDirectory = (root: string) => join(root, '.shadowbot-switch');
 export const appConfigDirectories = (root: string) => [join(root, '.pi'), appConfigDirectory(root)];
