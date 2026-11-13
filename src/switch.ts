@@ -1,3 +1,4 @@
+import { HarnessRegistry } from './harnesses.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -185,8 +186,8 @@ async function restoreSnapshot(home: string, installation: Installation, backend
   }
 }
 
-export async function switchBackend(home: string, installation: Installation, destination: Backend, schema: string, checkStopped = assertHostStopped) {
-  if (destination !== 'pi' && destination !== 'original') throw new Error('Expected backend pi or original');
+export async function switchBackend(home: string, installation: Installation, destination: Backend, schema: string, checkStopped = assertHostStopped, registry = new HarnessRegistry()) {
+  destination = registry.get(destination).id;
   checkStopped();
   const pending = join(home, 'switch.pending.json');
   const log = join(home, 'switch-log.jsonl');
@@ -197,8 +198,8 @@ export async function switchBackend(home: string, installation: Installation, de
   };
   if (existsSync(pending)) {
     const interrupted = readJson<Journal>(pending);
-    if (!['pi', 'original'].includes(interrupted.destination) || !['observe', 'pi', 'original'].includes(interrupted.previous) ||
-        interrupted.source !== (interrupted.previous === 'pi' ? 'pi' : 'original') || interrupted.source === interrupted.destination) {
+    if (registry.get(interrupted.destination).id !== interrupted.destination ||
+        interrupted.source !== registry.selected(interrupted.previous).id || interrupted.source === interrupted.destination) {
       throw new Error('Invalid backend recovery journal');
     }
     const staged = interrupted.stage === undefined ? undefined : stagePath(installation, interrupted.stage);
@@ -213,7 +214,7 @@ export async function switchBackend(home: string, installation: Installation, de
     if (staged) rmSync(staged, { force: true });
   }
   const previous = mode(home);
-  const source = previous === 'pi' ? 'pi' : 'original';
+  const source = registry.selected(previous).id;
   if (source === destination) {
     atomicWrite(join(home, 'backend.json'), JSON.stringify({ mode: destination }));
     return;
@@ -221,8 +222,8 @@ export async function switchBackend(home: string, installation: Installation, de
   verifySchema(installation.database, schema);
   await saveSnapshot(home, source, installation.database, findPointers(installation.users), schema);
   if (!existsSync(join(home, 'backends', destination, 'snapshot.json'))) {
-    if (destination !== 'pi') throw new Error('Original session snapshot is missing');
-    await saveSnapshot(home, 'pi', undefined, {}, schema);
+    if (registry.get(destination).kind === 'bundled') throw new Error('Original session snapshot is missing');
+    await saveSnapshot(home, destination, undefined, {}, schema);
   }
   const stage = await stageSnapshot(home, installation, destination, schema);
   try {

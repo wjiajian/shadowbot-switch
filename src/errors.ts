@@ -1,8 +1,17 @@
 /** Only deliberately constructed messages cross the UI boundary. Never expose raw provider payloads. */
 export class UserError extends Error {}
 
+const userErrors = new Set<typeof UserError>([UserError]);
+const requestErrors = new Set<typeof RequestError>();
+export function registerErrors(module: { UserError?: typeof UserError; RequestError?: typeof RequestError }) {
+  if (typeof module.UserError === 'function') userErrors.add(module.UserError);
+  if (typeof module.RequestError === 'function') requestErrors.add(module.RequestError);
+}
+export function isUserError(error: unknown): error is UserError { return [...userErrors].some(type => error instanceof type); }
+export function isRequestError(error: unknown): error is RequestError { return error instanceof RequestError || [...requestErrors].some(type => error instanceof type); }
+
 export function connectionError(error: unknown) {
-  if (error instanceof UserError) return error.message;
+  if (isUserError(error)) return error.message;
   const value = error as { code?: string; status?: number; cause?: { code?: string }; name?: string } | undefined;
   const code = value?.code ?? value?.cause?.code;
   if (code === 'ENOENT') return '找不到 MCP 启动程序。检查 command 路径或 PATH。';
@@ -15,7 +24,7 @@ export function connectionError(error: unknown) {
 }
 
 export function userMessage(error: unknown, fallback = '操作失败。运行 .\\switch.ps1 doctor 查看诊断。') {
-  return error instanceof UserError ? error.message : fallback;
+  return isUserError(error) ? error.message : fallback;
 }
 
 export function modelError(message = '') {
@@ -24,4 +33,7 @@ export function modelError(message = '') {
   if (/timeout|timed out|ECONN|fetch failed/i.test(message)) return '无法完成模型连接。请检查 API 地址、网络和模型服务状态。';
   if (/context.{0,30}(limit|length)|maximum context/i.test(message)) return '模型上下文超出限制。请缩短附件或新建会话后重试。';
   return '模型请求失败。请检查影刀模型配置及服务状态。';
+}
+export class RequestError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
 }

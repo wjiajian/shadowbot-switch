@@ -2,33 +2,45 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { UserError } from './errors.js';
+import { harnessID } from './harnesses.js';
+import type { HarnessRelease } from './harnesses.js';
+import { legacyRuntimeDirectory, legacyRuntimeHarness, legacyVersion } from './legacy.js';
 
 export const protocolVersion = '1.18.12';
 export const originalHash = 'de2e62ab0e3f27a3ea7ff9ef4c4fe7097f0d6df01118b2e7c5f57726256d6314';
-export type Mode = 'observe' | 'pi' | 'original';
-export type Backend = Exclude<Mode, 'observe'>;
+export type Mode = string;
+export type Backend = string;
 export interface Installation {
   agentPath: string;
   originalHash: string;
   launcherHash: string;
   runtimeRelease?: string;
   piVersion?: string;
+  runtime?: { harness: string; release: string };
+  bundled?: { id: string; version?: string };
+  harnesses?: Record<string, HarnessRelease>;
   database: string;
   users: string;
   resources: string;
   hostSkills?: string;
 }
 
-export function runtimeDirectory(home: string, installation: Installation) {
-  const id = installation.runtimeRelease;
-  if (id === undefined) return home;
-  if (!/^[0-9a-f]{64}$/.test(id)) throw new Error('Invalid installation release ID');
-  return installation.piVersion ? join(home, 'harnesses', 'pi', 'releases', id) : join(home, 'releases', id);
+export function runtimeDirectory(home: string, installation: Installation, harness?: string) {
+  const current = harness && installation.harnesses?.[harness];
+  const pointer = current ? { harness, release: current.release } : installation.runtime;
+  if (pointer) {
+    if (!/^[0-9a-f]{64}$/.test(pointer.release)) throw new Error('Invalid installation release ID');
+    return join(home, 'harnesses', harnessID(pointer.harness!), 'releases', pointer.release);
+  }
+  return legacyRuntimeDirectory(home, installation);
 }
 
+export const runtimeHarness = (installation: Installation) => installation.runtime?.harness ?? legacyRuntimeHarness();
+export const installedVersion = (installation: Installation, harness: string) => installation.harnesses?.[harness]?.version ?? legacyVersion(installation, harness);
+
 export function installationHome(): string {
-  const root = process.env.SHADOWBOT_PI_HOME;
-  if (!root) throw new Error('ShadowBotPi installation directory is unavailable');
+  const root = process.env.SHADOWBOT_SWITCH_HOME ?? process.env.SHADOWBOT_PI_HOME;
+  if (!root) throw new Error('ShadowBot Switch installation directory is unavailable');
   return resolve(root);
 }
 
@@ -53,6 +65,5 @@ export function sha256(path: string) {
 
 export function mode(home: string): Mode {
   const value = readJson<{mode: Mode}>(join(home, 'backend.json')).mode;
-  if (value !== 'observe' && value !== 'original' && value !== 'pi') throw new Error('Invalid backend mode');
-  return value;
+  return value === 'observe' ? value : harnessID(value);
 }

@@ -1,6 +1,8 @@
 # ShadowBot Switch
 
-在 Windows 上为影刀 Copilot 切换 Pi 和影刀自带的 OpenCode。继续使用影刀面板、模型设置、流程工具和网页探索，并添加自定义 Skills 与 MCP。两种后端分别保留聊天记录，切回后可以继续对应的会话。
+影刀 Copilot 的多 harness 接入与切换工具。公共层负责注册、安装、更新、切换、诊断和恢复，兼容层保留影刀面板、模型设置、工具授权及会话展示；各适配器负责执行引擎、原生会话和能力映射。每个 harness 分别保留运行时和聊天记录。
+
+目前提供 Pi 适配器与影刀原版 OpenCode。Skills、自定义 MCP 的执行按适配器声明的能力提供；离线配置管理、检查和备份在使用原版时也可操作。Pi 是首个托管适配器，公共管理流程不以 Pi 为默认引擎。
 
 支持 Windows x64、PowerShell 7、影刀 **6.3.39** 和随附的 OpenCode **1.18.12**。当前项目使用已验证的 Pi **1.5.2**。
 
@@ -9,7 +11,8 @@
 在 [GitHub 项目页](https://github.com/wjiajian/shadowbot-switch) 点击 **Code → Download ZIP**，解压到准备长期保留的目录；也可以使用 `git clone`。在项目根目录打开 PowerShell 7：
 
 ```powershell
-.\switch.ps1 use pi --wait
+.\switch.ps1 harnesses
+.\switch.ps1 use pi --wait      # 示例：选择 Pi 适配器
 ```
 
 脚本先准备运行文件，再提示退出影刀。保存工作，从托盘完全退出影刀及 OpenCode；脚本等待退出后完成切换，然后重新打开影刀。新装影刀需先打开一次 Copilot，初始化会话库。
@@ -28,6 +31,8 @@
 .\switch.ps1                    # 显示当前后端和操作菜单
 .\switch.ps1 use pi             # 复用已安装版本，恢复 Pi 聊天记录
 .\switch.ps1 use original       # 恢复影刀原版程序和聊天记录
+.\switch.ps1 update             # 更新当前 harness
+.\switch.ps1 update pi          # 更新指定 harness，保持当前选择
 .\switch.ps1 reload             # 同步菜单，安排配置刷新
 .\switch.ps1 status             # 后端、运行应用和配置生效状态
 .\switch.ps1 doctor             # 汇总诊断，每个问题附修复提示
@@ -40,7 +45,7 @@
 
 ## 配置范围
 
-默认管理**此安装下的所有应用**，不把终端所在目录当成影刀应用。应用级配置优先于安装级自定义配置。
+默认管理**此安装下的所有应用**，不把终端所在目录当成影刀应用。应用级配置优先于安装级自定义配置。新配置使用应用下的 `.shadowbot-switch/`；已有 `.pi/` 配置和 Skill 继续读取，同名时新目录优先。
 
 ```powershell
 .\switch.ps1 apps list
@@ -59,7 +64,7 @@
 | 范围 | 目录 |
 | --- | --- |
 | 此安装的所有应用 | `.shadowbot-switch/skills/<名称>/SKILL.md` |
-| 单个影刀应用 | `<应用根目录>/.pi/skills/<名称>/SKILL.md` |
+| 单个影刀应用 | `<应用根目录>/.shadowbot-switch/skills/<名称>/SKILL.md` |
 
 也可以用命令自动复制、启用或禁用：
 
@@ -80,7 +85,9 @@ Skill 内容、增删和权限在下一轮读取。安装级菜单文件自动�
 
 ## MCP
 
-安装级配置位于 `.shadowbot-switch/agent/mcp.json`，应用级位于 `<应用根目录>/.pi/mcp.json`。支持 stdio 和 Streamable HTTP。
+安装级配置位于 `.shadowbot-switch/agent/mcp.json`，应用级位于 `<应用根目录>/.shadowbot-switch/mcp.json`。支持 stdio 和 Streamable HTTP。
+
+每个服务只能填写 `command`（stdio）或 `url`（HTTP）中的一个，同时填写会在检查、导入和连接前报错。当前不支持 OAuth 登录或令牌刷新，含 `oauth` 字段的配置会明确报错；若服务支持静态令牌，可通过 `headers` 配置，例如 `"Authorization": "Bearer ${MCP_TOKEN}"`。
 
 `command: "node"` 使用随附 Node；要指定其他 Node 版本，可填写其完整路径。其他外部程序需在本机安装或填写可执行文件路径。
 
@@ -110,16 +117,18 @@ Skill 内容、增删和权限在下一轮读取。安装级菜单文件自动�
 ## 更新、恢复和迁移
 
 ```powershell
-.\switch.ps1 update --wait
+.\switch.ps1 update pi --wait  # 即使当前使用原版，也可更新 Pi
 .\switch.ps1 repair --wait
 .\switch.ps1 config export 'D:\backup\shadowbot-config.json' --global
 .\switch.ps1 config import 'D:\backup\shadowbot-config.json' --global
 .\switch.ps1 config check --global
 ```
 
-`use` 只切换并复用已安装版本。`update` 从当前本地源码构建，使用项目锁定的 Pi 版本，不自动拉取 GitHub 源码或追踪 npm latest；保持原来选择的后端。构建、测试和安装使用同一份依赖锁文件，每个新版运行时携带独立依赖，准备期间不改动旧运行时。
+`use <harness>` 安装或复用该 harness 的已安装版本，再切换会话。`update [harness]` 从当前本地源码和该适配器锁定的依赖构建，省略参数时更新当前选择；不会自动拉取 GitHub 源码或追踪 npm latest，也不会改变当前选择。原版 OpenCode 随影刀更新，`update original` 会说明这一点，不会转而更新 Pi。
 
-更新时重新下载源码，将解压后的项目文件覆盖到原项目目录，保留 `.shadowbot-switch/`（配置和聊天数据）与 `.tools/`（工具和缓存），再运行 `update --wait`。通过 Git 获取的项目可先拉取源码，再执行同一命令。
+公共依赖由根目录锁文件管理；适配器依赖由 `harnesses/<id>/package-lock.json` 管理，安装到对应发布目录的适配器子目录。每次更新生成独立不可变运行时，准备阶段不修改旧运行时和其他 harness 的记录。旧 Pi 安装第一次使用新版管理流程时会重建适配器，保留会话和配置。
+
+更新时重新下载源码，将解压后的项目文件覆盖到原项目目录，保留 `.shadowbot-switch/`（配置和聊天数据）与 `.tools/`（工具和缓存），再运行 `update <harness> --wait`（例如 `update pi --wait`）。通过 Git 获取的项目可先拉取源码，再执行同一命令。当前使用原版时，无参数 `update --wait` 只会提示原版随影刀更新；要重建托管运行时，请明确指定其名称。
 
 `repair` 用于移动整个项目目录后的定位修复及未完成的激活恢复，会核对原程序和启动器。旧项目目录仍存在时拒绝接管，避免混用两套会话。移动整个项目时须保留 `.shadowbot-switch/`。
 
@@ -131,8 +140,9 @@ Skill 内容、增删和权限在下一轮读取。安装级菜单文件自动�
 | --- | --- |
 | `.shadowbot-switch/skills/` | 安装级自定义 Skills |
 | `.shadowbot-switch/agent/` | 安装级配置及旧 Skill 目录 |
-| `.shadowbot-switch/backends/` | 两种后端会话备份、当前会话指针、Pi 原生记录 |
-| `.shadowbot-switch/harnesses/pi/releases/` | 每版独立运行时和依赖 |
+| `.shadowbot-switch/backends/` | 各 harness 独立的会话快照、当前会话指针与原生记录 |
+| `.shadowbot-switch/harnesses/<id>/releases/` | 每版独立运行时和依赖 |
+| `.shadowbot-switch/harnesses/<id>/agent/` | 适配器专属运行配置（如 Pi SDK 的 agent 目录） |
 | `.shadowbot-switch/host-skills/` | 官方 Skill 联接与缓存 |
 | `.shadowbot-switch/running/` | 不含凭据的运行实例状态 |
 | `.shadowbot-switch/config-backups/` | 导入覆盖前和移除 Skill 的备份 |
@@ -145,5 +155,7 @@ Skill 内容、增删和权限在下一轮读取。安装级菜单文件自动�
 ```powershell
 .\scripts\build.ps1       # TypeScript、Go、Node 和 PowerShell 测试
 ```
+
+扩展适配器的注册格式、边界和验收要求见 [Harness 接入约定](contract/README.md#harness-接入约定)。测试用第二适配器位于 `test/fixtures/harness/`，只在隔离测试中注册。
 
 [使用体验验收](EXPERIENCE-PLAN.md) · [实施计划](PLAN.md) · [兼容接口](contract/README.md) · [验证记录](TEST-REPORT.md)

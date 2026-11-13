@@ -1,3 +1,4 @@
+import { appConfigFiles } from './config-paths.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -5,7 +6,7 @@ import { atomicWrite, readJson } from './installation.js';
 
 export function configurationRevision(home: string, root?: string) {
   const hash = createHash('sha256');
-  for (const path of [join(home, 'agent', 'mcp.json'), ...(root ? [join(root, '.pi', 'mcp.json')] : []), join(home, 'reload.request')]) {
+  for (const path of [join(home, 'agent', 'mcp.json'), ...appConfigFiles(root, 'mcp.json'), join(home, 'reload.request')]) {
     hash.update(path).update('\0');
     if (existsSync(path)) hash.update(readFileSync(path));
   }
@@ -13,7 +14,7 @@ export function configurationRevision(home: string, root?: string) {
 }
 
 export type RuntimeState = {
-  pid: number; root: string; updated: number; active: number; revision: string;
+  harness?: string; pid: number; root: string; updated: number; active: number; revision: string;
   mcp: Record<string, unknown>; errors: Record<string, string>; configurationError?: string; menuReconnect?: boolean;
 };
 

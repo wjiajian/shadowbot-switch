@@ -1,0 +1,11 @@
+{
+  "id": "pi",
+  "menuOrder": 10,
+  "name": "Pi",
+  "aliases": [],
+  "kind": "managed",
+  "versionPackage": "@earendil-works/pi-coding-agent",
+  "adapter": "adapters/pi/index.js",
+  "launch": { "executable": "node.exe", "args": ["{runtime}/service/main.js"] },
+  "capabilities": { "skills": true, "mcp": true }
+}

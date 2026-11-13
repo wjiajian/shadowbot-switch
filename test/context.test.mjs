@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { contextSettings, limitToolText, projectToolContext, withRuntimeContext } from '../dist/service/context.js';
+import { contextSettings, limitToolText, projectToolContext, withRuntimeContext } from '../dist/service/adapters/pi/context.js';
 
 const text = value => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }];
 const call = (toolName, toolCallId, args, content, isError = false) => [

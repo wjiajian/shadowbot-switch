@@ -63,10 +63,15 @@ func TestLaunchUsesCommittedRuntime(t *testing.T) {
 	write(filepath.Join(service, "main.js"), `
 const fs = require('node:fs');
 const path = require('node:path');
+const home = process.env.SHADOWBOT_PI_HOME;
+const install = JSON.parse(fs.readFileSync(path.join(home, 'install.json')));
+const runtime = install.runtimeRelease ? (install.piVersion ? path.join(home, 'harnesses', 'pi', 'releases', install.runtimeRelease) : path.join(home, 'releases', install.runtimeRelease)) : home;
+if (fs.readFileSync(path.join(runtime, 'schema.sql'), 'utf8') !== 'legacy schema fixture') throw new Error('Wrong legacy schema');
 fs.writeFileSync(path.join(process.env.SHADOWBOT_PI_HOME, 'launch.json'), JSON.stringify({
   args: process.argv.slice(2), cwd: process.cwd(), authenticated: process.env.OPENCODE_SERVER_PASSWORD === 'fixture-password',
   agentDir: process.env.PI_CODING_AGENT_DIR
 }));`)
+	write(filepath.Join(runtime, "schema.sql"), "legacy schema fixture")
 	write(filepath.Join(home, "install.json"), `{"runtimeRelease":"`+id+`","piVersion":"fixture"}`)
 	write(filepath.Join(home, "backend.json"), `{"mode":"pi"}`)
 	t.Setenv("OPENCODE_SERVER_PASSWORD", "fixture-password")
@@ -103,5 +108,61 @@ fs.writeFileSync(path.join(process.env.SHADOWBOT_PI_HOME, 'launch.json'), JSON.s
 	if !reflect.DeepEqual(launch.Args, args) || !strings.EqualFold(launch.Cwd, cwd) || !launch.Authenticated ||
 		launch.AgentDir != filepath.Join(home, "agent") {
 		t.Fatalf("unexpected launch parameters: %+v", launch)
+	}
+	// Updating another harness keeps the old Pi service and its own legacy schema
+	// lookup, while control commands move to the newly committed manager release.
+	write(filepath.Join(home, "install.json"), `{"runtimeRelease":"`+id+`","piVersion":"fixture","runtime":{"harness":"manager","release":"`+strings.Repeat("b", 64)+`"},"harnesses":{"pi":{"release":"`+id+`","legacy":true,"launch":{"executable":"node.exe","args":["{runtime}/service/main.js"]}}}}`)
+	if code, err := runAt(home, args); code != 0 || err != nil {
+		t.Fatalf("retained legacy launch: code=%d err=%v", code, err)
+	}
+}
+
+func TestRegisteredHarnessSelectsOwnRuntime(t *testing.T) {
+	node, err := os.ReadFile(filepath.Join("..", ".tools", "node", "node.exe"))
+	if os.IsNotExist(err) {
+		t.Skip("pinned Node is required")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	id := strings.Repeat("d", 64)
+	runtime := filepath.Join(home, "harnesses", "fixture", "releases", id)
+	if err := os.MkdirAll(filepath.Join(runtime, "service"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path string, contents []byte) {
+		t.Helper()
+		if err := os.WriteFile(path, contents, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(runtime, "node.exe"), node)
+	write(filepath.Join(runtime, "service", "fixture.js"), []byte(`
+const fs = require('node:fs');
+fs.writeFileSync(require('node:path').join(process.env.SHADOWBOT_SWITCH_HOME, 'fixture-launch.json'), JSON.stringify({
+ harness: process.env.SHADOWBOT_HARNESS, args: process.argv.slice(2), nativeDir: process.env.PI_CODING_AGENT_DIR
+}));`))
+	// The control service lives in another release. Serve must select the active harness's record.
+	write(filepath.Join(home, "install.json"), []byte(`{"runtime":{"harness":"manager","release":"`+strings.Repeat("e", 64)+`"},"harnesses":{"fixture":{"release":"`+id+`","launch":{"executable":"node.exe","args":["{runtime}/service/fixture.js"]}}}}`))
+	write(filepath.Join(home, "backend.json"), []byte(`{"mode":"fixture"}`))
+	t.Setenv("PI_CODING_AGENT_DIR", "must-not-be-replaced")
+	if code, err := runAt(home, []string{"serve", "--port", "0"}); code != 0 || err != nil {
+		t.Fatalf("generic launch: %d %v", code, err)
+	}
+	var actual struct {
+		Harness   string
+		Args      []string
+		NativeDir string
+	}
+	if err := readJSON(filepath.Join(home, "fixture-launch.json"), &actual); err != nil {
+		t.Fatal(err)
+	}
+	if actual.Harness != "fixture" || actual.NativeDir != "must-not-be-replaced" || !reflect.DeepEqual(actual.Args, []string{"serve", "--port", "0"}) {
+		t.Fatalf("unexpected launch: %+v", actual)
+	}
+	write(filepath.Join(home, "backend.json"), []byte(`{"mode":"unknown"}`))
+	if code, err := runAt(home, []string{"serve"}); code != 1 || err == nil {
+		t.Fatal("uninstalled harness was accepted")
 	}
 }

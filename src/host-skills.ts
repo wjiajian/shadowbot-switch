@@ -5,11 +5,11 @@ import { join } from 'node:path';
 import { runtimeDirectory } from './installation.js';
 import type { Installation } from './installation.js';
 
-export function skillSources(home: string, installation: Installation) {
+export function skillSources(home: string, installation: Installation, harness?: string) {
   return {
-    bridge: join(runtimeDirectory(home, installation), 'skills'),
+    bridge: join(runtimeDirectory(home, installation, harness), 'skills'),
     // Older installations stored bundled skills directly under home.
-    autoEnabled: installation.runtimeRelease ? join(home, 'skills') : undefined,
+    autoEnabled: (installation.runtime || installation.runtimeRelease) ? join(home, 'skills') : undefined,
     resources: join(installation.resources, 'Skills'),
     runtime: installation.hostSkills,
     cache: join(home, 'host-skills'),
@@ -63,7 +63,7 @@ export function officialSkillDirectories(sources: SkillSources) {
       try {
         roots.push(unpackArchive(join(sources.resources, entry.name), entry.name.slice(0, -4), sources.cache));
       } catch {
-        console.error(`ShadowBotPi could not load official skill archive ${entry.name}`);
+        console.error(`ShadowBot Switch could not load official skill archive ${entry.name}`);
       }
     }
   }

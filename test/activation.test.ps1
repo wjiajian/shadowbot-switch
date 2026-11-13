@@ -52,6 +52,32 @@ try {
     Set-CheckedExecutable $backup $agent $originalHash $newRelease.launcherHash
     if ((Get-FileHash -LiteralPath $agent).Hash -ne $originalHash) { throw 'Rollback did not restore the original executable.' }
     if (!(Test-Path -LiteralPath (Join-Path $newRuntime 'launcher.exe'))) { throw 'Rollback removed the prepared release.' }
+    # Updating another harness with original selected can encounter an old launcher
+    # after an interrupted restore (or legacy observe). Journal the restore too.
+    New-Item -ItemType Directory -Path (Join-Path $state 'original') -Force | Out-Null
+    Set-CheckedExecutable $backup (Join-Path $state 'original/opencode.exe') $originalHash
+    foreach ($selected in @('original', 'observe')) {
+        Set-CheckedExecutable (Join-Path $oldRuntime 'launcher.exe') $agent $oldRelease.launcherHash
+        Publish-Release $state $oldRelease
+        Write-AtomicJson (Join-Path $state 'backend.json') @{ mode = $selected }
+        Write-AtomicJson "$agent.shadowbot-pi.json" @{ home = $state }
+        Write-AtomicJson $pending @{ previousHash = $oldRelease.launcherHash; release = $newRelease; bundledMode = 'original' }
+        $lock = [IO.File]::Open($control, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $interrupted = $false
+            try { Complete-Activation $state $agent $originalHash {} } catch { $interrupted = $true }
+            if (!$interrupted -or (Get-FileHash -LiteralPath $agent).Hash -ne $originalHash) { throw 'Bundled activation did not reach the interrupted restore state.' }
+            if (!(Test-Path -LiteralPath $pending)) { throw 'Bundled activation lost recovery journal.' }
+        } finally { $lock.Dispose() }
+        Complete-Activation $state $agent $originalHash {}
+        if ((Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).launcherHash -ne $newRelease.launcherHash) { throw 'Bundled update failed to publish new manager.' }
+        if ((Get-Content -LiteralPath (Join-Path $state 'backend.json') -Raw | ConvertFrom-Json).mode -ne 'original') { throw 'Legacy observe selection was not normalized.' }
+        if ((Test-Path -LiteralPath $pending) -or (Test-Path -LiteralPath "$agent.shadowbot-pi.json")) { throw 'Bundled restore retained owned launcher metadata.' }
+        # A subsequent install must accept the restored hash and activate normally.
+        Write-AtomicJson $pending @{ previousHash = $originalHash; release = $newRelease }
+        Complete-Activation $state $agent $originalHash {}
+        if ((Get-FileHash -LiteralPath $agent).Hash -ne $newRelease.launcherHash) { throw 'Bundled update stranded the next activation.' }
+    }
     Write-Output 'Installation activation, interrupted upgrade recovery and executable rollback passed.'
 } finally {
     $target = (Resolve-Path -LiteralPath $root).Path

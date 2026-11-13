@@ -1,5 +1,41 @@
 # 验证记录
 
+## PR #1 MCP 传输歧义与认证声明修复（2026-11-13）
+
+- 修复前用隔离测试实际复现两项问题：同时提供 HTTP URL 和 command 会启动测试子进程，提供 OAuth 配置会发出未认证请求。修复后公共校验按字段是否存在要求 command/url 二选一，显式 type、null 或 undefined 都不能绕过检查。
+- 移除公共格式中未实现的 OAuth 类型及格式校验，改为明确报告不支持登录和令牌刷新。测试确认报错前不会发出网络请求；静态 headers 令牌仍可连接，更新为无效 OAuth 配置时保留原可用连接。
+- 在原版模式和适配器模块缺失时，config check/import 同样拒绝传输冲突及 OAuth 配置；失败导入不会覆盖已保存配置，错误信息不包含凭据。
+- Windows 本机完整执行 `scripts/build.ps1`（`SHADOWBOT_TEST_OBSERVE=1`）：39 项 Node 测试全部通过、无跳过，TypeScript/Go 构建、Go 测试和 PowerShell 激活、搬迁、等待及发布测试通过。本地原始日志：`.tools/review-mcp-transport-auth-build.log`。
+
+## PR #1 公共校验与能力查询收敛（2026-11-13）
+
+- 自定义 MCP 的离线检查、导入与 Pi 加载共用 `validateCustomMcp`，删除适配器中重复的规则、只供旧测试使用的配置入口及无人调用的 `mcp.validate`。Pi 库的校验只用于宿主内置 MCP 的格式转换，公共层仍不依赖 Pi SDK。
+- 新增 14 组配置边界用例，覆盖 stdio、HTTP、环境变量模板、OAuth、保留名称及无效 timeout；离线检查与 Pi 加载的接受结果和错误信息一致。原有真实 stdio、宿主 SSE 和增量重连测试继续通过。
+- 所有已安装能力回退到注册能力的查询统一调用 `harnessCapabilities`。集成测试让注册能力高于已安装能力，验证状态、连接检查、适配器加载与 HTTP 行为仍遵守已安装记录；原版模式也不会按新注册能力误选旧适配器。
+- 在 Windows 本机实际执行 `scripts/build.ps1`，启用 `SHADOWBOT_TEST_OBSERVE=1`：36 项 Node 测试全部通过、无跳过，TypeScript/Go 构建、Go 测试和 PowerShell 激活、搬迁、等待及发布测试通过。原始输出保存在本地 `.tools/review-followup-build.log`（不提交构建日志）。
+
+## PR #1 审查问题修复（2026-11-13）
+
+- `scripts/build.ps1` 完整构建通过；启用 `SHADOWBOT_TEST_OBSERVE=1` 后 35 项 Node 测试全部通过、无跳过，Go 启动器及 PowerShell 激活、搬迁、等待、注册与发布测试均通过。
+- 原版或旧 observe 模式仍使用旧启动器时，更新通过激活日志恢复原版程序再提交管理清单。测试在替换程序后锁住控制启动器模拟中断，恢复后可继续激活，不再产生清单与活动程序的哈希分歧。
+- 更新其他 harness 后保留的旧 Pi 记录仍带有其服务读取 schema 所需的旧字段。PowerShell 检查发布清单保留及最终清除这些字段；Go 实际启动旧式 Node 服务并检查 schema 路径。
+- 原版模式、缺失适配器模块时，离线 Skills/MCP 管理、配置导入导出和检查通过。应用配置同时存在 `.pi/` 与新目录时，导出再导入的有效 MCP 与权限设置一致；旧目录资源可以移除并保留备份，MCP 来源显示实际配置路径。
+- `doctor` 在选择文件缺失、JSON 损坏或 harness 未注册时报告失败项，并完成数据库、配置等其他检查。
+- 使用不同发布目录中的服务与适配器验证 HTTP 错误状态及明确错误信息保持不变，未知错误内容仍不外泄。自定义 MCP 能力关闭时，适配器仍能接入宿主内置 MCP。
+- SDK 导入钩子确认 Pi 在首次 SDK 导入前设置私有目录；已迁移的 Store 在另一个数据库连接持有写事务时仍可打开，旧列迁移的会话锚点仍保留。
+- `use Pi` 和大写别名可用，`use repair` / `use update` 被作为未知 harness 拒绝，菜单第 1 项保持 Pi。原版识别和菜单顺序改为注册信息驱动；更新说明明确使用 `update <harness> --wait`。
+- 真实生产依赖打包检查通过，Pi SDK 仅安装在适配器子目录，初始化、版本验证、模型目录和管理状态查询成功。所有修改与验证均在源码和隔离目录中完成，未切换现场影刀。
+
+## 多 harness 边界调整（2026-11-13）
+
+- 公共注册、安装、更新、启动和会话切换按 harness ID 工作；`use <harness>` 与 `update [harness]` 使用同一注册信息，无参数更新当前选择，更新其他 harness 保持当前选择。
+- `scripts/build.ps1` 的 TypeScript、Go 构建通过；最终启用 `SHADOWBOT_TEST_OBSERVE=1` 后，29 项 Node 测试全部通过、无跳过。Go 启动器测试和 PowerShell 激活恢复、搬迁、等待及多 harness 发布测试通过。
+- 第二个测试适配器仅增加注册和实现，在没有 Pi SDK 的独立发布目录中通过公共 HTTP 服务完成聊天、重启恢复、三方会话切换和中断恢复。未声明的 Skills/MCP 能力会被拒绝。
+- 旧 Pi 适配数据库迁移为中立列名后，原生会话路径、上下文锚点和消息映射保持不变；旧应用 `.pi/` 配置仍可读取和导出，新写入使用 `.shadowbot-switch/`。
+- 公共 Skill 扫描器保留忽略文件、根目录 Markdown、目录链接与可加载 Skill 的非致命命名警告，脱离 Pi SDK 后仍通过官方 Skill 和原生菜单回归。
+- 使用真实生产依赖锁文件打包验证：发布根目录仅安装公共依赖，Pi SDK 安装在 `service/adapters/pi/node_modules`；隔离的 Pi 适配器版本校验、模型目录加载和管理状态查询通过。
+- 本轮修改与验证均在源码及隔离测试目录完成，未激活新运行时或切换本机影刀；没有接入第二个真实引擎。
+
 ## 直接下载源码（2026-11-13）
 
 - 按用户要求移除独立发布包生成、包校验和包安装分支；入口统一为下载源码后运行 `switch.ps1 use pi --wait`，自动下载工具和锁定依赖并编译。

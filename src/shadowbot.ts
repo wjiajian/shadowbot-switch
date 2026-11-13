@@ -1,7 +1,8 @@
+import { appConfigFiles, appSkillDirectories } from './config-paths.js';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { loadSkillsFromDir } from '@earendil-works/pi-coding-agent';
-import type { Skill } from '@earendil-works/pi-coding-agent';
+import { loadSkillsFromDir } from './skills.js';
+import type { Skill } from './skills.js';
 import type { Config } from '@opencode-ai/sdk/v2';
 import { atomicWrite, readJson } from './installation.js';
 import { decision } from './interactions.js';
@@ -26,13 +27,21 @@ export function validateUserSettings(input: unknown, path: string): UserSettings
 }
 
 export function userSettings(agentDir: string, root?: string): UserSettings {
+  return settingsFromFiles([join(agentDir, 'shadowbot.json'), ...appConfigFiles(root, 'shadowbot.json')]);
+}
+
+export function mergeUserSettings(current: UserSettings, file: UserSettings): UserSettings {
+  return { ...current, ...file, enabledSkills: [...(current.enabledSkills ?? []), ...(file.enabledSkills ?? [])],
+    disabledSkills: [...new Set([...(current.disabledSkills ?? []).filter(name => !file.enabledSkills?.includes(name)), ...(file.disabledSkills ?? [])])],
+    mcpPermission: { ...current.mcpPermission, ...file.mcpPermission } };
+}
+
+export function settingsFromFiles(paths: string[]): UserSettings {
   let current: UserSettings = {};
-  for (const path of [join(agentDir, 'shadowbot.json'), ...(root ? [join(root, '.pi', 'shadowbot.json')] : [])]) {
+  for (const path of paths) {
     if (!existsSync(path)) continue;
     const file = validateUserSettings(readJson(path), path);
-    current = { enabledSkills: [...(current.enabledSkills ?? []), ...(file.enabledSkills ?? [])],
-      disabledSkills: [...new Set([...(current.disabledSkills ?? []).filter(name => !file.enabledSkills?.includes(name)), ...(file.disabledSkills ?? [])])],
-      mcpPermission: { ...current.mcpPermission, ...file.mcpPermission } };
+    current = mergeUserSettings(current, file);
   }
   return current;
 }
@@ -61,7 +70,7 @@ export function skillInventory(agentDir: string, root: string | undefined, sourc
       rows.push({ name: skill.name, description: skill.description, path: skill.filePath, source: 'official', status: allowed ? 'enabled' : 'disabled', reason: allowed ? undefined : '宿主角色权限禁用', skill });
     }
   }
-  const custom = [[root && join(root, '.pi', 'skills'), 'app'], [sources.autoEnabled, 'installation'], [join(agentDir, 'skills'), 'legacy']] as const;
+  const custom = [...appSkillDirectories(root).map(path => [path, 'app'] as const), [sources.autoEnabled, 'installation'], [join(agentDir, 'skills'), 'legacy']] as const;
   for (const [path, source] of custom) {
     if (!path || !existsSync(path)) continue;
     const loaded = loadSkillsFromDir({ dir: path, source: 'custom' });

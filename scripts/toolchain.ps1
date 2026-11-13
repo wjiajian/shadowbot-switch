@@ -69,6 +69,9 @@ function Build-Bridge($Project, $Toolchain, [switch]$SkipTests) {
             [Environment]::SetEnvironmentVariable($name, $settings[$name], 'Process')
         }
         Invoke-ProjectNpm $Toolchain $Project @('ci', '--include=dev', '--ignore-scripts', '--no-audit', '--no-fund') | Out-Host
+        $serviceOutput = [IO.Path]::GetFullPath((Join-Path $Project 'dist/service'))
+        if ((Split-Path (Split-Path $serviceOutput)) -ne [IO.Path]::GetFullPath($Project).TrimEnd('\')) { throw 'Unexpected build output directory.' }
+        if (Test-Path -LiteralPath $serviceOutput) { Remove-Item -LiteralPath $serviceOutput -Recurse -Force }
         & $Toolchain.node (Join-Path $Project 'node_modules/typescript/bin/tsc') --project tsconfig.json
         if ($LASTEXITCODE -ne 0) { throw 'TypeScript build failed.' }
         & $Toolchain.go build -trimpath -o dist/opencode.exe ./launcher
@@ -80,6 +83,7 @@ function Build-Bridge($Project, $Toolchain, [switch]$SkipTests) {
             if ($LASTEXITCODE -ne 0) { throw 'Launcher tests failed.' }
             & ./test/activation.test.ps1
             & ./test/experience.test.ps1
+            & ./test/harnesses.test.ps1
         }
     } finally {
         foreach ($name in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process') }

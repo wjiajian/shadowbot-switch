@@ -13,7 +13,8 @@ function Show-Help {
 ShadowBot Switch — 在项目根目录管理影刀 Copilot
 
   .\switch.ps1                         当前状态和菜单
-  .\switch.ps1 use pi                  安装 / 启用 Pi
+  .\switch.ps1 use <harness>           安装 / 切换 harness（例如 use pi）
+  .\switch.ps1 harnesses               查看已注册的 harness 和能力
   .\switch.ps1 use original            恢复影刀原版与原聊天记录
   .\switch.ps1 status                  查看当前后端和配置状态
   .\switch.ps1 doctor                  完整诊断及修复提示
@@ -32,7 +33,7 @@ ShadowBot Switch — 在项目根目录管理影刀 Copilot
   .\switch.ps1 config export <文件>     导出配置
   .\switch.ps1 config import <文件>     导入配置，--replace 先备份再覆盖
   .\switch.ps1 apps list|select|clear   选择应用或恢复安装级默认范围
-  .\switch.ps1 update                  应用当前源码及其锁定的 Pi 版本
+  .\switch.ps1 update [harness]        更新指定或当前 harness，保持当前选择
   .\switch.ps1 repair                  修复项目搬迁定位及中断的操作
 
 通用：--json；--global；--app <应用路径>。
@@ -44,13 +45,14 @@ Skill 与权限下一轮生效；MCP 在空闲后的下一轮自动应用。
 }
 
 function Read-LocalStatus {
-    $result = [ordered]@{ installed = $false; backend = 'unknown'; recoveryPending = $false; next = '.\switch.ps1 use pi' }
+    $result = [ordered]@{ installed = $false; backend = 'unknown'; recoveryPending = $false; next = '.\switch.ps1 harnesses' }
     if (Test-Path -LiteralPath $manifestPath) {
         try {
             $installation = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
             $backend = Get-Content -LiteralPath (Join-Path $state 'backend.json') -Raw | ConvertFrom-Json
             $result.installed = $true
-            $result.backend = if ($backend.mode -eq 'pi') { "Pi $($installation.piVersion)" } else { '影刀原版 OpenCode' }
+            $record = if ($installation.harnesses) { $installation.harnesses.PSObject.Properties[$backend.mode].Value } else { $null }
+            $result.backend = "$($backend.mode) $($record.version)".Trim()
             $result.recoveryPending = (Test-Path -LiteralPath (Join-Path $state 'activation.pending.json')) -or (Test-Path -LiteralPath (Join-Path $state 'switch.pending.json'))
             $result.next = if ($result.recoveryPending) { '.\switch.ps1 repair' } else { '.\switch.ps1 doctor' }
         } catch { $result.next = '安装记录无法读取。保留 .shadowbot-switch 数据，恢复安装记录后运行 .\switch.ps1 repair。' }
@@ -58,10 +60,11 @@ function Read-LocalStatus {
     [pscustomobject]$result
 }
 
-function Invoke-Selection([string]$Command, [string[]]$Tail) {
+function Invoke-Selection([string]$Command, [string[]]$Tail, [string]$Target) {
     $parameters = @{}
     for ($i = 0; $i -lt $Tail.Count; $i++) {
         switch ($Tail[$i]) {
+            '--json' { }
             '--wait' { $parameters.Wait = $true }
             '--timeout' { $i++; if ($i -ge $Tail.Count) { throw '--timeout 需要秒数。' }; $parameters.WaitTimeoutSeconds = [int]$Tail[$i] }
             '--shadowbot-dir' { $i++; if ($i -ge $Tail.Count) { throw '--shadowbot-dir 需要路径。' }; $parameters.ShadowBotDirectory = $Tail[$i] }
@@ -73,11 +76,14 @@ function Invoke-Selection([string]$Command, [string[]]$Tail) {
         Repair-ProjectLocation $project @parameters
         return
     }
+    . (Join-Path $project 'scripts/harnesses.ps1')
     if ($Command -eq 'update') {
-        & (Join-Path $project 'install.ps1') -Harness pi -Update @parameters
+        $target = if ($Target) { $Target } else { Get-SelectedHarness $state $project }
+        $harness = (Get-Harness $project $target).id
+        & (Join-Path $project 'install.ps1') -Harness $harness -Update @parameters
         return
     }
-    $harness = switch ($Command) { 'pi' { 'pi' }; 'original' { 'opencode-origin' }; 'opencode-origin' { 'opencode-origin' }; default { throw 'use 后请选择 pi 或 original。' } }
+    $harness = (Get-Harness $project $Target).id
     & (Join-Path $project 'install.ps1') -Harness $harness @parameters
 }
 
@@ -85,26 +91,44 @@ try {
     if (!$arguments.Count) {
         $status = Read-LocalStatus
         Write-Host "当前后端：$($status.backend)"
-        if (!$status.installed) { Write-Host '尚未安装 Pi。' }
+        if (!$status.installed) { Write-Host '尚未安装托管 harness。' }
         if ([Console]::IsInputRedirected) { Show-Help; return }
-        Write-Host '1 启用 Pi  2 恢复原版  3 刷新配置  4 诊断  5 帮助  0 退出'
+        . (Join-Path $project 'scripts/harnesses.ps1')
+        $registered = @(Get-HarnessRegistry $project)
+        for ($i = 0; $i -lt $registered.Count; $i++) { Write-Host "$($i + 1) 切换 $($registered[$i].name)" }
+        Write-Host 'r 刷新配置  d 诊断  h 帮助  0 退出'
         $choice = Read-Host '选择操作'
-        $arguments = switch ($choice) { '1' { @('use', 'pi', '--wait') }; '2' { @('use', 'original', '--wait') }; '3' { @('reload') }; '4' { @('doctor') }; '0' { return }; default { @('help') } }
+        if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $registered.Count) { $arguments = @('use', $registered[[int]$choice - 1].id, '--wait') }
+        else { $arguments = switch ($choice) { 'r' { @('reload') }; 'd' { @('doctor') }; '0' { return }; default { @('help') } } }
         if (!$arguments.Count) { return }
     }
     $command = $arguments[0]
     if ($command -in 'help', '--help', '-h') { Show-Help; return }
     if ($command -eq 'use') {
-        if ($arguments.Count -lt 2) { throw '请使用 .\switch.ps1 use pi 或 use original。' }
-        Invoke-Selection $arguments[1] @($arguments | Select-Object -Skip 2)
+        if ($arguments.Count -lt 2) { throw '请使用 .\switch.ps1 use <harness>；harnesses 查看可用列表。' }
+        Invoke-Selection 'use' @($arguments | Select-Object -Skip 2) $arguments[1]
         return
     }
-    if ($command -in 'update', 'repair') { Invoke-Selection $command @($arguments | Select-Object -Skip 1); return }
+    if ($command -eq 'harnesses') {
+        . (Join-Path $project 'scripts/harnesses.ps1')
+        $registered = @(Get-HarnessRegistry $project)
+        if ($jsonOutput) { $registered | ConvertTo-Json -Depth 8 } else { $registered | Select-Object id, name, kind, capabilities | Format-Table }
+        return
+    }
+    if ($command -in 'update', 'repair') {
+        $tail = @($arguments | Select-Object -Skip 1)
+        $target = $null
+        if ($command -eq 'update' -and $tail.Count -and !$tail[0].StartsWith('--')) {
+            $target = $tail[0]; $tail = @($tail | Select-Object -Skip 1)
+        }
+        Invoke-Selection $command $tail $target
+        return
+    }
     $status = Read-LocalStatus
     if (!$status.installed -or !(Test-Path -LiteralPath $control)) {
         if ($jsonOutput) { $status | ConvertTo-Json }
         else { Write-Host "当前后端：$($status.backend)"; Write-Host "下一步：$($status.next)" }
-        if ($command -notin 'status', 'doctor') { throw '安装尚未就绪。先运行 .\switch.ps1 use pi。' }
+        if ($command -notin 'status', 'doctor') { throw '安装尚未就绪。先运行 .\switch.ps1 use <harness>。' }
         if ($command -eq 'doctor') { $global:LASTEXITCODE = 1; exit 1 }
         return
     }

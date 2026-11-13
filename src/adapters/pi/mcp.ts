@@ -1,18 +1,18 @@
-import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { McpClient, McpHttpError, StdioTransport, StreamableHttpTransport, normalizeMcpInputSchema, validateMcpServerConfig, toLlmContent, parseJsonRpcMessage } from '@earendil-works/pi-mcp';
 import type { McpServerConfig, McpTransport, JsonRpcMessage, McpTransportSendOptions, Tool } from '@earendil-works/pi-mcp';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { McpLocalConfig, McpRemoteConfig, McpStatus } from '@opencode-ai/sdk/v2';
-import { readJson } from './installation.js';
-import { object } from './config.js';
 import { limitToolText } from './context.js';
-import { connectionError, UserError } from './errors.js';
+import { connectionError, UserError } from '../../errors.js';
+import { validateCustomMcp } from '../../mcp-config.js';
+import type { CustomMcpConfig } from '../../mcp-config.js';
 
-const reserved = new Set(['studio-mcp', 'xbot-copilot', 'browser-use-mcp']);
 const serverName = /^[a-z0-9_-]{1,64}$/i;
-type Definition = { config: McpServerConfig; builtin: boolean };
+// Host entries use the SDK's translated shape; custom entries use the same
+// Switch validator as config import/check, without a second SDK validation pass.
+type Definition = { config: CustomMcpConfig | McpServerConfig; builtin: boolean };
 type Connection = { client: McpClient; tools: Tool[] };
 
 class LegacySseTransport implements McpTransport {
@@ -88,32 +88,7 @@ class LegacySseTransport implements McpTransport {
   }
 }
 
-export function customMcp(agentDir: string, workspace?: string) {
-  const entries = new Map<string, unknown>();
-  for (const path of [join(agentDir, 'mcp.json'), ...(workspace ? [join(workspace, '.pi', 'mcp.json')] : [])]) {
-    if (!existsSync(path)) continue;
-    const content = readJson<unknown>(path);
-    if (!object(content) || !object(content.mcpServers)) throw new UserError(`${path} 必须包含 mcpServers 对象。`);
-    for (const [name, config] of Object.entries(content.mcpServers)) {
-      const previous = entries.get(name);
-      entries.set(name, object(previous) && object(config) && !('command' in config) && !('url' in config) && !('type' in config)
-        ? { ...previous, ...config } : config);
-    }
-  }
-  return entries;
-}
-
-export function validateCustomMcp(name: string, raw: unknown) {
-  if (reserved.has(name.toLowerCase())) throw new UserError(`MCP 名称 ${name} 由影刀保留，请使用其他名称。`);
-  if (!serverName.test(name)) throw new UserError(`MCP 名称 ${name} 只能包含英文字母、数字、下划线和连字符，最长 64 字符。`);
-  // Validate URL shape without resolving credentials or requiring the caller's environment.
-  // Runtime expansion still reports a missing variable by name before connecting.
-  const template = object(raw) && typeof raw.url === 'string' ? raw.url : undefined;
-  const checked = template ? { ...raw as Record<string, unknown>, url: template.replace(/\$\{[A-Z_][A-Z0-9_]*\}/gi, (token, offset: number) => offset === 0 ? 'http://environment.invalid' : 'environment') } : raw;
-  const validated = validateMcpServerConfig(name, checked);
-  if (validated.kind === 'invalid') throw new UserError(`MCP ${name}：${validated.error}`);
-  return template && 'url' in validated.config ? { ...validated.config, url: template } : validated.config;
-}
+export { customMcp } from '../../mcp-config.js';
 
 function substitute(value: string) {
   return value.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/gi, (_, name: string) => {
@@ -137,25 +112,11 @@ export class McpHub {
 
   constructor(private workspace: string) {}
 
-  async configureCustom(entries: Map<string, unknown>) {
-    for (const [name, raw] of entries) {
-      if (reserved.has(name.toLowerCase()) || this.definitions.get(name)?.builtin) throw new UserError(`MCP server name is reserved: ${name}`);
-      if (!serverName.test(name)) throw new Error('Invalid MCP server name');
-      const validated = validateMcpServerConfig(name, raw);
-      if (validated.kind === 'invalid') {
-        this.statuses.set(name, { status: 'failed', error: validated.error });
-        continue;
-      }
-      this.definitions.set(name, { config: validated.config, builtin: false });
-      await this.connect(name);
-    }
-  }
-
   async reloadCustom(entries: Map<string, unknown>) {
     const report = { added: 0, updated: 0, removed: 0, unchanged: 0, failed: {} as Record<string, string> };
     this.reloadErrors.clear();
     for (const [name, raw] of entries) {
-      let config: McpServerConfig;
+      let config: CustomMcpConfig;
       try {
         config = validateCustomMcp(name, raw);
         if (this.definitions.get(name)?.builtin) throw new UserError(`MCP ${name} 由宿主管理。`);
