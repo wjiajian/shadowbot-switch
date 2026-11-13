@@ -46,8 +46,8 @@ test('a registered non-Pi adapter launches the shared host, persists its history
     const status = cli('status');
     assert.equal(status.status, 0, status.stderr + status.stdout);
     assert.equal(JSON.parse(status.stdout).data.harness, 'fixture');
-    assert.equal(cli('mcp').status, 1);
-    assert.match(cli('skills').stdout, /不支持/);
+    assert.equal(cli('mcp').status, 0, 'offline MCP management must not require runtime support');
+    assert.equal(cli('skills').status, 0, 'offline skill management must not require runtime support');
     const diagnostics = JSON.parse(cli('doctor').stdout).data;
     assert.equal(diagnostics.find(row => row.check === '运行时').status, '通过');
     const start = async () => {
@@ -82,6 +82,93 @@ test('a registered non-Pi adapter launches the shared host, persists its history
     assert.equal(existsSync(join(runtime, 'node_modules', '@earendil-works')), false);
   } finally {
     if (process) { process.kill(); await closed; }
+    rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  }
+});
+
+test('opening an already migrated store does not acquire a write lock on host history', () => {
+  const root = mkdtempSync(join(tmpdir(), 'shadowbot-store-lock-'));
+  let writer, store;
+  try {
+    const dbPath = join(root, 'host.db'), adapterPath = join(root, 'adapter.db');
+    writer = new DatabaseSync(dbPath); writer.exec(schema);
+    store = new Store(dbPath, adapterPath, () => {}); store.db.close(); store = undefined;
+    writer.exec('BEGIN IMMEDIATE');
+    store = new Store(dbPath, adapterPath, () => {});
+    assert.equal(store.db.prepare('SELECT count(*) AS n FROM session').get().n, 0);
+  } finally {
+    store?.db.close(); writer?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a different adapter release preserves safe errors and host MCP independently of custom MCP capability', { timeout: 20_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'shadowbot-cross-release-'));
+  const home = join(root, 'state'), workspace = join(root, 'workspace');
+  const managerID = 'a'.repeat(64), adapterID = 'b'.repeat(64);
+  const manager = join(home, 'harnesses', 'fixture', 'releases', managerID);
+  const runtime = join(home, 'harnesses', 'fixture', 'releases', adapterID);
+  const spec = JSON.parse(readFileSync('test/fixtures/harness/harness.json'));
+  let child, closed;
+  try {
+    for (const directory of [manager, runtime]) {
+      cpSync(resolve('dist/service'), join(directory, 'service'), { recursive: true });
+      cpSync(resolve('harnesses'), join(directory, 'harnesses'), { recursive: true });
+      put(join(directory, 'harnesses/fixture/harness.json'), spec);
+      for (const dependency of ['yaml', 'ignore']) cpSync(resolve('node_modules', dependency), join(directory, 'node_modules', dependency), { recursive: true });
+      put(join(directory, 'package.json'), { type: 'module' });
+      put(join(directory, 'schema.sql'), schema);
+    }
+    // The copied release has distinct, unbranded error constructors. The manager
+    // must recognize them without trusting arbitrary error names or messages.
+    put(join(runtime, 'service/adapters/fixture/base.js'), readFileSync('test/fixtures/harness/adapter.mjs', 'utf8'));
+    put(join(runtime, 'service', spec.adapter), `
+      import { adapter as base } from './base.js';
+      import { UserError } from '../../errors.js';
+      export const adapter = { ...base, createRuns(context) {
+        const runs = base.createRuns(context);
+        return { ...runs, rename(session, title) {
+          if (title === 'safe') throw new UserError('Fixture configuration needs correction');
+          if (title === 'unsafe') throw new Error('private provider payload');
+          return runs.rename(session, title);
+        } };
+      }, mcp: { create() {
+        const servers = {};
+        return { async addBuiltin(name) { servers[name] = { status: 'connected' }; },
+          async reloadCustom() { throw new Error('Custom MCP must remain disabled'); },
+          status: () => servers, configurationErrors: () => ({}), async connect() {}, async disconnect() {}, async close() {} };
+      } } };
+    `);
+    mkdirSync(workspace);
+    const database = join(root, 'host.db');
+    const db = new DatabaseSync(database); db.exec(schema); db.close();
+    put(join(home, 'install.json'), { database, resources: join(root, 'resources'), runtime: { harness: 'fixture', release: managerID }, harnesses: { fixture: { release: adapterID, version: spec.version, adapter: spec.adapter, capabilities: spec.capabilities } } });
+    put(join(home, 'backend.json'), { mode: 'fixture' });
+    put(join(home, 'agent/mcp.json'), { mcpServers: { custom: { command: 'must-not-run' } } });
+    const env = { ...process.env, SHADOWBOT_SWITCH_HOME: home, SHADOWBOT_OPENCODE_WORKSPACE_ROOT: workspace,
+      OPENCODE_CONFIG: '', OPENCODE_CONFIG_DIR: '', XDG_CONFIG_HOME: '', OPENCODE_CONFIG_CONTENT: JSON.stringify({ mcp: { 'studio-mcp': { type: 'remote', url: 'http://127.0.0.1/mcp' } } }) };
+    child = spawn(process.execPath, [join(manager, 'service/main.js'), 'serve', '--port', '0'], { env, windowsHide: true });
+    closed = once(child, 'close');
+    let errors = ''; child.stderr.on('data', chunk => errors += chunk);
+    const lines = createInterface({ input: child.stdout });
+    const address = (async () => { for await (const line of lines) { const match = /listening on (http:\/\/\S+)/.exec(line); if (match) return match[1]; } throw new Error(errors); })();
+    const base = await Promise.race([address, closed.then(() => { throw new Error(errors); })]);
+    const session = await fetch(base + '/session', { method: 'POST', body: '{}' }).then(r => r.json());
+    const requestError = await fetch(`${base}/session/${session.id}/unrevert`, { method: 'POST' });
+    assert.equal(requestError.status, 501);
+    assert.equal((await requestError.json()).data.message, 'Fixture operation unavailable');
+    const userError = await fetch(`${base}/session/${session.id}`, { method: 'PATCH', body: JSON.stringify({ title: 'safe' }) });
+    assert.equal(userError.status, 400);
+    assert.equal((await userError.json()).data.message, 'Fixture configuration needs correction');
+    const unknown = await fetch(`${base}/session/${session.id}`, { method: 'PATCH', body: JSON.stringify({ title: 'unsafe' }) });
+    assert.equal(unknown.status, 500);
+    assert.doesNotMatch(await unknown.text(), /private provider payload/);
+    assert.deepEqual(await fetch(base + '/mcp').then(r => r.json()), { 'studio-mcp': { status: 'connected' } });
+    const added = await fetch(base + '/mcp', { method: 'POST', body: JSON.stringify({ name: 'host-extra', config: { type: 'remote', url: 'http://127.0.0.1/extra' } }) });
+    assert.equal(added.status, 200);
+    assert.equal((await added.json())['host-extra'].status, 'connected');
+  } finally {
+    if (child) { child.kill(); await closed; }
     rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
 });

@@ -63,10 +63,15 @@ func TestLaunchUsesCommittedRuntime(t *testing.T) {
 	write(filepath.Join(service, "main.js"), `
 const fs = require('node:fs');
 const path = require('node:path');
+const home = process.env.SHADOWBOT_PI_HOME;
+const install = JSON.parse(fs.readFileSync(path.join(home, 'install.json')));
+const runtime = install.runtimeRelease ? (install.piVersion ? path.join(home, 'harnesses', 'pi', 'releases', install.runtimeRelease) : path.join(home, 'releases', install.runtimeRelease)) : home;
+if (fs.readFileSync(path.join(runtime, 'schema.sql'), 'utf8') !== 'legacy schema fixture') throw new Error('Wrong legacy schema');
 fs.writeFileSync(path.join(process.env.SHADOWBOT_PI_HOME, 'launch.json'), JSON.stringify({
   args: process.argv.slice(2), cwd: process.cwd(), authenticated: process.env.OPENCODE_SERVER_PASSWORD === 'fixture-password',
   agentDir: process.env.PI_CODING_AGENT_DIR
 }));`)
+	write(filepath.Join(runtime, "schema.sql"), "legacy schema fixture")
 	write(filepath.Join(home, "install.json"), `{"runtimeRelease":"`+id+`","piVersion":"fixture"}`)
 	write(filepath.Join(home, "backend.json"), `{"mode":"pi"}`)
 	t.Setenv("OPENCODE_SERVER_PASSWORD", "fixture-password")
@@ -103,6 +108,12 @@ fs.writeFileSync(path.join(process.env.SHADOWBOT_PI_HOME, 'launch.json'), JSON.s
 	if !reflect.DeepEqual(launch.Args, args) || !strings.EqualFold(launch.Cwd, cwd) || !launch.Authenticated ||
 		launch.AgentDir != filepath.Join(home, "agent") {
 		t.Fatalf("unexpected launch parameters: %+v", launch)
+	}
+	// Updating another harness keeps the old Pi service and its own legacy schema
+	// lookup, while control commands move to the newly committed manager release.
+	write(filepath.Join(home, "install.json"), `{"runtimeRelease":"`+id+`","piVersion":"fixture","runtime":{"harness":"manager","release":"`+strings.Repeat("b", 64)+`"},"harnesses":{"pi":{"release":"`+id+`","legacy":true,"launch":{"executable":"node.exe","args":["{runtime}/service/main.js"]}}}}`)
+	if code, err := runAt(home, args); code != 0 || err != nil {
+		t.Fatalf("retained legacy launch: code=%d err=%v", code, err)
 	}
 }
 

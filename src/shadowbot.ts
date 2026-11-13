@@ -27,13 +27,21 @@ export function validateUserSettings(input: unknown, path: string): UserSettings
 }
 
 export function userSettings(agentDir: string, root?: string): UserSettings {
+  return settingsFromFiles([join(agentDir, 'shadowbot.json'), ...appConfigFiles(root, 'shadowbot.json')]);
+}
+
+export function mergeUserSettings(current: UserSettings, file: UserSettings): UserSettings {
+  return { ...current, ...file, enabledSkills: [...(current.enabledSkills ?? []), ...(file.enabledSkills ?? [])],
+    disabledSkills: [...new Set([...(current.disabledSkills ?? []).filter(name => !file.enabledSkills?.includes(name)), ...(file.disabledSkills ?? [])])],
+    mcpPermission: { ...current.mcpPermission, ...file.mcpPermission } };
+}
+
+export function settingsFromFiles(paths: string[]): UserSettings {
   let current: UserSettings = {};
-  for (const path of [join(agentDir, 'shadowbot.json'), ...appConfigFiles(root, 'shadowbot.json')]) {
+  for (const path of paths) {
     if (!existsSync(path)) continue;
     const file = validateUserSettings(readJson(path), path);
-    current = { enabledSkills: [...(current.enabledSkills ?? []), ...(file.enabledSkills ?? [])],
-      disabledSkills: [...new Set([...(current.disabledSkills ?? []).filter(name => !file.enabledSkills?.includes(name)), ...(file.disabledSkills ?? [])])],
-      mcpPermission: { ...current.mcpPermission, ...file.mcpPermission } };
+    current = mergeUserSettings(current, file);
   }
   return current;
 }

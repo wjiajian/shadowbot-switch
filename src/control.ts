@@ -35,9 +35,9 @@ async function main([command, arg]: string[]) {
     if ((install.runtime || install.runtimeRelease) && sha256(join(runtime, 'launcher.exe')) !== install.launcherHash.toLowerCase()) {
       throw new Error('Staged launcher checksum mismatch');
     }
-    const current = existsSync(join(home, 'backend.json')) ? mode(home) : 'original';
+    const current = existsSync(join(home, 'backend.json')) ? mode(home) : registry.bundled().id;
     console.log(JSON.stringify({ harness: current, protocol: protocolVersion,
-      backend: registry.get(current === 'observe' ? 'original' : current).name,
+      backend: registry.selected(current).name,
       node: process.version, schema: 'verified', original: 'verified', release: install.runtime?.release ?? install.runtimeRelease,
       recoveryPending: existsSync(join(home, 'switch.pending.json')) || existsSync(join(home, 'activation.pending.json')) }, null, 2));
     return;

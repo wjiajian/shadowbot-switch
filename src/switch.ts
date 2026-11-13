@@ -199,7 +199,7 @@ export async function switchBackend(home: string, installation: Installation, de
   if (existsSync(pending)) {
     const interrupted = readJson<Journal>(pending);
     if (registry.get(interrupted.destination).id !== interrupted.destination ||
-        interrupted.source !== registry.get(interrupted.previous === 'observe' ? 'original' : interrupted.previous).id || interrupted.source === interrupted.destination) {
+        interrupted.source !== registry.selected(interrupted.previous).id || interrupted.source === interrupted.destination) {
       throw new Error('Invalid backend recovery journal');
     }
     const staged = interrupted.stage === undefined ? undefined : stagePath(installation, interrupted.stage);
@@ -214,7 +214,7 @@ export async function switchBackend(home: string, installation: Installation, de
     if (staged) rmSync(staged, { force: true });
   }
   const previous = mode(home);
-  const source = registry.get(previous === 'observe' ? 'original' : previous).id;
+  const source = registry.selected(previous).id;
   if (source === destination) {
     atomicWrite(join(home, 'backend.json'), JSON.stringify({ mode: destination }));
     return;

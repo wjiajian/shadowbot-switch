@@ -59,9 +59,11 @@ function New-RuntimeRelease($Project, $State, $Toolchain, $Spec, $Installed, $Ho
     $previous = ConvertTo-HarnessInstallation $Installed
     if ($previous.harnesses) { foreach ($key in $previous.harnesses.Keys) { $records[$key] = $previous.harnesses[$key] } }
     $records[$Spec.id] = @{ release = $id; version = $adapterVersion; adapter = $Spec.adapter; launch = $Spec.launch; capabilities = $Spec.capabilities }
-    @{
+    $bundled = Get-BundledHarness $Project
+    Add-LegacyManifestFields @{
         format = 2; agentPath = $HostInstallation.agentPath; originalHash = $HostInstallation.originalHash; launcherHash = (Get-FileHash -LiteralPath (Join-Path $release 'launcher.exe')).Hash
         runtime = @{ harness = $Spec.id; release = $id }; harnesses = $records
+        bundled = @{ id = $bundled.id; version = $bundled.version }
         database = $HostInstallation.database; users = $HostInstallation.users; resources = $HostInstallation.resources; hostSkills = $HostInstallation.hostSkills
     }
 }

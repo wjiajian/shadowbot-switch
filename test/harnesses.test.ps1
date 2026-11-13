@@ -25,6 +25,14 @@ param([string]$Harness, [switch]$Update, [switch]$Wait, [int]$WaitTimeoutSeconds
 '@ | Set-Content -LiteralPath (Join-Path $project 'install.ps1')
     $spec = Get-Harness $project 'test-engine'
     if ($spec.id -ne 'fixture') { throw 'Registry alias failed.' }
+    if ((Get-Harness $project 'Pi').id -ne 'pi' -or (Get-Harness $project 'TEST-ENGINE').id -ne 'fixture') { throw 'Harness lookup must remain case insensitive.' }
+    if (@(Get-HarnessRegistry $project)[0].id -ne 'pi') { throw 'Menu choice 1 must remain Pi.' }
+    foreach ($reserved in @('repair', 'update')) {
+        $output = & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $project 'switch.ps1') use $reserved --json | Out-String
+        if ($LASTEXITCODE -ne 1 -or $output -notmatch '未知 harness') { throw "use dispatched a management command instead of validating the harness. Exit: $LASTEXITCODE Output: $output" }
+    }
+    & (Join-Path $project 'switch.ps1') use Pi
+    if ((Get-Content -LiteralPath (Join-Path $project 'selection.json') -Raw | ConvertFrom-Json).harness -ne 'pi') { throw 'use Pi did not canonicalize the harness name.' }
     Write-AtomicJson (Join-Path $state 'backend.json') @{ mode = 'fixture' }
     & (Join-Path $project 'switch.ps1') update
     $selection = Get-Content -LiteralPath (Join-Path $project 'selection.json') -Raw | ConvertFrom-Json
@@ -65,6 +73,12 @@ param([string]$Harness, [switch]$Update, [switch]$Wait, [int]$WaitTimeoutSeconds
     Write-AtomicJson (Join-Path $state 'activation.pending.json') @{ previousHash = $first.launcherHash; release = $second }
     Complete-Activation $state $agent $originalHash {}
     if ((Get-SelectedHarness $state) -ne 'fixture') { throw 'Updating a runtime changed harness selection.' }
+    $legacy = @{ runtimeRelease = 'd' * 64; piVersion = '1.5.2' }
+    $migrated = New-RuntimeRelease $project $state $toolchain $spec $legacy $hostInstallation
+    if (!$migrated.harnesses.pi.legacy -or $migrated.runtimeRelease -ne $legacy.runtimeRelease -or $migrated.piVersion -ne $legacy.piVersion) { throw 'A retained legacy Pi service lost its schema location fields.' }
+    $migrated.harnesses.pi.legacy = $false
+    $modern = New-RuntimeRelease $project $state $toolchain $spec $migrated $hostInstallation
+    if ($modern.piVersion -or $modern.runtimeRelease) { throw 'Legacy fields survived after the old Pi service was replaced.' }
     Write-Output 'Registry-driven selection, immutable packaging, multi-harness metadata and activation passed.'
 } finally {
     $resolved = (Resolve-Path -LiteralPath $root).Path

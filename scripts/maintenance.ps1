@@ -33,7 +33,7 @@ function Repair-ProjectLocation($Project, [string]$ShadowBotDirectory, [switch]$
         Repair-InstallationLocator $state $pinnedHash ${function:Assert-SwitchProcessesStopped}
     }
     $backend = (Get-Content -LiteralPath (Join-Path $state 'backend.json') -Raw | ConvertFrom-Json -AsHashtable).mode
-    $harness = if ($backend -eq 'observe') { 'original' } else { $backend }
+    $harness = if ($backend -eq 'observe') { (Get-BundledHarness $Project).id } else { $backend }
     & (Join-Path $Project 'install.ps1') -Harness $harness -Wait:$Wait -WaitTimeoutSeconds $WaitTimeoutSeconds
     Write-Host '项目定位和安装恢复检查已完成。运行 config check 检查自定义配置中的绝对路径。'
 }

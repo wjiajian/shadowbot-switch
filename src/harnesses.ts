@@ -4,13 +4,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readJson, runtimeDirectory } from './installation.js';
 import type { Installation } from './installation.js';
 import type { HarnessAdapter } from './adapter.js';
-import { UserError } from './errors.js';
+import { UserError, registerErrors } from './errors.js';
 
 export type Capabilities = { skills: boolean; mcp: boolean };
 export type Launch = { executable: string; args: string[] };
 export type Harness = {
   id: string; name: string; aliases: string[]; kind: 'managed' | 'bundled';
-  version?: string; versionPackage?: string; adapter?: string; launch?: Launch; capabilities: Capabilities;
+  version?: string; versionPackage?: string; adapter?: string; launch?: Launch; capabilities: Capabilities; menuOrder?: number;
 };
 export type HarnessRelease = { release: string; version: string; adapter: string; launch: Launch; capabilities: Capabilities; legacy?: boolean };
 
@@ -48,9 +48,15 @@ export class HarnessRegistry {
       this.entries.set(spec.id, spec);
     }
   }
-  list() { return [...this.entries.values()]; }
+  list() { return [...this.entries.values()].sort((a, b) => (a.menuOrder ?? 100) - (b.menuOrder ?? 100) || a.id.localeCompare(b.id)); }
+  bundled() {
+    const entries = this.list().filter(h => h.kind === 'bundled');
+    if (entries.length !== 1) throw new Error('Exactly one bundled harness must be registered');
+    return entries[0];
+  }
+  selected(name: string) { return name === 'observe' ? this.bundled() : this.get(name); }
   get(name: string) {
-    const spec = this.entries.get(this.aliases.get(name) ?? '');
+    const spec = this.entries.get(this.aliases.get(name.toLowerCase()) ?? '');
     if (!spec) throw new UserError(`未知 harness：${name}。可用：${this.list().map(h => h.id).join(', ')}`);
     return spec;
   }
@@ -64,7 +70,14 @@ export async function loadAdapter(home: string, installation: Installation, spec
   const module = relativeFile(release?.adapter ?? spec.adapter!);
   // Development and old installations load the adapter alongside the invoking control service.
   const url = release ? pathToFileURL(join(runtimeDirectory(home, installation, spec.id), 'service', module)) : new URL(module, import.meta.url);
-  const { adapter } = await import(url.href) as { adapter: HarnessAdapter };
+  if (release) {
+    // Installed adapters carry their own copy of the control types. Register actual
+    // constructors, including old releases, rather than trusting an error's name.
+    const errors = join(runtimeDirectory(home, installation, spec.id), 'service', 'errors.js');
+    if (existsSync(errors)) registerErrors(await import(pathToFileURL(errors).href));
+  }
+  const loaded = await import(url.href) as { adapter?: HarnessAdapter; initialize?: (home: string) => Promise<HarnessAdapter> };
+  const adapter = loaded.initialize ? await loaded.initialize(home) : loaded.adapter;
   if (!adapter || adapter.id !== spec.id || typeof adapter.verify !== 'function' || typeof adapter.createConfig !== 'function' || typeof adapter.createRuns !== 'function') throw new Error('Invalid harness adapter contract');
   if ((release?.capabilities ?? spec.capabilities).mcp && !adapter.mcp) throw new Error('Harness declares MCP without an implementation');
   return adapter;

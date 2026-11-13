@@ -15,22 +15,39 @@ function Get-HarnessRegistry([string]$Project) {
             if ($null -eq $spec.launch.args) { throw 'Missing harness launch arguments.' }
         }
         $spec
-    })
+    } | Sort-Object @{ Expression = { if ($null -ne $_.menuOrder) { $_.menuOrder } else { 100 } } }, id)
+}
+
+function Get-BundledHarness([string]$Project) {
+    $bundled = @(Get-HarnessRegistry $Project | Where-Object kind -eq 'bundled')
+    if ($bundled.Count -ne 1) { throw 'Exactly one bundled harness must be registered.' }
+    $bundled[0]
 }
 
 function Get-Harness([string]$Project, [string]$Name) {
     $registry = @(Get-HarnessRegistry $Project)
-    $found = @($registry | Where-Object { $_.id -ceq $Name -or $_.aliases -ccontains $Name })
+    $found = @($registry | Where-Object { $_.id -eq $Name -or $_.aliases -contains $Name })
     if ($found.Count -ne 1) { throw "未知 harness：$Name。可用：$(($registry.id) -join ', ')" }
     $found[0]
 }
 
-function Get-SelectedHarness([string]$State) {
+function Get-SelectedHarness([string]$State, [string]$Project = (Split-Path $State)) {
     $path = Join-Path $State 'backend.json'
-    if (!(Test-Path -LiteralPath $path)) { return 'original' }
+    if (!(Test-Path -LiteralPath $path)) { return (Get-BundledHarness $Project).id }
     $selected = (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json).mode
-    if ($selected -eq 'observe') { return 'original' }
+    if ($selected -eq 'observe') { return (Get-BundledHarness $Project).id }
     $selected
+}
+
+function Add-LegacyManifestFields($Release) {
+    # A retained old Pi service reads these fields itself to locate schema.sql.
+    # Keep them until that legacy record is replaced by a new adapter release.
+    $legacyPi = $Release.harnesses.pi
+    if ($legacyPi -and $legacyPi.legacy) {
+        $Release.runtimeRelease = $legacyPi.release
+        $Release.piVersion = $legacyPi.version
+    }
+    $Release
 }
 
 function ConvertTo-HarnessInstallation($Install) {

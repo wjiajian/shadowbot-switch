@@ -75,12 +75,10 @@ export class Store {
       );
     `);
     // Preserve existing Pi transcripts while giving the shared projection neutral columns.
-    this.transaction(() => {
-      for (const [table, previous, next] of [['session', 'pi_file', 'native_file'], ['session', 'pi_leaf', 'native_leaf'], ['message_map', 'pi_entry', 'native_entry']]) {
-        if (this.db.prepare(`PRAGMA adapter.table_info(${table})`).all().some(column => column.name === previous)) {
-          this.db.exec(`ALTER TABLE adapter.${table} RENAME COLUMN ${previous} TO ${next}`);
-        }
-      }
+    const migrations = [['session', 'pi_file', 'native_file'], ['session', 'pi_leaf', 'native_leaf'], ['message_map', 'pi_entry', 'native_entry']]
+      .filter(([table, previous]) => this.db.prepare(`PRAGMA adapter.table_info(${table})`).all().some(column => column.name === previous));
+    if (migrations.length) this.transaction(() => {
+      for (const [table, previous, next] of migrations) this.db.exec(`ALTER TABLE adapter.${table} RENAME COLUMN ${previous} TO ${next}`);
     });
     if (!this.db.prepare('PRAGMA adapter.table_info(session)').all().some(column => column.name === 'owner_pid')) {
       this.db.exec('ALTER TABLE adapter.session ADD COLUMN owner_pid INTEGER NOT NULL DEFAULT 0');

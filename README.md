@@ -2,7 +2,7 @@
 
 影刀 Copilot 的多 harness 接入与切换工具。公共层负责注册、安装、更新、切换、诊断和恢复，兼容层保留影刀面板、模型设置、工具授权及会话展示；各适配器负责执行引擎、原生会话和能力映射。每个 harness 分别保留运行时和聊天记录。
 
-目前提供 Pi 适配器与影刀原版 OpenCode。Skills、MCP 等功能按当前适配器声明的能力提供；Pi 是首个托管适配器，公共管理流程不以 Pi 为默认引擎。
+目前提供 Pi 适配器与影刀原版 OpenCode。Skills、自定义 MCP 的执行按适配器声明的能力提供；离线配置管理、检查和备份在使用原版时也可操作。Pi 是首个托管适配器，公共管理流程不以 Pi 为默认引擎。
 
 支持 Windows x64、PowerShell 7、影刀 **6.3.39** 和随附的 OpenCode **1.18.12**。当前项目使用已验证的 Pi **1.5.2**。
 
@@ -115,7 +115,7 @@ Skill 内容、增删和权限在下一轮读取。安装级菜单文件自动�
 ## 更新、恢复和迁移
 
 ```powershell
-.\switch.ps1 update --wait
+.\switch.ps1 update pi --wait  # 即使当前使用原版，也可更新 Pi
 .\switch.ps1 repair --wait
 .\switch.ps1 config export 'D:\backup\shadowbot-config.json' --global
 .\switch.ps1 config import 'D:\backup\shadowbot-config.json' --global
@@ -126,7 +126,7 @@ Skill 内容、增删和权限在下一轮读取。安装级菜单文件自动�
 
 公共依赖由根目录锁文件管理；适配器依赖由 `harnesses/<id>/package-lock.json` 管理，安装到对应发布目录的适配器子目录。每次更新生成独立不可变运行时，准备阶段不修改旧运行时和其他 harness 的记录。旧 Pi 安装第一次使用新版管理流程时会重建适配器，保留会话和配置。
 
-更新时重新下载源码，将解压后的项目文件覆盖到原项目目录，保留 `.shadowbot-switch/`（配置和聊天数据）与 `.tools/`（工具和缓存），再运行 `update --wait`。通过 Git 获取的项目可先拉取源码，再执行同一命令。
+更新时重新下载源码，将解压后的项目文件覆盖到原项目目录，保留 `.shadowbot-switch/`（配置和聊天数据）与 `.tools/`（工具和缓存），再运行 `update <harness> --wait`（例如 `update pi --wait`）。通过 Git 获取的项目可先拉取源码，再执行同一命令。当前使用原版时，无参数 `update --wait` 只会提示原版随影刀更新；要重建托管运行时，请明确指定其名称。
 
 `repair` 用于移动整个项目目录后的定位修复及未完成的激活恢复，会核对原程序和启动器。旧项目目录仍存在时拒绝接管，避免混用两套会话。移动整个项目时须保留 `.shadowbot-switch/`。
 

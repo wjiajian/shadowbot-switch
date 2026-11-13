@@ -17,6 +17,7 @@ export interface Installation {
   runtimeRelease?: string;
   piVersion?: string;
   runtime?: { harness: string; release: string };
+  bundled?: { id: string; version?: string };
   harnesses?: Record<string, HarnessRelease>;
   database: string;
   users: string;

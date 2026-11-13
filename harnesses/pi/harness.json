@@ -1,5 +1,6 @@
 {
   "id": "pi",
+  "menuOrder": 10,
   "name": "Pi",
   "aliases": [],
   "kind": "managed",

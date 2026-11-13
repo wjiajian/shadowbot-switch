@@ -32,6 +32,7 @@ if (!$Harness) {
     $Harness = if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $registered.Count) { $registered[[int]$choice - 1].id } else { $choice }
 }
 $spec = Get-Harness $project $Harness
+$bundled = Get-BundledHarness $project
 $Harness = $spec.id
 if ($Update -and $spec.kind -eq 'bundled') {
     Write-Output "$($spec.name) 随影刀更新；当前选择和其他 harness 保持不变。"
@@ -153,7 +154,7 @@ Invoke-InstallationLock $agentExe {
         $migrateLegacy = $true
     }
     if (!$activeHome -and (Test-Path -LiteralPath $mode) -and
-        ((Get-Content -LiteralPath $mode -Raw | ConvertFrom-Json).mode -notin 'original', 'observe' -or
+        ((Get-SelectedHarness $state $project) -ne $bundled.id -or
             (Test-Path -LiteralPath (Join-Path $state 'switch.pending.json')))) {
         throw 'The project session state does not match the bundled OpenCode.'
     }
@@ -177,7 +178,7 @@ Invoke-InstallationLock $agentExe {
     if (!(Test-Path -LiteralPath $database)) { throw 'Open ShadowBot Copilot once to initialize its session database, then exit ShadowBot.' }
     if ($activeHome -and (Test-Path -LiteralPath (Join-Path $activeHome 'switch.pending.json'))) {
         $current = (Get-Content -LiteralPath (Join-Path $activeHome 'backend.json') -Raw | ConvertFrom-Json).mode
-        $recovery = if ($current -eq 'observe') { 'original' } else { $current }
+        $recovery = if ($current -eq 'observe') { $bundled.id } else { $current }
         Invoke-RuntimeControl $activeHome $activeInstall @('backend', $recovery) | Out-Host
     }
     Assert-HostStopped
@@ -187,19 +188,17 @@ Invoke-InstallationLock $agentExe {
         New-Item -ItemType Directory -Force -Path (Split-Path $original) | Out-Null
         Set-CheckedExecutable $agentExe $original $pinnedHash
     }
-    if (!(Test-Path -LiteralPath $mode)) { Write-AtomicJson $mode @{ mode = 'original' } }
+    if (!(Test-Path -LiteralPath $mode)) { Write-AtomicJson $mode @{ mode = $bundled.id } }
     New-Item -ItemType Directory -Force -Path (Join-Path $state 'agent'), (Join-Path $state 'skills') | Out-Null
     $runtime = Get-InstallationRuntime $state $release
     if ((& (Join-Path $runtime 'launcher.exe') --version | Out-String).Trim() -ne '1.18.12') { throw 'Launcher protocol mismatch.' }
     Write-AtomicJson (Join-Path $state 'prepared.json') $release
     Invoke-RuntimeControl $state $release @('verify-install', $Harness) | Out-Host
     Assert-HostStopped
-    if ($Update -and (Get-SelectedHarness $state) -eq 'original') {
-        Publish-Release $state $release
-    } else {
-        Write-AtomicJson (Join-Path $state 'activation.pending.json') @{ previousHash = $activeHash; release = $release }
-        Complete-Activation $state $agentExe $pinnedHash ${function:Assert-HostStopped}
-    }
+    $journal = @{ previousHash = $activeHash; release = $release }
+    if ($Update -and (Get-SelectedHarness $state $project) -eq $bundled.id) { $journal.bundledMode = $bundled.id }
+    Write-AtomicJson (Join-Path $state 'activation.pending.json') $journal
+    Complete-Activation $state $agentExe $pinnedHash ${function:Assert-HostStopped}
     if ($Update) {
         Write-Output "已更新 $Harness $($release.harnesses[$Harness].version)，当前继续使用 $(Get-SelectedHarness $state)。"
         return

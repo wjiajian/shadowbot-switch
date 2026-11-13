@@ -11,6 +11,20 @@ type runtimePointer struct {
 	Harness string `json:"harness"`
 	Release string `json:"release"`
 }
+type bundledHarness struct {
+	ID string `json:"id"`
+}
+
+func bundledID(install installation) (string, error) {
+	if install.Bundled == nil {
+		return legacyBundledID(), nil
+	}
+	if !harnessName.MatchString(install.Bundled.ID) || install.Bundled.ID == "observe" {
+		return "", errors.New("invalid bundled harness identifier")
+	}
+	return install.Bundled.ID, nil
+}
+
 type launchSpec struct {
 	Executable string   `json:"executable"`
 	Args       []string `json:"args"`

@@ -60,10 +60,11 @@ function Read-LocalStatus {
     [pscustomobject]$result
 }
 
-function Invoke-Selection([string]$Command, [string[]]$Tail) {
+function Invoke-Selection([string]$Command, [string[]]$Tail, [string]$Target) {
     $parameters = @{}
     for ($i = 0; $i -lt $Tail.Count; $i++) {
         switch ($Tail[$i]) {
+            '--json' { }
             '--wait' { $parameters.Wait = $true }
             '--timeout' { $i++; if ($i -ge $Tail.Count) { throw '--timeout 需要秒数。' }; $parameters.WaitTimeoutSeconds = [int]$Tail[$i] }
             '--shadowbot-dir' { $i++; if ($i -ge $Tail.Count) { throw '--shadowbot-dir 需要路径。' }; $parameters.ShadowBotDirectory = $Tail[$i] }
@@ -77,12 +78,12 @@ function Invoke-Selection([string]$Command, [string[]]$Tail) {
     }
     . (Join-Path $project 'scripts/harnesses.ps1')
     if ($Command -eq 'update') {
-        $target = if ($script:updateHarness) { $script:updateHarness } else { Get-SelectedHarness $state }
+        $target = if ($Target) { $Target } else { Get-SelectedHarness $state $project }
         $harness = (Get-Harness $project $target).id
         & (Join-Path $project 'install.ps1') -Harness $harness -Update @parameters
         return
     }
-    $harness = (Get-Harness $project $Command).id
+    $harness = (Get-Harness $project $Target).id
     & (Join-Path $project 'install.ps1') -Harness $harness @parameters
 }
 
@@ -105,7 +106,7 @@ try {
     if ($command -in 'help', '--help', '-h') { Show-Help; return }
     if ($command -eq 'use') {
         if ($arguments.Count -lt 2) { throw '请使用 .\switch.ps1 use <harness>；harnesses 查看可用列表。' }
-        Invoke-Selection $arguments[1] @($arguments | Select-Object -Skip 2)
+        Invoke-Selection 'use' @($arguments | Select-Object -Skip 2) $arguments[1]
         return
     }
     if ($command -eq 'harnesses') {
@@ -116,10 +117,11 @@ try {
     }
     if ($command -in 'update', 'repair') {
         $tail = @($arguments | Select-Object -Skip 1)
+        $target = $null
         if ($command -eq 'update' -and $tail.Count -and !$tail[0].StartsWith('--')) {
-            $script:updateHarness = $tail[0]; $tail = @($tail | Select-Object -Skip 1)
+            $target = $tail[0]; $tail = @($tail | Select-Object -Skip 1)
         }
-        Invoke-Selection $command $tail
+        Invoke-Selection $command $tail $target
         return
     }
     $status = Read-LocalStatus

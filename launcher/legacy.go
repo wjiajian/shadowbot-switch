@@ -7,6 +7,8 @@ import (
 
 // Compatibility readers only. New manifests and the launch dispatch never infer
 // a harness from its version or add SDK-specific environment to other adapters.
+func legacyBundledID() string { return "original" }
+
 func legacyRuntime(home string, install installation) (string, error) {
 	if install.RuntimeRelease == "" {
 		return home, nil

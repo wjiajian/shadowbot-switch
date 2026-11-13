@@ -1,5 +1,6 @@
 {
   "id": "original",
+  "menuOrder": 20,
   "name": "影刀原版 OpenCode",
   "aliases": ["opencode-origin"],
   "kind": "bundled",

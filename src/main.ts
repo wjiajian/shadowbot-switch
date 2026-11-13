@@ -17,7 +17,7 @@ import { installationHome, mode, protocolVersion, readJson, installedVersion, ru
 import type { Installation } from './installation.js';
 import { permissionRules } from './interactions.js';
 import { customMcp } from './mcp-config.js';
-import { RequestError } from './errors.js';
+import { RequestError, isRequestError, isUserError } from './errors.js';
 import { ShadowBotContext, skills, workspace } from './shadowbot.js';
 import { databaseBusy, id, Store } from './store.js';
 import type { Frame } from './store.js';
@@ -25,7 +25,7 @@ import { verifySchema } from './switch.js';
 import { configurationRevision, publishRuntimeState } from './runtime-state.js';
 import { skillInventory } from './shadowbot.js';
 import { skillCommand, syncSkillCommands } from './skill-commands.js';
-import { UserError, userMessage } from './errors.js';
+import { userMessage } from './errors.js';
 
 function flags(args: string[]) {
   if (args[0] !== 'serve') throw new Error('Expected serve');
@@ -112,10 +112,10 @@ class Bridge {
     let loading = this.workspaces.get(key);
     if (!loading) {
       loading = (async () => {
-        const mcp = this.harness.capabilities.mcp && this.adapter.mcp ? this.adapter.mcp.create(root) : new NoMcp();
+        const mcp = this.adapter.mcp ? this.adapter.mcp.create(root) : new NoMcp();
         try {
           const revision = configurationRevision(this.home, root);
-          for (const [name, config] of Object.entries(this.harness.capabilities.mcp ? this.config.value.mcp ?? {} : {})) {
+          for (const [name, config] of Object.entries(this.config.value.mcp ?? {})) {
             if ('type' in config) await mcp.addBuiltin(name, config);
           }
           let configurationError: string | undefined;
@@ -175,12 +175,12 @@ class Bridge {
 
   private error(res: ServerResponse, error: unknown) {
     if (res.headersSent) { res.end(); return; }
-    if (error instanceof RequestError) {
+    if (isRequestError(error)) {
       const name = error.status === 404 ? 'NotFoundError' : error.status === 409 ? 'SessionBusyError' : 'InvalidRequestError';
       json(res, { name, data: { message: error.message }, message: error.message }, error.status);
     } else if (databaseBusy(error)) {
       json(res, { name: 'DatabaseBusyError', data: { message: 'The ShadowBot session database is busy. Refresh session status before retrying.' } }, 503);
-    } else if (error instanceof UserError) {
+    } else if (isUserError(error)) {
       json(res, { name: 'ConfigurationError', data: { message: error.message } }, 400);
     } else {
       console.error('ShadowBot Switch request failed', error instanceof Error ? error.name : 'UnknownError');
@@ -281,7 +281,7 @@ class Bridge {
     const local = await this.local(root);
     const { mcp, runs } = local;
     if (resource === 'mcp') {
-      if (!this.harness.capabilities.mcp) throw new RequestError(501, 'This harness does not support MCP');
+      if (!this.adapter.mcp) throw new RequestError(501, 'This harness does not support host MCP');
       if (path === '/mcp' && method === 'GET') return json(res, mcp.status());
       if (path === '/mcp' && method === 'POST') {
         const input = await body(req);

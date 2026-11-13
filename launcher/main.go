@@ -28,6 +28,7 @@ type installation struct {
 	PiVersion      string                    `json:"piVersion"` // Legacy manifests only.
 	Runtime        *runtimePointer           `json:"runtime"`
 	Harnesses      map[string]harnessRelease `json:"harnesses"`
+	Bundled        *bundledHarness           `json:"bundled"`
 }
 
 var releaseID = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -133,7 +134,11 @@ func runAt(home string, args []string) (int, error) {
 	if args[0] != "serve" {
 		return 2, errors.New("unsupported OpenCode command")
 	}
-	if state.Mode != "original" && state.Mode != "observe" {
+	bundled, err := bundledID(install)
+	if err != nil {
+		return 1, err
+	}
+	if state.Mode != bundled && state.Mode != "observe" {
 		record, ok := install.Harnesses[state.Mode]
 		if !ok {
 			record, ok = legacyHarness(install, state.Mode)
@@ -172,7 +177,7 @@ func runAt(home string, args []string) (int, error) {
 	if err != nil || hash != originalHash || !strings.EqualFold(hash, install.OriginalHash) {
 		return 1, errors.New("original OpenCode checksum mismatch")
 	}
-	if state.Mode == "original" {
+	if state.Mode == bundled {
 		cmd := exec.Command(backup, args...)
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 		return supervise(cmd)

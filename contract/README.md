@@ -28,13 +28,15 @@
 新增托管 harness：
 
 1. 添加 `harnesses/<id>/harness.json`，声明唯一小写 ID、名称、别名、`kind: "managed"`、版本、适配器入口、启动参数与 Skills/MCP 能力。
-2. 实现 `src/adapters/<id>/index.ts`，导出 `adapter: HarnessAdapter`。`createConfig` 接收宿主模型与认证，`createRuns` 负责执行、取消、原生上下文及会话操作；`mcp` 为可选能力。界面事件和历史通过传入的 `Store` 写入，授权/提问使用 `Interactions`。
+2. 实现 `src/adapters/<id>/index.ts`，导出 `adapter: HarnessAdapter`；需要初始化环境时可改为导出 `async initialize(home): Promise<HarnessAdapter>`，在函数中设置环境后动态导入 SDK。`createConfig` 接收宿主模型与认证，`createRuns` 负责执行、取消、原生上下文及会话操作。可选的 `mcp` 实现承载宿主 MCP；`capabilities.mcp` 控制自定义 MCP 的加载，不关闭宿主服务。界面事件和历史通过传入的 `Store` 写入，授权/提问使用 `Interactions`。
 3. 如需依赖，在 `harnesses/<id>/package.json` 与锁文件中声明；`versionPackage` 可指定用哪个依赖版本作为适配器版本，否则使用注册中的 `version`。编译测试需要的依赖放在根包的 `devDependencies`，生产 SDK 只安装到该适配器子目录。
 4. `launch.executable` 相对于发布目录；参数中的 `{runtime}` 替换为该 harness 已提交的发布目录。使用公共兼容服务时设置 `args: ["{runtime}/service/main.js"]`。运行环境提供 `SHADOWBOT_SWITCH_HOME` 和 `SHADOWBOT_HARNESS`，SDK 专属环境变量由适配器设置。
 5. 在隔离测试中注册适配器并验证启动、会话隔离、更新、能力拒绝和恢复；不修改安装器、启动器或切换核心来识别新 ID。
 
-安装记录 `format: 2` 使用 `runtime: { harness, release }` 指向管理运行时，`harnesses[id]` 分别记录各引擎的版本、发布 ID、适配器入口、启动方式与能力。启动器从当前选择对应的记录启动，更新其他 harness 不改变选择。原版属于 `bundled` 类型，由影刀维护二进制和版本。
+安装记录 `format: 2` 使用 `runtime: { harness, release }` 指向管理运行时，`harnesses[id]` 分别记录各引擎的版本、发布 ID、适配器入口、启动方式与能力；`bundled` 记录宿主自带引擎的 ID 和版本。启动器从当前选择对应的记录启动，更新其他 harness 不改变选择。原版属于唯一的 `bundled` 类型，由影刀维护二进制和版本。注册项可通过 `menuOrder` 固定菜单顺序，输入名称和别名不区分大小写。保留旧 Pi 运行时期间仍写入它读取 schema 所需的 `runtimeRelease/piVersion`，迁移该运行时后移除。
 
 `agent/` 与应用 `.shadowbot-switch/` 保存公共配置，`harnesses/<id>/agent/` 保存适配器私有配置，`backends/<id>/` 保存兼容数据库快照及适配器原生会话。旧 `.pi/` 应用配置仍可读取，新目录优先；旧安装记录、定位文件和 `shadowbot-pi.exe` 名称保留兼容。旧适配数据库的 `pi_file/pi_leaf/pi_entry` 在事务中迁移为中立的 `native_*` 列。
 
 测试夹具 `test/fixtures/harness/` 不接真实模型，也不作为产品引擎注册。它在没有 Pi SDK 的临时运行目录中使用公共 HTTP/SSE 与持久层，作为新增 harness 无需修改公共流程的验收证据。
+
+离线 Skills/MCP 配置管理、导入导出和配置检查由公共层完成，不依赖当前引擎的执行能力或 SDK 能否加载。连接检查才加载支持 MCP 的已安装适配器。应用配置导出按运行时规则合并 `.pi/` 和 `.shadowbot-switch/` 的 MCP 与权限配置；remove 移除当前范围两层的同名资源并保留备份，不删除继承的安装级资源。
