@@ -1,138 +1,198 @@
+<div align="center">
+
 # ShadowBot Switch
 
-影刀 Copilot 的多 harness 接入与切换工具。公共层负责注册、安装、更新、切换、诊断和恢复，兼容层保留影刀面板、模型设置、工具授权及会话展示；各适配器负责执行引擎、原生会话和能力映射。每个 harness 分别保留运行时和聊天记录。
+*给影刀 Copilot 换上其他 agent 引擎，随时一条命令切回原版*
 
-目前提供 Pi 适配器与影刀原版 OpenCode。Skills、自定义 MCP 的执行按适配器声明的能力提供；离线配置管理、检查和备份在使用原版时也可操作。Pi 是首个托管适配器，公共管理流程不以 Pi 为默认引擎。
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D4?style=flat-square)](#环境要求)
+[![PowerShell](https://img.shields.io/badge/PowerShell-7%2B-5391FE?style=flat-square)](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)
+[![ShadowBot](https://img.shields.io/badge/ShadowBot-6.3.39-E8483B?style=flat-square)](#环境要求)
+[![Pi](https://img.shields.io/badge/Pi-1.5.2-333333?style=flat-square)](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
+[![License](https://img.shields.io/github/license/wjiajian/shadowbot-switch?style=flat-square)](LICENSE)
 
-支持 Windows x64、PowerShell 7、影刀 **6.3.39** 和随附的 OpenCode **1.18.12**。当前项目使用已验证的 Pi **1.5.2**。
+[功能](#功能) • [开始使用](#开始使用) • [日常命令](#日常命令) • [Skills](#skills) • [MCP](#mcp) • [更新与迁移](#更新与迁移) • [开发](#开发)
+
+</div>
+
+ShadowBot Switch 接管影刀 Copilot 背后的 agent 进程，让你在不同 harness（执行引擎）之间切换，同时保留影刀原有的聊天面板、模型设置、工具授权和会话展示。每个 harness 有独立的运行时和聊天记录，切换时互不覆盖。
+
+目前可选两个 harness：
+
+| ID | 名称 | 类型 | Skills / 自定义 MCP |
+| --- | --- | --- | --- |
+| `pi` | Pi | 托管（由本项目构建） | 支持 |
+| `original` | 影刀原版 OpenCode | 随影刀附带 | 不支持（可离线管理配置） |
+
+## 功能
+
+- **一条命令切换**：`use pi` / `use original`，各自恢复自己的聊天记录，不动业务项目文件。
+- **保留影刀界面**：兼容 OpenCode 1.18.12 的 HTTP/SSE 接口，面板、授权弹窗、工具卡片照常使用。
+- **Skills 放入即用**：安装级和应用级两层目录，同名时应用级优先，自动同步到原生 `/` 菜单。
+- **自定义 MCP**：支持 stdio 和 Streamable HTTP，保存配置后在下一次空闲请求时自动生效。
+- **免装开发工具**：首次运行自动下载并校验 Node、npm、Go，所有依赖锁定版本。
+- **可恢复**：每次更新生成独立运行时；切换中断后重跑原命令或 `repair` 即可恢复，`doctor` 给出修复提示。
+- **适配器架构**：新增 harness 只需注册信息和适配器，不改安装器、启动器或切换核心。
+
+## 工作原理
+
+```mermaid
+flowchart LR
+    UI[影刀 Copilot 面板] --> L[兼容启动器<br/>替换 opencode.exe]
+    L -->|pi| S[兼容服务<br/>HTTP / SSE]
+    S --> A[Pi 适配器]
+    A --> MCP[影刀 MCP + 自定义 MCP]
+    A --> SK[官方 + 自定义 Skills]
+    L -->|original| O[备份的原版 opencode.exe]
+```
+
+安装时，Go 编写的启动器替换影刀目录中的 `opencode.exe`，原程序连同 SHA-256 校验一起备份。影刀启动 agent 时，启动器按当前选择转发到兼容服务或原版程序，并用 Windows Job Object 管理子进程，避免退出后残留。
 
 ## 开始使用
 
-在 [GitHub 项目页](https://github.com/wjiajian/shadowbot-switch) 点击 **Code → Download ZIP**，解压到准备长期保留的目录；也可以使用 `git clone`。在项目根目录打开 PowerShell 7：
+### 环境要求
 
-```powershell
-.\switch.ps1 harnesses
-.\switch.ps1 use pi --wait      # 示例：选择 Pi 适配器
-```
+- Windows x64
+- [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)
+- 影刀 **6.3.39**（随附 OpenCode **1.18.12**）
+- 首次安装需要联网
 
-脚本先准备运行文件，再提示退出影刀。保存工作，从托盘完全退出影刀及 OpenCode；脚本等待退出后完成切换，然后重新打开影刀。新装影刀需先打开一次 Copilot，初始化会话库。
+> [!IMPORTANT]
+> 启动器只接管已验证的影刀版本，会校验原版 `opencode.exe` 的哈希。影刀升级后，需等本项目完成兼容验证再切换。
 
-首次安装需要联网。脚本自动下载所需的 Node、npm、Go 和锁定版本的依赖，并完成编译，无需手动安装开发工具。工具缓存在项目的 `.tools/` 中；准备期间仍可使用影刀。影刀安装路径会自动查找，多候选时显示编号供选择，成功安装后记住路径。
+### 安装并切换
+
+1. 在 [GitHub 项目页](https://github.com/wjiajian/shadowbot-switch) 点击 **Code → Download ZIP**，解压到准备长期保留的目录；也可以 `git clone`。
+2. 新装的影刀需先打开一次 Copilot，初始化会话库。
+3. 在项目根目录打开 PowerShell 7：
+
+   ```powershell
+   .\switch.ps1 harnesses          # 查看可用的 harness 和能力
+   .\switch.ps1 use pi --wait      # 安装并切换到 Pi
+   ```
+
+4. 脚本准备好运行文件后会提示退出影刀。保存工作，从托盘完全退出影刀；脚本检测到退出后完成切换，然后重新打开影刀即可。
+
+脚本会自动查找影刀安装路径，找到多个时显示编号供选择，成功后记住路径。也可以手动指定：
 
 ```powershell
 .\switch.ps1 use pi --shadowbot-dir 'D:\ShadowBot' --wait --timeout 600
 ```
 
-所有操作都从这个入口执行；从其他工作目录调用脚本的完整路径也可以。原来的 `install.ps1 -Harness pi` / `opencode-origin` 仍可使用。
+> [!NOTE]
+> 准备阶段（下载工具链、编译）期间影刀可以照常使用。工具缓存在项目的 `.tools/` 中。脚本不会强行结束进程，`--wait` 默认最多等待 300 秒。
+
+所有操作都从 `switch.ps1` 进入，从其他目录用完整路径调用也可以。旧入口 `install.ps1 -Harness pi` / `opencode-origin` 仍然可用。
 
 ## 日常命令
 
 ```powershell
-.\switch.ps1                    # 显示当前后端和操作菜单
+.\switch.ps1                    # 当前后端和操作菜单
 .\switch.ps1 use pi             # 复用已安装版本，恢复 Pi 聊天记录
 .\switch.ps1 use original       # 恢复影刀原版程序和聊天记录
-.\switch.ps1 update             # 更新当前 harness
-.\switch.ps1 update pi          # 更新指定 harness，保持当前选择
-.\switch.ps1 reload             # 同步菜单，安排配置刷新
-.\switch.ps1 status             # 后端、运行应用和配置生效状态
-.\switch.ps1 doctor             # 汇总诊断，每个问题附修复提示
-.\switch.ps1 help               # 完整命令帮助，未安装时也能用
+.\switch.ps1 update [harness]   # 更新指定或当前 harness，不改变当前选择
+.\switch.ps1 reload             # 同步 Skill 菜单，安排 MCP 配置刷新
+.\switch.ps1 status             # 后端、运行中的应用和配置生效状态
+.\switch.ps1 doctor             # 完整诊断，每个问题附修复提示
+.\switch.ps1 help               # 完整命令帮助，未安装时也可用
 ```
 
-默认输出中文摘要和表格。`--json` 输出机器可读结果；诊断或连接检查失败会返回非零退出码。`help`、`status` 和基础诊断在未安装或安装记录损坏时仍能给出下一步。
+通用选项：
 
-切换会检查影刀和 OpenCode 是否退出，并列出占用进程。`--wait` 等待退出，默认最多 300 秒；不会强行结束进程。中断后重跑原命令可恢复，或运行 `repair`。
+| 选项 | 作用 |
+| --- | --- |
+| `--json` | 输出机器可读结果；诊断或连接检查失败时返回非零退出码 |
+| `--global` | 本次只操作安装级配置 |
+| `--app <路径>` | 本次只操作指定影刀应用 |
+| `--wait` / `--timeout <秒>` | 切换时等待影刀退出 |
+| `--shadowbot-dir <路径>` | 指定影刀安装目录 |
 
-## 配置范围
+### 配置范围
 
-默认管理**此安装下的所有应用**，不把终端所在目录当成影刀应用。应用级配置优先于安装级自定义配置。新配置使用应用下的 `.shadowbot-switch/`；已有 `.pi/` 配置和 Skill 继续读取，同名时新目录优先。
+默认管理**此安装下的所有应用**，不会把终端所在目录当成影刀应用。应用级配置优先于安装级。
 
 ```powershell
 .\switch.ps1 apps list
-.\switch.ps1 apps select 'D:\Path\To\App'  # 记住此应用，后续管理命令沿用
-.\switch.ps1 skills --app 'D:\Path\To\App' # 只在本次指定应用
-.\switch.ps1 skills --global               # 只在本次使用安装级范围
-.\switch.ps1 apps clear                    # 清除记忆，恢复安装级默认范围
+.\switch.ps1 apps select 'D:\Path\To\App'  # 记住此应用，后续命令沿用
+.\switch.ps1 apps clear                    # 恢复安装级默认范围
 ```
 
-`apps select` 不带路径时可交互选择。应用列表来自已登记的运行实例和当前影刀用户目录，始终显示完整路径。
+`apps select` 不带路径时可交互选择。应用列表来自已登记的运行实例和当前影刀用户目录。新配置写入应用下的 `.shadowbot-switch/`；已有的 `.pi/` 配置继续读取，同名时新目录优先。
 
 ## Skills
 
-日常只需记住两个目录，放入包含 `SKILL.md` 的文件夹即可使用：
+把包含 `SKILL.md` 的文件夹放进以下目录即可使用：
 
 | 范围 | 目录 |
 | --- | --- |
 | 此安装的所有应用 | `.shadowbot-switch/skills/<名称>/SKILL.md` |
 | 单个影刀应用 | `<应用根目录>/.shadowbot-switch/skills/<名称>/SKILL.md` |
 
-也可以用命令自动复制、启用或禁用：
+也可以用命令管理：
 
 ```powershell
-.\switch.ps1 skills
+.\switch.ps1 skills                             # 来源、启用状态、覆盖和解析问题
 .\switch.ps1 skills add 'D:\MySkills\my-skill'
 .\switch.ps1 skills disable my-skill
 .\switch.ps1 skills enable my-skill
-.\switch.ps1 skills remove my-skill
+.\switch.ps1 skills remove my-skill             # 移到 config-backups/，可手动恢复
 .\switch.ps1 config open skills
 ```
 
-清单包含启用状态、实际来源、同名覆盖和解析问题。应用级自定义 Skill 覆盖同名安装级 Skill；官方 Skill 名称保留，冲突会显示原因。`remove` 将当前范围的 Skill 移到 `.shadowbot-switch/config-backups/`，可手动恢复。Skill 指令读取与工具权限分开，启用 Skill 不会授予其工具权限。
+Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会授予它工具权限，两者分开管理。官方 Skill 名称保留，冲突时清单会说明原因。
 
-Skill 内容、增删和权限在下一轮读取。安装级菜单文件自动同步到影刀 `Resources/Copilot/commands/`，也可运行 `reload` 立即同步。**原生 `/` 菜单文件改变后需重新连接 Copilot**；命令输出会报告新增、更新、删除和冲突。应用级 Skill 可直接在聊天中点名，兼容服务的 `/command` 接口也提供当前应用的 Skill 指令。
+> [!TIP]
+> 安装级 Skill 会自动同步到影刀的 `Resources/Copilot/commands/`，即原生 `/` 菜单。菜单文件变化后需**重新连接 Copilot** 才会显示。应用级 Skill 可以直接在聊天中点名使用。
 
-影刀官方 Skill 的目录联接和 ZIP 解包缓存按实际内容更新。内置的 `shadowbot-flow-edit`、`shadowbot-run-diagnostics` 和 `shadowbot-web-exploration` 提供流程编辑、运行诊断和 Explorer 委派说明。
+项目内置三个 Skill：`shadowbot-flow-edit`（流程编辑）、`shadowbot-run-diagnostics`（运行诊断）和 `shadowbot-web-exploration`（Explorer 委派），见 [skills/](skills/)。
 
 ## MCP
 
-安装级配置位于 `.shadowbot-switch/agent/mcp.json`，应用级位于 `<应用根目录>/.shadowbot-switch/mcp.json`。支持 stdio 和 Streamable HTTP。
-
-每个服务只能填写 `command`（stdio）或 `url`（HTTP）中的一个，同时填写会在检查、导入和连接前报错。当前不支持 OAuth 登录或令牌刷新，含 `oauth` 字段的配置会明确报错；若服务支持静态令牌，可通过 `headers` 配置，例如 `"Authorization": "Bearer ${MCP_TOKEN}"`。
-
-`command: "node"` 使用随附 Node；要指定其他 Node 版本，可填写其完整路径。其他外部程序需在本机安装或填写可执行文件路径。
+| 范围 | 配置文件 |
+| --- | --- |
+| 此安装的所有应用 | `.shadowbot-switch/agent/mcp.json` |
+| 单个影刀应用 | `<应用根目录>/.shadowbot-switch/mcp.json` |
 
 ```powershell
-.\switch.ps1 mcp                         # 仅查看配置，不启动任何服务
+.\switch.ps1 mcp                                # 只查看配置，不启动服务
 .\switch.ps1 mcp add docs --url 'https://example.com/mcp'
-.\switch.ps1 mcp add local-tools --command node --arg 'D:\tools\server.mjs'
+.\switch.ps1 mcp add local-tools --command node --arg 'D:\tools\server.mjs' --permission ask
 .\switch.ps1 mcp disable docs
 .\switch.ps1 mcp enable docs
 .\switch.ps1 mcp remove docs
-.\switch.ps1 config open mcp
 .\switch.ps1 config check
-.\switch.ps1 mcp test docs               # 在当前终端环境中独立建连检查
-.\switch.ps1 mcp status                  # 运行中的 Copilot 实际状态
+.\switch.ps1 mcp test docs                      # 在当前终端环境中独立建连检查
+.\switch.ps1 mcp status                         # 运行中 Copilot 的实际连接状态
 ```
 
-`mcp test` 会启动 stdio 程序或连接远端，结束后关闭测试连接。它使用当前终端的环境变量，不能代替 Copilot 的运行状态。`mcp status` 读取运行实例的状态记录，最多延迟约 2 秒；没有运行实例时显示为空。
+配置规则：
 
-配置文件保存后，应用空闲后的下一次请求自动应用改动，无需手动 reload。只重连新增或改变的服务，未变化连接继续使用。替换连接失败时保留原可用连接，`status` / `mcp status` 显示失败原因。配置错误不会使其他可用服务被全部断开。
+- 每个服务只能填 `command`（stdio）或 `url`（HTTP）之一，同时填写会报错。
+- 不支持 OAuth，含 `oauth` 字段会报错。静态令牌可写在 `headers` 中，例如 `"Authorization": "Bearer ${MCP_TOKEN}"`。
+- 环境变量写成 `${NAME}`，缺失时只报告变量名，不打印凭据。修改系统环境变量后需重启影刀。
+- `command: "node"` 使用随附的 Node；其他程序需在本机安装，或填写完整路径。
+- 工具授权默认为询问，可用 `--permission ask|allow|deny` 或 `shadowbot.json` 的 `mcpPermission` 调整。应用级可用 `{ "enabled": false }` 禁用继承的服务。
 
-`reload` 会同步菜单并要求各应用下一次空闲请求复查配置；输出会区分等待请求、运行中和无运行实例。`status` 用于确认最终生效结果。
+配置保存后，应用在下一次空闲请求时自动应用改动：只重连新增或变化的服务；新连接失败时保留原来可用的连接，失败原因显示在 `status` / `mcp status` 中。`mcp test` 使用当前终端的环境变量，结果不等同于 Copilot 内的运行状态；`mcp status` 读取运行实例的记录，约有 2 秒延迟。
 
-自定义 MCP 默认询问工具授权。可在 `shadowbot.json` 中配置 `mcpPermission`，或添加服务时指定 `--permission ask|allow|deny`。应用级可用 `{ "enabled": false }` 禁用继承的服务。环境变量使用 `${NAME}`，缺失时报告变量名称而不打印凭据。更改系统环境变量后需重新启动影刀以取得新环境。
+示例：[examples/mcp.json](examples/mcp.json) · [examples/shadowbot.json](examples/shadowbot.json)
 
-[Skill 和权限示例](examples/shadowbot.json) · [MCP 示例](examples/mcp.json)
-
-## 更新、恢复和迁移
+## 更新与迁移
 
 ```powershell
-.\switch.ps1 update pi --wait  # 即使当前使用原版，也可更新 Pi
-.\switch.ps1 repair --wait
+.\switch.ps1 update pi --wait                   # 即使当前用原版，也可以更新 Pi
+.\switch.ps1 repair --wait                      # 搬迁项目目录或中断后恢复
 .\switch.ps1 config export 'D:\backup\shadowbot-config.json' --global
 .\switch.ps1 config import 'D:\backup\shadowbot-config.json' --global
-.\switch.ps1 config check --global
 ```
 
-`use <harness>` 安装或复用该 harness 的已安装版本，再切换会话。`update [harness]` 从当前本地源码和该适配器锁定的依赖构建，省略参数时更新当前选择；不会自动拉取 GitHub 源码或追踪 npm latest，也不会改变当前选择。原版 OpenCode 随影刀更新，`update original` 会说明这一点，不会转而更新 Pi。
+**更新本项目**：重新下载源码，覆盖到原项目目录，保留 `.shadowbot-switch/`（配置和聊天数据）与 `.tools/`（工具缓存），再运行 `update pi --wait`。用 Git 获取的项目先 `git pull` 再执行同一命令。`update` 只从本地源码和锁定依赖构建，不会自动拉取 GitHub 或追踪 npm latest。原版 OpenCode 随影刀更新，`update original` 只会给出说明；当前使用原版时，不带参数的 `update` 也一样，要重建 Pi 请写明 `update pi`。
 
-公共依赖由根目录锁文件管理；适配器依赖由 `harnesses/<id>/package-lock.json` 管理，安装到对应发布目录的适配器子目录。每次更新生成独立不可变运行时，准备阶段不修改旧运行时和其他 harness 的记录。旧 Pi 安装第一次使用新版管理流程时会重建适配器，保留会话和配置。
+**搬迁目录**：移动整个项目目录（包括 `.shadowbot-switch/`）后运行 `repair`。旧目录仍存在时会拒绝接管，避免两套会话混用。
 
-更新时重新下载源码，将解压后的项目文件覆盖到原项目目录，保留 `.shadowbot-switch/`（配置和聊天数据）与 `.tools/`（工具和缓存），再运行 `update <harness> --wait`（例如 `update pi --wait`）。通过 Git 获取的项目可先拉取源码，再执行同一命令。当前使用原版时，无参数 `update --wait` 只会提示原版随影刀更新；要重建托管运行时，请明确指定其名称。
+**换设备**：先在新设备安装，再导入配置。导出包含所选范围的配置和自定义 Skill，不含聊天库和构建缓存。导入遇到同名文件会停止；加 `--replace` 时先备份到 `.shadowbot-switch/config-backups/` 再覆盖。
 
-`repair` 用于移动整个项目目录后的定位修复及未完成的激活恢复，会核对原程序和启动器。旧项目目录仍存在时拒绝接管，避免混用两套会话。移动整个项目时须保留 `.shadowbot-switch/`。
-
-换设备先在新设备安装，再导入配置。导出包包含所选范围内的配置和自定义 Skill 文件，不包含聊天库或构建缓存。文件中可能有你填写的 MCP 凭据，应保存在自己的备份位置。导入先检查路径及 JSON 配置，遇到同名文件会停止；使用 `--replace` 时先备份到 `.shadowbot-switch/config-backups/`。导入报告不适用于本机的绝对路径，`config check` 可再次检查。
+> [!WARNING]
+> 导出文件可能包含你填写的 MCP 凭据，请保存在私人位置。
 
 ## 本地数据
 
@@ -140,22 +200,40 @@ Skill 内容、增删和权限在下一轮读取。安装级菜单文件自动�
 | --- | --- |
 | `.shadowbot-switch/skills/` | 安装级自定义 Skills |
 | `.shadowbot-switch/agent/` | 安装级配置及旧 Skill 目录 |
-| `.shadowbot-switch/backends/` | 各 harness 独立的会话快照、当前会话指针与原生记录 |
-| `.shadowbot-switch/harnesses/<id>/releases/` | 每版独立运行时和依赖 |
-| `.shadowbot-switch/harnesses/<id>/agent/` | 适配器专属运行配置（如 Pi SDK 的 agent 目录） |
+| `.shadowbot-switch/backends/` | 各 harness 的会话快照、当前会话指针与原生记录 |
+| `.shadowbot-switch/harnesses/<id>/releases/` | 每个版本独立的运行时和依赖 |
+| `.shadowbot-switch/harnesses/<id>/agent/` | 适配器专属配置（如 Pi SDK 的 agent 目录） |
 | `.shadowbot-switch/host-skills/` | 官方 Skill 联接与缓存 |
-| `.shadowbot-switch/running/` | 不含凭据的运行实例状态 |
+| `.shadowbot-switch/running/` | 运行实例状态（不含凭据） |
 | `.shadowbot-switch/config-backups/` | 导入覆盖前和移除 Skill 的备份 |
-| `.tools/` | 源码构建工具和缓存 |
+| `.tools/` | 构建工具和缓存 |
 
-影刀从自己的数据目录读取当前后端的活动会话。切换只恢复对应后端的历史，不恢复业务项目文件。取消聊天后，已经启动的影刀流程可能仍在运行，可在影刀按运行 ID 查询或停止。
+切换只恢复对应后端的聊天历史，不恢复业务项目文件。取消聊天后，已经启动的影刀流程可能仍在运行，可以在影刀中按运行 ID 查询或停止。
 
-## 开发与验证
+## 开发
 
 ```powershell
-.\scripts\build.ps1       # TypeScript、Go、Node 和 PowerShell 测试
+.\scripts\build.ps1       # 构建并运行 TypeScript、Go、Node 和 PowerShell 测试
 ```
 
-扩展适配器的注册格式、边界和验收要求见 [Harness 接入约定](contract/README.md#harness-接入约定)。测试用第二适配器位于 `test/fixtures/harness/`，只在隔离测试中注册。
+项目结构：
 
-[使用体验验收](EXPERIENCE-PLAN.md) · [实施计划](PLAN.md) · [兼容接口](contract/README.md) · [验证记录](TEST-REPORT.md)
+```text
+switch.ps1 / install.ps1   命令入口与安装流程
+scripts/                   工具链、发现、激活、进程等 PowerShell 模块
+launcher/                  Go 兼容启动器（替换 opencode.exe）
+src/                       公共管理层与影刀兼容服务（TypeScript）
+src/adapters/<id>/         各 harness 适配器
+harnesses/<id>/            harness 注册信息与适配器依赖锁文件
+contract/                  OpenCode 兼容契约与接口录制
+test/                      Node、Go、PowerShell 测试及测试用适配器
+```
+
+想接入新的 harness，参见 [Harness 接入约定](contract/README.md#harness-接入约定)。`test/fixtures/harness/` 中的测试适配器只在隔离测试中注册，可作为参考。
+
+### 相关文档
+
+- [兼容契约](contract/README.md)：OpenCode 1.18.12 接口、会话库与录制样本
+- [实施计划](archive-docs/PLAN.md)：架构边界与 Pi 适配器实施记录
+- [使用体验验收](archive-docs/EXPERIENCE-PLAN.md)
+- [验证记录](archive-docs/TEST-REPORT.md)
