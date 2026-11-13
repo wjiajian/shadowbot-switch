@@ -14,6 +14,11 @@ export type Harness = {
 };
 export type HarnessRelease = { release: string; version: string; adapter: string; launch: Launch; capabilities: Capabilities; legacy?: boolean };
 
+/** Installed releases retain their capabilities until rebuilt; older manifests use registration defaults. */
+export function harnessCapabilities(installation: Installation, spec: Harness): Capabilities {
+  return installation.harnesses?.[spec.id]?.capabilities ?? spec.capabilities;
+}
+
 export function harnessID(value: string) {
   if (typeof value !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(value) || value === 'observe') throw new UserError(`无效 harness 标识：${value}`);
   return value;
@@ -79,6 +84,6 @@ export async function loadAdapter(home: string, installation: Installation, spec
   const loaded = await import(url.href) as { adapter?: HarnessAdapter; initialize?: (home: string) => Promise<HarnessAdapter> };
   const adapter = loaded.initialize ? await loaded.initialize(home) : loaded.adapter;
   if (!adapter || adapter.id !== spec.id || typeof adapter.verify !== 'function' || typeof adapter.createConfig !== 'function' || typeof adapter.createRuns !== 'function') throw new Error('Invalid harness adapter contract');
-  if ((release?.capabilities ?? spec.capabilities).mcp && !adapter.mcp) throw new Error('Harness declares MCP without an implementation');
+  if (harnessCapabilities(installation, spec).mcp && !adapter.mcp) throw new Error('Harness declares MCP without an implementation');
   return adapter;
 }

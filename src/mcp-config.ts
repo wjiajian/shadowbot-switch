@@ -5,6 +5,18 @@ import { object } from './config.js';
 import { UserError } from './errors.js';
 import { appConfigFiles } from './config-paths.js';
 
+// The shared configuration contract belongs to Switch, independently of any
+// adapter's transport library. Validation preserves additional fields as given.
+type McpConfigBase = { enabled?: boolean; description?: string; timeout?: number };
+export type McpOAuthConfig = {
+  clientId?: string; clientSecret?: string; callbackPort?: number; callbackUrl?: string;
+  scope?: string; clientName?: string; clientRegistration?: 'auto' | 'dcr'; authServerMetadataUrl?: string;
+};
+export type CustomMcpConfig = McpConfigBase & (
+  { type?: 'stdio'; command: string; args?: string[]; env?: Record<string, string>; cwd?: string } |
+  { type?: 'http' | 'streamable-http'; url: string; headers?: Record<string, string>; oauth?: McpOAuthConfig }
+);
+
 export function mergeMcpEntry(previous: unknown, config: unknown) {
   return object(previous) && object(config) && !('command' in config) && !('url' in config) && !('type' in config) ? { ...previous, ...config } : config;
 }
@@ -28,8 +40,8 @@ export function customMcp(agentDir: string, workspace?: string) {
   return mcpInventory([join(agentDir, 'mcp.json'), ...appConfigFiles(workspace, 'mcp.json')]).entries;
 }
 
-/** Shared, offline configuration validation. Connecting a transport belongs to its adapter. */
-export function validateCustomMcp(name: string, raw: unknown): Record<string, unknown> {
+/** Used by both offline management and adapters before connecting custom MCP. */
+export function validateCustomMcp(name: string, raw: unknown): CustomMcpConfig {
   const invalid = (message: string): never => { throw new UserError(`MCP ${name}：${message}`); };
   if (['studio-mcp', 'xbot-copilot', 'browser-use-mcp'].includes(name.toLowerCase())) invalid('此名称由影刀保留，请使用其他名称。');
   if (!/^[a-z0-9_-]{1,64}$/i.test(name)) invalid('名称只能包含英文字母、数字、下划线和连字符，最长 64 字符。');
@@ -68,5 +80,5 @@ export function validateCustomMcp(name: string, raw: unknown): Record<string, un
     if (raw.env !== undefined && !stringMap(raw.env)) invalid('env 必须是字符串映射。');
     stringField(raw, 'cwd');
   } else invalid('需要 command（stdio）或 url（streamable HTTP）；不支持旧 SSE 传输。');
-  return raw;
+  return raw as CustomMcpConfig;
 }

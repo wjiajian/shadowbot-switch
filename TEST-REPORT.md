@@ -1,5 +1,12 @@
 # 验证记录
 
+## PR #1 公共校验与能力查询收敛（2026-11-13）
+
+- 自定义 MCP 的离线检查、导入与 Pi 加载共用 `validateCustomMcp`，删除适配器中重复的规则、只供旧测试使用的配置入口及无人调用的 `mcp.validate`。Pi 库的校验只用于宿主内置 MCP 的格式转换，公共层仍不依赖 Pi SDK。
+- 新增 14 组配置边界用例，覆盖 stdio、HTTP、环境变量模板、OAuth、保留名称及无效 timeout；离线检查与 Pi 加载的接受结果和错误信息一致。原有真实 stdio、宿主 SSE 和增量重连测试继续通过。
+- 所有已安装能力回退到注册能力的查询统一调用 `harnessCapabilities`。集成测试让注册能力高于已安装能力，验证状态、连接检查、适配器加载与 HTTP 行为仍遵守已安装记录；原版模式也不会按新注册能力误选旧适配器。
+- 在 Windows 本机实际执行 `scripts/build.ps1`，启用 `SHADOWBOT_TEST_OBSERVE=1`：36 项 Node 测试全部通过、无跳过，TypeScript/Go 构建、Go 测试和 PowerShell 激活、搬迁、等待及发布测试通过。原始输出保存在本地 `.tools/review-followup-build.log`（不提交构建日志）。
+
 ## PR #1 审查问题修复（2026-11-13）
 
 - `scripts/build.ps1` 完整构建通过；启用 `SHADOWBOT_TEST_OBSERVE=1` 后 35 项 Node 测试全部通过、无跳过，Go 启动器及 PowerShell 激活、搬迁、等待、注册与发布测试均通过。

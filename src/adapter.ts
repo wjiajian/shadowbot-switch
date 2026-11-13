@@ -39,7 +39,6 @@ export interface HarnessAdapter {
   createRuns(context: AdapterContext): HarnessRuns;
   mcp?: {
     create(root: string): McpConnection;
-    validate(name: string, raw: unknown): Record<string, unknown> & { enabled?: boolean };
   };
 }
 

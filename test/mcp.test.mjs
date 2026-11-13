@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { McpHub } from '../dist/service/adapters/pi/mcp.js';
+import { validateCustomMcp } from '../dist/service/mcp-config.js';
 
 test('stdio and legacy SSE run real Pi MCP requests', { timeout: 15_000 }, async () => {
   let sse;
@@ -40,7 +41,7 @@ test('stdio and legacy SSE run real Pi MCP requests', { timeout: 15_000 }, async
   await once(server, 'listening');
   const hub = new McpHub(process.cwd());
   try {
-    await hub.configureCustom(new Map([['local', { command: process.execPath, args: [resolve('test/fixtures/mcp-stdio.mjs')], timeout: 3 }]]));
+    await hub.reloadCustom(new Map([['local', { command: process.execPath, args: [resolve('test/fixtures/mcp-stdio.mjs')], timeout: 3 }]]));
     await hub.addBuiltin('studio-mcp', { type: 'remote', url: `http://127.0.0.1:${server.address().port}/host-mcp`, timeout: 3000 });
     assert.equal(hub.status().local.status, 'connected');
     assert.equal(hub.status()['studio-mcp'].status, 'connected');
@@ -48,7 +49,9 @@ test('stdio and legacy SSE run real Pi MCP requests', { timeout: 15_000 }, async
     assert.equal((await tools.get('local_echo').definition.execute('fixture1', {})).content[0].text, 'stdio fixture output');
     assert.equal((await tools.get('studio-mcp_flow_blocks_list').definition.execute('fixture2', {})).content[0].text, 'legacy SSE fixture output');
     assert.equal(rejectedInitializations, 1);
-    await assert.rejects(hub.configureCustom(new Map([['studio-mcp', { command: process.execPath }]])), /reserved/);
+    const invalid = await hub.reloadCustom(new Map([['studio-mcp', { command: process.execPath }]]));
+    assert.match(invalid.failed['studio-mcp'], /保留/);
+    assert.equal(hub.status()['studio-mcp'].status, 'connected');
     await hub.disconnect('studio-mcp');
     assert.equal(hub.status()['studio-mcp'].status, 'disabled');
   } finally {
@@ -56,6 +59,37 @@ test('stdio and legacy SSE run real Pi MCP requests', { timeout: 15_000 }, async
     server.closeAllConnections();
     server.close();
   }
+});
+
+test('offline checks and Pi reload share custom MCP validation, including transport and OAuth boundaries', async () => {
+  const cases = [
+    ['stdio', { command: 'must-not-run', args: ['one'], env: { TOKEN: '${UNSET_TEST_TOKEN}' }, cwd: '.', timeout: 3 }, true],
+    ['http', { type: 'streamable-http', url: '${UNSET_TEST_URL}/mcp', headers: { Authorization: '${UNSET_TEST_TOKEN}' } }, true],
+    ['oauth', { url: 'https://example.com/mcp', oauth: { clientId: 'client', callbackUrl: 'http://[::1]:8080/callback', callbackPort: 8080, clientRegistration: 'dcr', authServerMetadataUrl: 'http://localhost/metadata' } }, true],
+    ['infinite_timeout', { command: 'must-not-run', timeout: Infinity }, false],
+    ['negative_timeout', { command: 'must-not-run', timeout: -1 }, false],
+    ['bad_args', { command: 'must-not-run', args: [1] }, false],
+    ['bad_environment', { command: 'must-not-run', env: { TOKEN: 1 } }, false],
+    ['bad_header', { url: 'https://example.com/mcp', headers: { Token: false } }, false],
+    ['sse', { type: 'sse', url: 'https://example.com/mcp' }, false],
+    ['remote_callback', { url: 'https://example.com/mcp', oauth: { callbackUrl: 'http://example.com/callback' } }, false],
+    ['port_mismatch', { url: 'https://example.com/mcp', oauth: { callbackUrl: 'http://localhost:8080/callback', callbackPort: 8081 } }, false],
+    ['bad_metadata', { url: 'https://example.com/mcp', oauth: { authServerMetadataUrl: 'http://example.com/metadata' } }, false],
+    ['unsupported_registration', { url: 'https://example.com/mcp', oauth: { clientRegistration: 'cimd' } }, false],
+    ['studio-mcp', { command: 'must-not-run' }, false],
+  ];
+  const hub = new McpHub(process.cwd());
+  try {
+    for (const [name, config, valid] of cases) {
+      const raw = { ...config, enabled: false };
+      let offlineError;
+      if (valid) assert.deepEqual(validateCustomMcp(name, raw), raw);
+      else assert.throws(() => validateCustomMcp(name, raw), error => { offlineError = error.message; return true; });
+      const report = await hub.reloadCustom(new Map([[name, raw]]));
+      assert.equal(report.failed[name], offlineError, name);
+      assert.equal(hub.status()[name].status, valid ? 'disabled' : 'failed', name);
+    }
+  } finally { await hub.close(); }
 });
 
 test('a dropped connection does not resend a dispatched MCP tool call', { timeout: 15_000 }, async () => {

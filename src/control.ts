@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { HarnessRegistry, loadAdapter } from './harnesses.js';
+import { HarnessRegistry, harnessCapabilities, loadAdapter } from './harnesses.js';
 import { installationHome, mode, originalHash, protocolVersion, readJson, installedVersion, runtimeHarness, runtimeDirectory, sha256 } from './installation.js';
 import type { Installation } from './installation.js';
 import { HostConfig } from './config.js';
@@ -49,7 +49,7 @@ async function main([command, arg]: string[]) {
     if (install.originalHash.toLowerCase() !== originalHash || sha256(backup) !== originalHash) throw new Error('Original OpenCode checksum mismatch');
     if (sha256(install.agentPath) !== install.launcherHash.toLowerCase()) throw new Error('Active launcher checksum mismatch');
     await switchBackend(home, install, harness.id, schema);
-    syncSkillCommands(install.resources, (install.harnesses?.[harness.id]?.capabilities ?? harness.capabilities).skills ? skillInventory(agentDir, undefined, skillSources(home, install, harness.id), new HostConfig().value)
+    syncSkillCommands(install.resources, harnessCapabilities(install, harness).skills ? skillInventory(agentDir, undefined, skillSources(home, install, harness.id), new HostConfig().value)
       .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined);
     return;
   }

@@ -40,3 +40,5 @@
 测试夹具 `test/fixtures/harness/` 不接真实模型，也不作为产品引擎注册。它在没有 Pi SDK 的临时运行目录中使用公共 HTTP/SSE 与持久层，作为新增 harness 无需修改公共流程的验收证据。
 
 离线 Skills/MCP 配置管理、导入导出和配置检查由公共层完成，不依赖当前引擎的执行能力或 SDK 能否加载。连接检查才加载支持 MCP 的已安装适配器。应用配置导出按运行时规则合并 `.pi/` 和 `.shadowbot-switch/` 的 MCP 与权限配置；remove 移除当前范围两层的同名资源并保留备份，不删除继承的安装级资源。
+
+自定义 MCP 格式由公共层 `mcp-config.ts` 的类型与 `validateCustomMcp` 定义；适配器的 `reloadCustom` 使用同一校验器后再建立连接，不另用引擎 SDK 重复校验。Pi 的库校验仅用于宿主自带 MCP 的配置转换。适配器契约不再提供单独的 `mcp.validate`。公共层通过 `harnessCapabilities` 统一读取能力，优先使用已安装发布记录，旧清单缺失该记录时才回退到注册默认值。

@@ -1,7 +1,7 @@
 import { VERSION } from '@earendil-works/pi-coding-agent';
 import type { HarnessAdapter } from '../../adapter.js';
 import { HostConfig } from './config.js';
-import { McpHub, validateCustomMcp } from './mcp.js';
+import { McpHub } from './mcp.js';
 import { Runs } from './runner.js';
 
 export const adapter: HarnessAdapter = {
@@ -13,5 +13,5 @@ export const adapter: HarnessAdapter = {
   createRuns({ store, config, root, mcp, context, home, resources, skillSources }) {
     return new Runs(store, config as HostConfig, root, mcp as McpHub, context, home, resources, skillSources);
   },
-  mcp: { create: root => new McpHub(root), validate: validateCustomMcp },
+  mcp: { create: root => new McpHub(root) },
 };

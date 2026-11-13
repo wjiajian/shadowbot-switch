@@ -10,7 +10,7 @@ import { skillSources } from './host-skills.js';
 import { atomicWrite, mode, originalHash, readJson, installedVersion, runtimeDirectory, sha256 } from './installation.js';
 import type { Installation } from './installation.js';
 import { customMcp, mcpInventory, mergeMcpEntry, validateCustomMcp } from './mcp-config.js';
-import { HarnessRegistry, loadAdapter } from './harnesses.js';
+import { HarnessRegistry, harnessCapabilities, loadAdapter } from './harnesses.js';
 import { appConfigDirectory, appConfigDirectories, appConfigFiles } from './config-paths.js';
 import { runtimeStates } from './runtime-state.js';
 import { skillInventory, userSettings, validateUserSettings, settingsFromFiles } from './shadowbot.js';
@@ -105,7 +105,7 @@ function menuSync(home: string, install: Installation) {
   let harness;
   try { harness = registry.selected(mode(home)); }
   catch { return { added: 0, updated: 0, removed: 0 }; }
-  return syncSkillCommands(install.resources, (install.harnesses?.[harness.id]?.capabilities ?? harness.capabilities).skills
+  return syncSkillCommands(install.resources, harnessCapabilities(install, harness).skills
     ? skillRows(home, install).filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined);
 }
 
@@ -189,7 +189,7 @@ export async function manage(home: string, install: Installation, input: string[
   if (command === 'help') { console.log(help); return; }
   if (command === 'status') {
     const harness = selected();
-    const capabilities = install.harnesses?.[harness.id]?.capabilities ?? harness.capabilities;
+    const capabilities = harnessCapabilities(install, harness);
     const states = runtimeStates(home);
     emit({ harness: harness.id, backend: `${harness.name} ${installedVersion(install, harness.id) ?? harness.version ?? ''}`, capabilities,
       recoveryPending: ['activation.pending.json', 'switch.pending.json'].some(file => existsSync(join(home, file))),
@@ -294,8 +294,8 @@ export async function manage(home: string, install: Installation, input: string[
     if (action === 'test') {
       if (target && !entries.has(target)) throw new UserError(`MCP ${target} 未配置。运行 mcp list 查看名称。`);
       const active = selected();
-      const harness = active.kind === 'managed' ? active : registry.list().find(spec => spec.kind === 'managed' && (install.harnesses?.[spec.id]?.capabilities ?? spec.capabilities).mcp && (install.harnesses?.[spec.id] || !install.runtime));
-      if (!harness || !(install.harnesses?.[harness.id]?.capabilities ?? harness.capabilities).mcp) throw new UserError('没有支持 MCP 连接检查的已安装 harness。离线配置仍可使用。');
+      const harness = active.kind === 'managed' ? active : registry.list().find(spec => spec.kind === 'managed' && harnessCapabilities(install, spec).mcp && (install.harnesses?.[spec.id] || !install.runtime));
+      if (!harness || !harnessCapabilities(install, harness).mcp) throw new UserError('没有支持 MCP 连接检查的已安装 harness。离线配置仍可使用。');
       const hub = (await loadAdapter(home, install, harness)).mcp!.create(app ?? dirname(home));
       try {
         await hub.reloadCustom(target ? new Map([[target, entries.get(target)]]) : entries);

@@ -27,7 +27,9 @@ test('a registered non-Pi adapter launches the shared host, persists its history
   try {
     cpSync(resolve('dist/service'), join(runtime, 'service'), { recursive: true });
     cpSync(resolve('harnesses'), join(runtime, 'harnesses'), { recursive: true });
-    put(join(runtime, 'harnesses', 'fixture', 'harness.json'), spec);
+    // Registration can describe a newer release than the installed adapter.
+    // Its advertised features must not override the installed capabilities.
+    put(join(runtime, 'harnesses', 'fixture', 'harness.json'), { ...spec, capabilities: { skills: true, mcp: true } });
     put(join(runtime, 'service', spec.adapter), readFileSync('test/fixtures/harness/adapter.mjs', 'utf8'));
     cpSync(resolve('node_modules/yaml'), join(runtime, 'node_modules', 'yaml'), { recursive: true });
     cpSync(resolve('node_modules/ignore'), join(runtime, 'node_modules', 'ignore'), { recursive: true });
@@ -46,10 +48,15 @@ test('a registered non-Pi adapter launches the shared host, persists its history
     const status = cli('status');
     assert.equal(status.status, 0, status.stderr + status.stdout);
     assert.equal(JSON.parse(status.stdout).data.harness, 'fixture');
+    assert.deepEqual(JSON.parse(status.stdout).data.capabilities, { skills: false, mcp: false });
     assert.equal(cli('mcp').status, 0, 'offline MCP management must not require runtime support');
     assert.equal(cli('skills').status, 0, 'offline skill management must not require runtime support');
     const diagnostics = JSON.parse(cli('doctor').stdout).data;
     assert.equal(diagnostics.find(row => row.check === '运行时').status, '通过');
+    assert.match(cli('mcp', 'test').stdout, /没有支持 MCP/);
+    put(join(home, 'backend.json'), { mode: 'original' });
+    assert.match(cli('mcp', 'test').stdout, /没有支持 MCP/, 'original selection must not choose an installed adapter based on newer registration capabilities');
+    put(join(home, 'backend.json'), { mode: 'fixture' });
     const start = async () => {
       process = spawn(globalThis.process.execPath, [join(runtime, 'service/main.js'), 'serve', '--port', '0'], { env, windowsHide: true });
       closed = once(process, 'close');

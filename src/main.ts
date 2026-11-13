@@ -5,7 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
 import { join, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { HarnessRegistry, loadAdapter } from './harnesses.js';
+import { HarnessRegistry, harnessCapabilities, loadAdapter } from './harnesses.js';
 import type { Harness } from './harnesses.js';
 import { NoMcp } from './adapter.js';
 import type { HarnessAdapter, HarnessRuns, McpConnection, Prompt } from './adapter.js';
@@ -424,7 +424,7 @@ async function main() {
   const home = installationHome();
   const installation = readJson<Installation>(join(home, 'install.json'));
   const registered = new HarnessRegistry().get(mode(home));
-  const harness = { ...registered, capabilities: installation.harnesses?.[registered.id]?.capabilities ?? registered.capabilities };
+  const harness = { ...registered, capabilities: harnessCapabilities(installation, registered) };
   if (harness.kind !== 'managed' || existsSync(join(home, 'switch.pending.json')) || existsSync(join(home, 'activation.pending.json'))) throw new Error('Harness is not ready');
   verifySchema(installation.database, readFileSync(join(runtimeDirectory(home, installation, harness.id), 'schema.sql'), 'utf8'));
   const adapter = await loadAdapter(home, installation, harness);
