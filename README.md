@@ -176,6 +176,17 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 
 示例：[examples/mcp.json](examples/mcp.json) · [examples/shadowbot.json](examples/shadowbot.json)
 
+## Agent 规则（AGENTS.md）
+
+Pi 接入支持自动加载两层规则：
+
+- 安装级：本项目的 `.shadowbot-switch/agent/AGENTS.md`，适用于所有影刀应用。
+- 应用级：`<影刀应用根目录>/AGENTS.md`，只适用于当前应用；冲突时优先于安装级规则。
+
+每次发起请求时重新读取，保存后下一轮对话生效，无需 reload。主 Agent 和浏览器探索 Agent 都会加载。文件不存在或内容为空时忽略，不会向上扫描父目录或自动加载子目录规则；规则不会改变工具授权。
+
+这里的应用根目录是影刀传给接入层的工作目录，不是本仓库目录。此功能属于 Pi 接入，切回原版 OpenCode 不使用这套加载逻辑。首次使用需执行 `./switch.ps1 update pi --wait` 更新运行时。
+
 ## 更新与迁移
 
 ```powershell

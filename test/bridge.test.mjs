@@ -491,6 +491,51 @@ test('Explorer closes its overlay after success, failure and cancellation', { ti
   }
 });
 
+test('AGENTS rules reach the model, refresh each turn and stay scoped to the application', { timeout: 30_000 }, async () => {
+  const fixture = tempFixture();
+  const model = modelFixture();
+  const modelURL = await listen(model.server);
+  const config = { model: 'fixture/model', provider: { fixture: { npm: '@ai-sdk/openai-compatible',
+    options: { baseURL: modelURL, apiKey: 'fixture-model-key' }, models: { model: { name: 'Fixture' } } } } };
+  const agentDir = join(fixture.home, 'agent');
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, 'AGENTS.md'), 'installation-rule-marker');
+  writeFileSync(join(fixture.workspace, 'AGENTS.md'), 'application-rule-marker');
+  writeFileSync(join(fixture.root, 'AGENTS.md'), 'parent-rule-must-not-load');
+  let bridge;
+  try {
+    bridge = await start(fixture, config);
+    const session = await get(bridge.api('/session', { method: 'POST' }));
+    const prompt = async (id = session.id, directory = fixture.workspace) => {
+      await get(bridge.api(`/session/${id}/message`, { method: 'POST', directory,
+        data: { parts: [{ type: 'text', text: 'Check rules' }] } }));
+      return JSON.stringify(model.requests.at(-1).request.messages.filter(message => message.role === 'system'));
+    };
+    const initial = await prompt();
+    assert.match(initial, /installation-rule-marker/);
+    assert.match(initial, /application-rule-marker/);
+    assert.ok(initial.indexOf('installation-rule-marker') < initial.indexOf('application-rule-marker'));
+    assert.doesNotMatch(initial, /parent-rule-must-not-load/);
+    writeFileSync(join(fixture.workspace, 'AGENTS.md'), 'updated-application-marker');
+    const updated = await prompt();
+    assert.match(updated, /updated-application-marker/);
+    assert.doesNotMatch(updated, /application-rule-marker/);
+    const other = await get(bridge.api('/session', { method: 'POST', directory: fixture.other }));
+    const isolated = await prompt(other.id, fixture.other);
+    assert.match(isolated, /installation-rule-marker/);
+    assert.doesNotMatch(isolated, /updated-application-marker/);
+    unlinkSync(join(fixture.workspace, 'AGENTS.md'));
+    writeFileSync(join(agentDir, 'AGENTS.md'), '  \n');
+    const removed = await prompt();
+    assert.doesNotMatch(removed, /updated-application-marker|installation-rule-marker/);
+  } finally {
+    await bridge?.stop();
+    model.server.closeAllConnections();
+    await new Promise(resolve => model.server.close(resolve));
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('configuration edits automatically reload MCP once for concurrent prompts and preserve it on invalid edits', { timeout: 30_000 }, async () => {
   const fixture = tempFixture();
   const model = modelFixture();

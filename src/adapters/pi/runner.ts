@@ -12,7 +12,7 @@ import type { SkillSources } from '../../host-skills.js';
 import { decision, Interactions, permissionMayAllow } from '../../interactions.js';
 import { atomicWrite } from '../../installation.js';
 import { McpHub } from './mcp.js';
-import { agentPrompt, ShadowBotContext, skills, userSettings } from '../../shadowbot.js';
+import { agentPrompt, agentRules, ShadowBotContext, skills, userSettings } from '../../shadowbot.js';
 import { databaseBusy, failure, id, Store } from '../../store.js';
 import type { Meta } from '../../store.js';
 import { modelError, UserError, userMessage } from '../../errors.js';
@@ -370,7 +370,7 @@ export class Runs {
         });
       };
       const summary = loadedSkills.map(skill => `${skill.name}: ${skill.description}`).join('\n');
-      const instructions = [agentPrompt(config, this.root, agent), prompt.system,
+      const instructions = [agentPrompt(config, this.root, agent), agentRules(this.agentDir, this.root), prompt.system,
         `ShadowBot reference directory: ${join(this.resources, 'Copilot', 'knowledge')}`,
         summary && `Available skills. Use the skill tool to read their instructions.\n${summary}`].filter((value): value is string => Boolean(value));
       const resourceLoader = new DefaultResourceLoader({ cwd: this.root, agentDir: this.nativeAgentDir, settingsManager: settings,
