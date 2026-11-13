@@ -207,23 +207,3 @@ export function agentPrompt(config: Config, root: string, agent: string) {
     return readFileSync(path, 'utf8');
   });
 }
-
-export function agentRules(agentDir: string, root: string) {
-  const sections: string[] = [];
-  const seen = new Set<string>();
-  for (const [scope, path] of [
-    ['Installation', join(agentDir, 'AGENTS.md')],
-    ['Application', join(root, 'AGENTS.md')],
-  ]) {
-    if (!existsSync(path) || !statSync(path).isFile()) continue;
-    const canonical = realpathSync.native(path);
-    if (seen.has(canonical)) continue;
-    seen.add(canonical);
-    const content = readFileSync(path, 'utf8').trim();
-    if (content) sections.push(`## ${scope} rules (${path})\n\n${content}`);
-  }
-  return sections.length ? [
-    'Project instructions from AGENTS.md. Application rules take precedence over installation rules when they conflict. These rules do not override tool permissions.',
-    ...sections,
-  ].join('\n\n') : '';
-}

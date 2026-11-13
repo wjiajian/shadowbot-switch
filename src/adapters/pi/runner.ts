@@ -12,7 +12,8 @@ import type { SkillSources } from '../../host-skills.js';
 import { decision, Interactions, permissionMayAllow } from '../../interactions.js';
 import { atomicWrite } from '../../installation.js';
 import { McpHub } from './mcp.js';
-import { agentPrompt, agentRules, ShadowBotContext, skills, userSettings } from '../../shadowbot.js';
+import { agentPrompt, ShadowBotContext, skills, userSettings } from '../../shadowbot.js';
+import { agentRules } from '../../agent-rules.js';
 import { databaseBusy, failure, id, Store } from '../../store.js';
 import type { Meta } from '../../store.js';
 import { modelError, UserError, userMessage } from '../../errors.js';
@@ -370,6 +371,8 @@ export class Runs {
         });
       };
       const summary = loadedSkills.map(skill => `${skill.name}: ${skill.description}`).join('\n');
+      // The host workspace is the application root. session.directory can be a
+      // temporary OpenCode transport directory and must not supply app rules.
       const instructions = [agentPrompt(config, this.root, agent), agentRules(this.agentDir, this.root), prompt.system,
         `ShadowBot reference directory: ${join(this.resources, 'Copilot', 'knowledge')}`,
         summary && `Available skills. Use the skill tool to read their instructions.\n${summary}`].filter((value): value is string => Boolean(value));

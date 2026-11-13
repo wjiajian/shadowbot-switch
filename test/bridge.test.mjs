@@ -358,6 +358,10 @@ test('Pi chat, MCP, skills, permission, question, restore and revert', { timeout
 test('Explorer closes its overlay after success, failure and cancellation', { timeout: 30_000 }, async () => {
   const fixture = tempFixture();
   writeFileSync(join(fixture.workspace, 'reference.md'), 'delegated reference');
+  mkdirSync(join(fixture.home, 'agent'), { recursive: true });
+  writeFileSync(join(fixture.home, 'agent', 'AGENTS.md'), 'explorer-installation-rule');
+  writeFileSync(join(fixture.workspace, 'AGENTS.md'), 'authoritative-app-rule');
+  writeFileSync(join(fixture.other, 'AGENTS.md'), 'transport-directory-rule-must-not-load');
   let scenario = 'success';
   const childStarted = Promise.withResolvers();
   const model = modelFixture({ readPathFor: content => scenario === 'permission' && content.includes('Capture synthetic page evidence') ? 'reference.md' : undefined,
@@ -430,6 +434,12 @@ test('Explorer closes its overlay after success, failure and cancellation', { ti
     assert.match(card.state.output, /fixture-selector/);
     assert.match(card.state.output, /"evidence_role":"authoritative"/);
     assert.match(JSON.stringify(model.requests[1].request.messages), /fixture host context.*SHADOWBOT_BROWSER_PREFERENCE.*Fixture Chrome.*Fixture Edge/s);
+    for (const { request } of model.requests.slice(0, 2)) {
+      const system = JSON.stringify(request.messages.filter(message => message.role === 'system'));
+      assert.match(system, /explorer-installation-rule/);
+      assert.match(system, /authoritative-app-rule/);
+      assert.doesNotMatch(system, /transport-directory-rule-must-not-load/);
+    }
     assert.doesNotMatch(JSON.stringify(model.requests[0].request.messages), /SHADOWBOT_BROWSER_PREFERENCE/);
     assert.doesNotMatch(JSON.stringify(model.requests[0].request.tools ?? []), /"name":"xbot-copilot_execute_cell"/);
     assert.match(JSON.stringify(model.requests[1].request.tools ?? []), /"name":"xbot-copilot_execute_cell"/);
@@ -523,11 +533,17 @@ test('AGENTS rules reach the model, refresh each turn and stay scoped to the app
     const other = await get(bridge.api('/session', { method: 'POST', directory: fixture.other }));
     const isolated = await prompt(other.id, fixture.other);
     assert.match(isolated, /installation-rule-marker/);
-    assert.doesNotMatch(isolated, /updated-application-marker/);
+    assert.doesNotMatch(isolated, /application-rule-marker|updated-application-marker/);
     unlinkSync(join(fixture.workspace, 'AGENTS.md'));
     writeFileSync(join(agentDir, 'AGENTS.md'), '  \n');
     const removed = await prompt();
-    assert.doesNotMatch(removed, /updated-application-marker|installation-rule-marker/);
+    assert.doesNotMatch(removed, /application-rule-marker|updated-application-marker|installation-rule-marker|Project instructions from AGENTS.md/);
+    writeFileSync(join(agentDir, 'AGENTS.md'), Buffer.from([0xff, 0xfe, 0x61]));
+    writeFileSync(join(fixture.workspace, 'AGENTS.md'), 'valid-app-after-bad-installation');
+    const invalid = await prompt();
+    assert.match(invalid, /valid-app-after-bad-installation/);
+    assert.doesNotMatch(invalid, /Installation rules|\uFFFD/);
+    assert.match(bridge.processLog.join(''), /AGENTS.md.*UTF-8/);
   } finally {
     await bridge?.stop();
     model.server.closeAllConnections();

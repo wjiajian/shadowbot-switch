@@ -16,6 +16,7 @@ import { runtimeStates } from './runtime-state.js';
 import { skillInventory, userSettings, validateUserSettings, settingsFromFiles } from './shadowbot.js';
 import { syncSkillCommands } from './skill-commands.js';
 import { verifySchema } from './switch.js';
+import { loadAgentRules } from './agent-rules.js';
 
 const help = `ShadowBot Switch
   use <harness>               安装或切换后端（例如 use pi / use original）
@@ -141,6 +142,13 @@ function applicationConfigTree(root: string) {
   // same local layer (without baking in inherited installation configuration).
   if (files.has('mcp.json')) files.set('mcp.json', { path: 'mcp.json', data: Buffer.from(JSON.stringify({ mcpServers: Object.fromEntries(mcpInventory(appConfigFiles(root, 'mcp.json')).entries) })).toString('base64') });
   if (files.has('shadowbot.json')) files.set('shadowbot.json', { path: 'shadowbot.json', data: Buffer.from(JSON.stringify(settingsFromFiles(appConfigFiles(root, 'shadowbot.json')))).toString('base64') });
+  // Export the same application rules the runtime selects. Import places this
+  // in .shadowbot-switch/AGENTS.md, which is the loader's migration fallback.
+  const rules = loadAgentRules(undefined, root);
+  if (rules.warnings.length) throw new UserError(rules.warnings.join('\n'));
+  files.delete('agents.md');
+  const rule = rules.files[0];
+  if (rule) files.set('agents.md', { path: 'AGENTS.md', data: Buffer.from(rule.content).toString('base64') });
   return [...files.values()];
 }
 
@@ -365,6 +373,7 @@ export async function manage(home: string, install: Installation, input: string[
       const entries = customMcp(join(home, 'agent'), app);
       for (const [name, value] of entries) validateCustomMcp(name, value);
       const warnings = [...entries].flatMap(([name, raw]) => pathWarnings(raw, name));
+      warnings.push(...loadAgentRules(join(home, 'agent'), app).warnings);
       const errors = skillRows(home, install, app).filter(row => row.status === 'invalid').map(({ path, reason }) => ({ path, reason }));
       emit({ valid: !errors.length && !warnings.length, warnings, skills: errors });
       if (warnings.length || errors.length) process.exitCode = 1;
@@ -389,7 +398,9 @@ export async function manage(home: string, install: Installation, input: string[
       const prepared = bundle.entries.map(entry => {
         if (typeof entry.path !== 'string' || typeof entry.data !== 'string' || !/^(skills|agent)\//.test(entry.path)) throw new UserError('配置包中存在无效文件。');
         const name = app ? entry.path.replace(/^agent\//, '') : entry.path;
-        const path = within(app ? directory : home, name);
+        // Preserve the root-level convention when updating an existing app.
+        const path = app && name === 'AGENTS.md' && existsSync(join(app, 'AGENTS.md'))
+          ? within(app, name) : within(app ? directory : home, name);
         if (seen.has(path.toLowerCase())) throw new UserError(`配置包中存在重复文件：${name}`);
         seen.add(path.toLowerCase());
         if (existsSync(path) && !opts.flags.has('replace')) throw new UserError(`文件已存在：${path}。使用 --replace 时会先备份。`);
@@ -440,6 +451,10 @@ export async function manage(home: string, install: Installation, input: string[
     await check('会话数据库', () => verifySchema(install.database, readFileSync(join(runtimeDirectory(home, install), 'schema.sql'), 'utf8')), '会话库结构或完整性不匹配。确认影刀版本为 6.3.39，并保留数据进行恢复。');
     await check('Skills 配置', () => { const errors = skillRows(home, install, app).filter(r => r.status === 'invalid'); if (errors.length) throw new UserError(errors.map(r => `${r.path}：${r.reason}`).join('\n')); }, '运行 skills 查看配置问题。');
     await check('MCP 配置', () => { for (const [name, raw] of customMcp(join(home, 'agent'), app)) validateCustomMcp(name, raw); }, '运行 config open mcp 修复配置。');
+    await check('AGENTS.md 规则', () => {
+      const { warnings } = loadAgentRules(join(home, 'agent'), app);
+      if (warnings.length) throw new UserError(warnings.join('\n'));
+    }, '检查 AGENTS.md 的大小、UTF-8 编码和读取权限。');
     await check('恢复状态', () => { if (['activation.pending.json', 'switch.pending.json'].some(file => existsSync(join(home, file)))) throw new UserError('上次操作尚未完成。关闭影刀后运行 repair。'); }, '运行 repair。');
     emit(checks, `安装诊断 · ${scope}`);
     if (checks.some(c => c.status === '失败')) process.exitCode = 1;

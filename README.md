@@ -10,7 +10,7 @@
 [![Pi](https://img.shields.io/badge/Pi-1.5.2-333333?style=flat-square)](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 [![License](https://img.shields.io/github/license/wjiajian/shadowbot-switch?style=flat-square)](LICENSE)
 
-[功能](#功能) • [开始使用](#开始使用) • [日常命令](#日常命令) • [Skills](#skills) • [MCP](#mcp) • [更新与迁移](#更新与迁移) • [开发](#开发)
+[功能](#功能) • [开始使用](#开始使用) • [日常命令](#日常命令) • [Skills](#skills) • [MCP](#mcp) • [Agent 规则](#agent-规则agentsmd) • [更新与迁移](#更新与迁移) • [开发](#开发)
 
 </div>
 
@@ -183,9 +183,13 @@ Pi 接入支持自动加载两层规则：
 - 安装级：本项目的 `.shadowbot-switch/agent/AGENTS.md`，适用于所有影刀应用。
 - 应用级：`<影刀应用根目录>/AGENTS.md`，只适用于当前应用；冲突时优先于安装级规则。
 
+应用根目录没有 `AGENTS.md` 时，读取 `<影刀应用根目录>/.shadowbot-switch/AGENTS.md`，以支持配置导入。根目录文件存在但为空或无效时，不启用备用文件。`config export --app` 会包含当前应用规则；导入到新应用时写入 `.shadowbot-switch/AGENTS.md`，目标应用已有根目录规则时则遵循文件冲突检查，使用 `--replace` 才会备份并覆盖。
+
 每次发起请求时重新读取，保存后下一轮对话生效，无需 reload。主 Agent 和浏览器探索 Agent 都会加载。文件不存在或内容为空时忽略，不会向上扫描父目录或自动加载子目录规则；规则不会改变工具授权。
 
-这里的应用根目录是影刀传给接入层的工作目录，不是本仓库目录。此功能属于 Pi 接入，切回原版 OpenCode 不使用这套加载逻辑。首次使用需执行 `./switch.ps1 update pi --wait` 更新运行时。
+规则文件须使用 UTF-8，每层最多 32 KiB。无法读取、编码无效、超限、读取期间变化或链接目标越出对应目录的文件会被跳过，并记录诊断；不会截断规则内容。可运行 `.\switch.ps1 config check` 或 `.\switch.ps1 doctor` 检查，应用级检查加 `--app <应用根目录>`。
+
+这里的应用根目录是影刀传给接入层的工作区（优先使用 `SHADOWBOT_OPENCODE_WORKSPACE_ROOT`），不是本仓库目录，也不是可能指向临时运行目录的会话 `directory`。此功能属于 Pi 接入，切回原版 OpenCode 不使用这套加载逻辑。首次使用需执行 `.\switch.ps1 update pi --wait` 更新运行时。
 
 ## 更新与迁移
 
