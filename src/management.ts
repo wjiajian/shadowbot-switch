@@ -152,16 +152,26 @@ function applicationConfigTree(root: string) {
   return { entries: [...files.values()], warnings: rules.warnings };
 }
 
+function configPathStat(path: string) {
+  try { return lstatSync(path, { throwIfNoEntry: false }); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? '未知错误';
+    throw new UserError(`无法检查配置路径：${path}（${code}）。检查目录结构和读取权限。`);
+  }
+}
+
 function within(root: string, name: string) {
   if (!name || name.includes('\\') || name.split('/').some(p => !p || p === '.' || p === '..' || /[:\x00-\x1f]/.test(p))) throw new UserError(`无效配置路径：${name}`);
   const path = resolve(root, name);
   if (!path.startsWith(resolve(root) + sep)) throw new UserError('配置路径越出了目标目录。');
   let cursor = root;
   for (const part of name.split('/')) {
-    if (lstatSync(cursor, { throwIfNoEntry: false })?.isSymbolicLink()) throw new UserError(`目标目录包含链接：${cursor}`);
+    const info = configPathStat(cursor);
+    if (info?.isSymbolicLink()) throw new UserError(`目标目录包含链接：${cursor}`);
+    if (info && !info.isDirectory()) throw new UserError(`目标路径不是目录：${cursor}`);
     cursor = join(cursor, part);
   }
-  if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new UserError(`目标文件是链接：${path}`);
+  if (configPathStat(path)?.isSymbolicLink()) throw new UserError(`目标文件是链接：${path}`);
   return path;
 }
 
@@ -397,6 +407,7 @@ export async function manage(home: string, install: Installation, input: string[
       ];
       writeJson(path, { format: 'shadowbot-switch-config', version: 1, entries });
       emit({ path, files: entries.length, warnings: exported.warnings.map(warning => `${warning}；未导出该规则文件，其余配置已导出。`) });
+      if (exported.warnings.length) process.exitCode = 1;
       return;
     }
     if (action === 'import') {
@@ -410,7 +421,7 @@ export async function manage(home: string, install: Installation, input: string[
         const normalized = isRule ? 'agent/AGENTS.md' : entry.path;
         const name = app ? normalized.replace(/^agent\//, '') : normalized;
         // Preserve the root-level convention when updating an existing app.
-        const path = app && isRule && lstatSync(join(app, 'AGENTS.md'), { throwIfNoEntry: false })
+        const path = app && isRule && configPathStat(join(app, 'AGENTS.md'))
           ? within(app, name) : within(app ? directory : home, name);
         if (seen.has(path.toLowerCase())) throw new UserError(`配置包中存在重复文件：${name}`);
         seen.add(path.toLowerCase());

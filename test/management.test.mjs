@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,6 +10,8 @@ import { skillInventory } from '../dist/service/shadowbot.js';
 import { skillSources } from '../dist/service/host-skills.js';
 import { configurationRevision, publishRuntimeState, runtimeStates } from '../dist/service/runtime-state.js';
 import { loadAgentRules, maxRuleBytes } from '../dist/service/agent-rules.js';
+import { manage } from '../dist/service/management.js';
+import { UserError } from '../dist/service/errors.js';
 
 const control = resolve('dist/service/control.js');
 const put = (path, data) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, typeof data === 'string' ? data : JSON.stringify(data)); };
@@ -42,7 +46,7 @@ test('rule migration diagnoses skipped exports and validates imports before writ
     ]) {
       for (const bad of [Buffer.from([0xff]), Buffer.alloc(maxRuleBytes + 1, 97)]) {
         writeFileSync(file, bad);
-        const result = run(0, 'config', 'export', bundle, ...scope, '--replace').data;
+        const result = run(1, 'config', 'export', bundle, ...scope, '--replace').data;
         assert.match(result.warnings.join(''), /未导出.*其余配置已导出/);
         assert.doesNotMatch(result.warnings.join(''), /本轮/);
         const entries = JSON.parse(readFileSync(bundle, 'utf8')).entries;
@@ -79,7 +83,43 @@ test('rule migration diagnoses skipped exports and validates imports before writ
     assert.match(JSON.stringify(run(1, 'doctor', '--app', app)), /断链/);
     assert.match(JSON.stringify(run(1, 'config', 'import', bundle, '--app', app, '--replace')), /目标文件是链接/);
     assert.equal(existsSync(join(app, '.shadowbot-switch', 'AGENTS.md')), false);
+    // An intermediate regular file must be reported by name, before any writes.
+    const blocked = join(app, '.shadowbot-switch', 'skills');
+    writeFileSync(blocked, 'not-a-directory');
+    put(bundle, { format: 'shadowbot-switch-config', version: 1,
+      entries: [{ path: 'agent/skills/example/SKILL.md', data: Buffer.from('test').toString('base64') }] });
+    const pathError = run(1, 'config', 'import', bundle, '--app', app);
+    assert.match(pathError.error, /目标路径不是目录/);
+    assert.ok(pathError.error.includes(blocked));
+    assert.equal(readFileSync(blocked, 'utf8'), 'not-a-directory');
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('import path inspection reports permission errors with the affected path', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'shadowbot-path-error-'));
+  const home = join(root, 'state');
+  const target = join(home, 'agent', 'AGENTS.md');
+  const bundle = join(root, 'bundle.json');
+  put(bundle, { format: 'shadowbot-switch-config', version: 1,
+    entries: [{ path: 'agent/AGENTS.md', data: Buffer.from('test').toString('base64') }] });
+  const originalStat = fs.lstatSync;
+  t.mock.method(fs, 'lstatSync', (...args) => {
+    if (args[0] === target) throw Object.assign(new Error('synthetic denied'), { code: 'EACCES' });
+    return originalStat(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(manage(home, {}, ['config', 'import', bundle, '--global']), error => {
+      assert.ok(error instanceof UserError);
+      assert.ok(error.message.includes(target));
+      assert.match(error.message, /EACCES/);
+      return true;
+    });
+    assert.equal(existsSync(target), false);
+  } finally {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('management CLI scopes resources, records choices, edits config, and exports/imports without running MCP', { timeout: 45_000 }, () => {

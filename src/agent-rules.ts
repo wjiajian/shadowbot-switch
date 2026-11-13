@@ -40,6 +40,8 @@ function readRules(path: string, root: string) {
       if (!count) break;
       size += count;
     }
+    // Handle stats alone cannot detect a rename that replaces the path while
+    // the descriptor still points to the old file; retain the path snapshot.
     if (size !== Number(before.size) || !unchanged(before, fstatSync(fd, { bigint: true })) ||
       realpathSync.native(path) !== canonical || !unchanged(pathBefore, statSync(canonical, { bigint: true }))) {
       throw new Error('规则文件在读取期间发生变化，请重试');
