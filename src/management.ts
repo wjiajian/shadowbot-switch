@@ -15,6 +15,7 @@ import { appConfigDirectory, appConfigDirectories, appConfigFiles } from './conf
 import { runtimeStates } from './runtime-state.js';
 import { skillInventory, userSettings, validateUserSettings, settingsFromFiles } from './shadowbot.js';
 import { syncSkillCommands } from './skill-commands.js';
+import { thinkingEnabled } from './thinking-command.js';
 import { verifySchema } from './switch.js';
 import { decodeRuleContent, loadAgentRules } from './agent-rules.js';
 
@@ -107,7 +108,7 @@ function menuSync(home: string, install: Installation) {
   try { harness = registry.selected(mode(home)); }
   catch { return { added: 0, updated: 0, removed: 0 }; }
   return syncSkillCommands(install.resources, harnessCapabilities(install, harness).skills
-    ? skillRows(home, install).filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, harness.id === 'pi' && !new HostConfig().value.command?.thinking);
+    ? skillRows(home, install).filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, thinkingEnabled(harness.id, new HostConfig().value));
 }
 
 export function applicationList(home: string, install: Installation) {

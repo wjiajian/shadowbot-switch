@@ -202,7 +202,11 @@ Invoke-InstallationLock $agentExe {
     if ($Update) {
         # The host caches command files when Copilot connects. Publish menus while
         # it is still stopped, rather than waiting for the first chat request.
-        Invoke-RuntimeControl $state $release @('reload') | Out-Host
+        try { Invoke-RuntimeControl $state $release @('reload') | Out-Host }
+        catch {
+            $global:LASTEXITCODE = 0
+            Write-Warning '运行时已更新，但菜单同步失败。检查命令目录权限和配置后运行 .\switch.ps1 reload。'
+        }
         Write-Output "已更新 $Harness $($release.harnesses[$Harness].version)，当前继续使用 $(Get-SelectedHarness $state)。"
         return
     }

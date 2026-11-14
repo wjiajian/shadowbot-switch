@@ -97,7 +97,7 @@ export class HostConfig extends BaseHostConfig {
     // values. Keep model restrictions when the host selects a compatible relay.
     const openaiEffort = ['openai-responses', 'openai-completions'];
     const thinkingLevelMap = catalog && (catalog.api === api ||
-      (providerID === 'openai' && openaiEffort.includes(catalog.api) && openaiEffort.includes(api)))
+      (openaiEffort.includes(catalog.api) && openaiEffort.includes(api)))
       ? catalog.thinkingLevelMap : undefined;
     const configuredBase = model.provider?.api ?? provider.options?.baseURL ?? provider.api;
     const base = configuredBase ?? catalog?.baseUrl;

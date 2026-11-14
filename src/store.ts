@@ -68,6 +68,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS adapter.thinking (
         session_id TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE, level TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS adapter.local_command (
+        session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+        user_id TEXT PRIMARY KEY, assistant_id TEXT NOT NULL, native_leaf TEXT, level TEXT
+      );
       CREATE TABLE IF NOT EXISTS adapter.removed_message (
         session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
         message_id TEXT NOT NULL, PRIMARY KEY (session_id, message_id)
@@ -110,7 +114,22 @@ export class Store {
 
   thinking(sessionID: string, level?: string) {
     if (level !== undefined) this.db.prepare('INSERT INTO adapter.thinking VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET level=excluded.level').run(sessionID, level);
+    const cutoff = this.meta(sessionID)?.cutoff;
+    const latest = this.db.prepare(`SELECT c.level FROM adapter.local_command c JOIN main.message m ON m.id=c.user_id
+      WHERE c.session_id=? AND c.level IS NOT NULL AND (? IS NULL OR m.rowid < (SELECT rowid FROM main.message WHERE id=?))
+      ORDER BY m.rowid DESC LIMIT 1`).get(sessionID, cutoff ?? null, cutoff ?? null);
+    if (latest) return String(latest.level);
     return this.db.prepare('SELECT level FROM adapter.thinking WHERE session_id=?').get(sessionID)?.level as string | undefined;
+  }
+
+  localCommand(sessionID: string, messageID: string) {
+    return this.db.prepare('SELECT * FROM adapter.local_command WHERE session_id=? AND (user_id=? OR assistant_id=?)')
+      .get(sessionID, messageID, messageID) as { user_id: string; native_leaf: string | null } | undefined;
+  }
+
+  recordCommand(sessionID: string, userID: string, assistantID: string, leaf: string | null, baseline: string, level?: string) {
+    if (level) this.db.prepare('INSERT INTO adapter.thinking VALUES (?, ?) ON CONFLICT DO NOTHING').run(sessionID, baseline);
+    this.db.prepare('INSERT INTO adapter.local_command VALUES (?, ?, ?, ?, ?)').run(sessionID, userID, assistantID, leaf, level ?? null);
   }
 
   owned(sessionID: string, root: string) {
@@ -176,12 +195,12 @@ export class Store {
     if (row) this.publish({ id: id('evt'), type, properties }, (JSON.parse(String(row.session)) as Session).directory, String(row.root));
   }
 
-  putMessage(info: Message) {
+  putMessage(info: Message, emit = true) {
     const { id, sessionID, ...data } = info;
     this.db.prepare(`INSERT INTO main.message (id,session_id,time_created,time_updated,data) VALUES (?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET time_updated=excluded.time_updated,data=excluded.data WHERE session_id=excluded.session_id`)
       .run(id, sessionID, info.time.created, Date.now(), JSON.stringify(data));
-    this.event(sessionID, 'message.updated', { info });
+    if (emit) this.event(sessionID, 'message.updated', { info });
   }
 
   putPart(record: Part, emit = true) {

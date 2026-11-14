@@ -24,8 +24,8 @@ import type { Frame } from './store.js';
 import { verifySchema } from './switch.js';
 import { configurationRevision, publishRuntimeState } from './runtime-state.js';
 import { skillInventory } from './shadowbot.js';
-import { generatedCommand, skillCommand, syncSkillCommands } from './skill-commands.js';
-import { thinkingCommands } from './thinking-command.js';
+import { thinkingMenuCommand, skillCommand, syncSkillCommands } from './skill-commands.js';
+import { thinkingEnabled } from './thinking-command.js';
 import { userMessage } from './errors.js';
 import { agentRules } from './agent-rules.js';
 
@@ -157,7 +157,7 @@ class Bridge {
     try {
       const global = this.harness.capabilities.skills ? skillInventory(this.agentDir, undefined, this.skillSources, this.config.value)
         .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined;
-      const menu = syncSkillCommands(this.installation.resources, global, this.harness.id === 'pi' && !this.config.value.command?.thinking);
+      const menu = syncSkillCommands(this.installation.resources, global, thinkingEnabled(this.harness.id, this.config.value));
       if (menu.added + menu.updated + menu.removed) local.menuReconnect = true;
     } catch (error) { local.configurationError = userMessage(error, 'Skill 菜单同步失败。检查影刀 Resources/Copilot/commands 目录权限。'); }
     this.publish(root, local);
@@ -272,10 +272,9 @@ class Bridge {
         prompt: role?.prompt, variant: role?.variant, options: role?.options ?? {}, steps: role?.steps ?? role?.maxSteps };
     }));
     const commands = { ...this.config.value.command };
-    if (this.harness.id === 'pi' && !commands.thinking) {
-      const file = join(this.installation.resources, 'Copilot', 'commands', 'thinking.md');
-      commands.thinking = existsSync(file) && !generatedCommand(readFileSync(file, 'utf8'))
-        ? { template: commandTemplate(file), description: 'thinking' } : thinkingCommands.thinking;
+    if ((path === '/command' || action === 'command') && thinkingEnabled(this.harness.id, this.config.value)) {
+      try { commands.thinking = thinkingMenuCommand(this.installation.resources); }
+      catch (error) { if (action === 'command') throw error; }
     }
     if (this.harness.capabilities.skills && (path === '/command' || action === 'command')) {
       for (const skill of skills(this.agentDir, root, this.skillSources, this.config.value)) {
