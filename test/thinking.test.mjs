@@ -7,6 +7,27 @@ import { syncSkillCommands } from '../dist/service/skill-commands.js';
 import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { initialThinkingLevel } from '../dist/service/adapters/pi/thinking.js';
+
+test('local initial level matches the public Pi SDK default', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'thinking-sdk-default-'));
+  let session;
+  try {
+    const config = new HostConfig();
+    config.value = { model: 'fixture/reasoner', provider: { fixture: { npm: '@ai-sdk/openai-compatible',
+      options: { baseURL: 'http://localhost:1234' }, models: { reasoner: { reasoning: true } } } } };
+    const { runtime, resolved } = await config.model();
+    const settingsManager = SettingsManager.inMemory();
+    const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir: root, settingsManager,
+      noExtensions: true, noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true,
+      disabledBuiltinExtensions: ['mcp', 'codemode', 'tool_search'] });
+    await resourceLoader.reload();
+    ({ session } = await createAgentSession({ cwd: root, agentDir: root, settingsManager, resourceLoader,
+      sessionManager: SessionManager.inMemory(root), modelRuntime: runtime, model: resolved, noTools: 'all' }));
+    assert.equal(session.thinkingLevel, initialThinkingLevel);
+  } finally { session?.dispose(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('menu upgrade removes generated shortcuts and preserves user files', () => {
   const root = mkdtempSync(join(tmpdir(), 'thinking-menu-'));

@@ -275,11 +275,17 @@ test('Pi chat, MCP, skills, permission, question, restore and revert', { timeout
     await prompt('probe-custom');
     const permission = await events.until(event => event.type === 'permission.asked');
     assert.equal(custom.calls(), 0);
+    const beforeQuery = await get(api(`${path}/message`));
+    const busyQuery = await get(api(`${path}/command`, { method: 'POST', data: { command: 'thinking' } }));
+    assert.match(busyQuery.parts.find(part => part.type === 'text').text, /仅临时显示/);
+    assert.deepEqual(await get(api(`${path}/message`)), beforeQuery);
     await get(api('/config', { method: 'PATCH', data: { model: 'fixture/second', provider: { fixture: { models: { second: { name: 'Second' } } } } } }));
     await get(api('/auth/fixture', { method: 'PUT', data: { type: 'api', key: 'fixture-updated-key' } }));
     await get(api(`/permission/${permission.properties.id}/reply`, { method: 'POST', data: { reply: 'once' } }));
     await events.until(event => event.type === 'session.idle');
     assert.equal(custom.calls(), 1);
+    await get(api(`${path}/message/${busyQuery.info.id}`, { method: 'DELETE' }), 404);
+    await get(api(`${path}/revert`, { method: 'POST', data: { messageID: busyQuery.info.id } }), 404);
     assert.equal(model.requests.at(-1).request.model, 'model');
     assert.equal(model.requests.at(-1).authorization, 'Bearer fixture-model-key');
 
@@ -1047,12 +1053,66 @@ test('local thinking controls keep native context clean and follow history and s
     await get(api('/session'));
     await get(api(`${path}/message`));
     assert.ok(!(await get(api('/command'))).some(c => c.name === 'thinking'));
+    await get(api('/config', { method: 'PATCH', data: { command: { unrelated: { template: 'unrelated command' } } } }));
+    await get(api(`${path}/command`, { method: 'POST', data: { command: 'unrelated' } }));
+    await get(api(`${path}/command`, { method: 'POST', data: { command: 'thinking' } }), 400);
     rmSync(menu, { recursive: true });
     writeFileSync(menu, '---\ndescription: Custom description\n---\ncustom template');
     assert.equal((await get(api('/command'))).find(c => c.name === 'thinking').description, 'Custom description');
   } finally {
     await bridge?.stop(); model.server.closeAllConnections();
     await new Promise(resolve => model.server.close(resolve));
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('thinking undo restores implicit defaults and children clamp inherited preferences', { timeout: 60_000 }, async () => {
+  const fixture = tempFixture();
+  const model = modelFixture();
+  const modelURL = await listen(model.server);
+  const config = { model: 'fixture/reasoner', provider: { fixture: { npm: '@ai-sdk/openai-compatible', options: { baseURL: modelURL },
+    models: { reasoner: { reasoning: true }, plain: { reasoning: false } } } }, agent: { 'shadowbot-explorer': { model: 'fixture/plain' } } };
+  let bridge;
+  try {
+    bridge = await start(fixture, config);
+    const { api } = bridge;
+    const session = await get(api('/session', { method: 'POST', data: {} }));
+    const path = `/session/${session.id}`;
+    const control = (target, args, selected) => get(api(`${target}/command`, { method: 'POST', data: { command: 'thinking', arguments: args, model: selected } }));
+    const send = (target, text, selected, noReply = false) => get(api(`${target}/message`, { method: 'POST', data: { parts: [{ type: 'text', text }], model: selected, noReply } }));
+    const text = result => result.parts.filter(part => part.type === 'text').map(part => part.text).join('');
+    await send(path, 'context only', undefined, true);
+    assert.match(text(await control(path, '')), /fixture\/reasoner.*：medium/);
+    const high = await control(path, 'high');
+    await get(api(`${path}/message/${high.info.id}`, { method: 'DELETE' }));
+    assert.equal((await send(path, 'implicit plain', { providerID: 'fixture', modelID: 'plain' })).info.error, undefined);
+    assert.equal(model.requests.at(-1).request.reasoning_effort, undefined);
+    await send(path, 'more context only', undefined, true);
+    await get(api('/config', { method: 'PATCH', data: { model: 'fixture/missing' } }));
+    assert.ok((await send(path, 'failed model selection')).info.error);
+    await get(api('/config', { method: 'PATCH', data: { model: 'fixture/reasoner' } }));
+    assert.match(text(await control(path, '')), /fixture\/plain.*：off/);
+    await control(path, 'high', 'fixture/reasoner');
+    const child = await get(api('/session', { method: 'POST', data: { parentID: session.id } }));
+    const childPath = `/session/${child.id}`;
+    assert.equal((await send(childPath, 'weaker child model')).info.error, undefined);
+    assert.equal(model.requests.at(-1).request.model, 'plain');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, undefined);
+    const own = await control(childPath, 'off');
+    await get(api(`${childPath}/message/${own.info.id}`, { method: 'DELETE' }));
+    await control(path, 'low', 'fixture/reasoner');
+    await get(api('/config', { method: 'PATCH', data: { agent: { 'shadowbot-explorer': { model: 'fixture/reasoner' } } } }));
+    await send(childPath, 'follow changed parent');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, 'low');
+    await control(childPath, 'high');
+    const requestCount = model.requests.length;
+    assert.ok((await send(childPath, 'explicit mismatch', { providerID: 'fixture', modelID: 'plain' })).info.error);
+    assert.equal(model.requests.length, requestCount);
+    await bridge.stop(); bridge = await start(fixture, config);
+    const restored = await get(bridge.api(`${path}/command`, { method: 'POST', data: { command: 'thinking', model: 'fixture/reasoner' } }));
+    assert.match(text(restored), /：low/);
+  } finally {
+    await bridge?.stop(); model.server.closeAllConnections(); await new Promise(resolve => model.server.close(resolve));
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });

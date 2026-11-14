@@ -272,9 +272,10 @@ class Bridge {
         prompt: role?.prompt, variant: role?.variant, options: role?.options ?? {}, steps: role?.steps ?? role?.maxSteps };
     }));
     const commands = { ...this.config.value.command };
+    let thinkingMenuError: unknown;
     if ((path === '/command' || action === 'command') && thinkingEnabled(this.harness.id, this.config.value)) {
       try { commands.thinking = thinkingMenuCommand(this.installation.resources); }
-      catch (error) { if (action === 'command') throw error; }
+      catch (error) { thinkingMenuError = error; }
     }
     if (this.harness.capabilities.skills && (path === '/command' || action === 'command')) {
       for (const skill of skills(this.agentDir, root, this.skillSources, this.config.value)) {
@@ -382,6 +383,7 @@ class Bridge {
       }
       if (['message', 'prompt_async', 'command'].includes(action) && !subID && method === 'POST') {
         const input = await body(req);
+        if (action === 'command' && input.command === 'thinking' && thinkingMenuError) throw thinkingMenuError;
         const prompt = action === 'command' ? this.expandCommand(input, commands) : input as Prompt;
         const { result } = await this.enqueue(local, async () => {
           await this.refresh(root, local);

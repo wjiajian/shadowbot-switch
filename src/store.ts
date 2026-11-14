@@ -68,6 +68,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS adapter.thinking (
         session_id TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE, level TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS adapter.thinking_baseline (
+        session_id TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE, level TEXT
+      );
       CREATE TABLE IF NOT EXISTS adapter.local_command (
         session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
         user_id TEXT PRIMARY KEY, assistant_id TEXT NOT NULL, native_leaf TEXT, level TEXT
@@ -112,13 +115,21 @@ export class Store {
     return this.db.prepare('SELECT * FROM adapter.session WHERE id=?').get(sessionID) as Meta | undefined;
   }
 
-  thinking(sessionID: string, level?: string) {
-    if (level !== undefined) this.db.prepare('INSERT INTO adapter.thinking VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET level=excluded.level').run(sessionID, level);
+  thinking(sessionID: string) {
     const cutoff = this.meta(sessionID)?.cutoff;
     const latest = this.db.prepare(`SELECT c.level FROM adapter.local_command c JOIN main.message m ON m.id=c.user_id
       WHERE c.session_id=? AND c.level IS NOT NULL AND (? IS NULL OR m.rowid < (SELECT rowid FROM main.message WHERE id=?))
       ORDER BY m.rowid DESC LIMIT 1`).get(sessionID, cutoff ?? null, cutoff ?? null);
     if (latest) return String(latest.level);
+    return this.thinkingBaseline(sessionID);
+  }
+
+  private thinkingBaseline(sessionID: string): string | undefined {
+    const baseline = this.db.prepare('SELECT level FROM adapter.thinking_baseline WHERE session_id=?').get(sessionID);
+    if (baseline) return baseline.level === null ? undefined : String(baseline.level);
+    // Earlier prerelease journals materialized implicit defaults in adapter.thinking.
+    // Those rows are not explicit preferences. Standalone legacy preferences remain valid.
+    if (this.db.prepare('SELECT 1 FROM adapter.local_command WHERE session_id=? AND level IS NOT NULL LIMIT 1').get(sessionID)) return undefined;
     return this.db.prepare('SELECT level FROM adapter.thinking WHERE session_id=?').get(sessionID)?.level as string | undefined;
   }
 
@@ -127,8 +138,9 @@ export class Store {
       .get(sessionID, messageID, messageID) as { user_id: string; native_leaf: string | null } | undefined;
   }
 
-  recordCommand(sessionID: string, userID: string, assistantID: string, leaf: string | null, baseline: string, level?: string) {
-    if (level) this.db.prepare('INSERT INTO adapter.thinking VALUES (?, ?) ON CONFLICT DO NOTHING').run(sessionID, baseline);
+  recordCommand(sessionID: string, userID: string, assistantID: string, leaf: string | null, level?: string) {
+    if (level) this.db.prepare('INSERT INTO adapter.thinking_baseline VALUES (?, ?) ON CONFLICT DO NOTHING')
+      .run(sessionID, this.thinkingBaseline(sessionID) ?? null);
     this.db.prepare('INSERT INTO adapter.local_command VALUES (?, ?, ?, ?, ?)').run(sessionID, userID, assistantID, leaf, level ?? null);
   }
 
