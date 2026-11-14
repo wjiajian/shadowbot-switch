@@ -20,7 +20,7 @@ ShadowBot Switch — 在项目根目录管理影刀 Copilot
   .\switch.ps1 doctor                  完整诊断及修复提示
   .\switch.ps1 reload                  刷新 Skill 菜单和 MCP 配置
   .\switch.ps1 skills                  查看 Skill 来源、启用状态和问题
-  .\switch.ps1 skills add <目录>        添加 Skill（放入即用）
+  .\switch.ps1 skills add <目录>        添加 Skill（下一轮对话生效）
   .\switch.ps1 skills enable|disable|remove <名称>
   .\switch.ps1 mcp                     查看配置，不启动服务
   .\switch.ps1 mcp test [名称]          独立检查连接
