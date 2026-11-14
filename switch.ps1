@@ -99,8 +99,9 @@ try {
         Write-Host 'r 刷新配置  d 诊断  h 帮助  0 退出'
         $choice = Read-Host '选择操作'
         if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $registered.Count) { $arguments = @('use', $registered[[int]$choice - 1].id, '--wait') }
-        else { $arguments = switch ($choice) { 'r' { @('reload') }; 'd' { @('doctor') }; '0' { return }; default { @('help') } } }
-        if (!$arguments.Count) { return }
+        elseif ($choice -eq '0') { return }
+        # switch output is unrolled, so wrap it: a bare 'reload' would make $arguments[0] the letter 'r'.
+        else { $arguments = @(switch ($choice) { 'r' { 'reload' }; 'd' { 'doctor' }; default { 'help' } }) }
     }
     $command = $arguments[0]
     if ($command -in 'help', '--help', '-h') { Show-Help; return }
