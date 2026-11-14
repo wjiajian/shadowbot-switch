@@ -17,6 +17,9 @@ import type { RunInput } from '../../adapter.js';
 import { outsideWorkspace } from '../../config-paths.js';
 import { databaseBusy, failure, id, Store } from '../../store.js';
 import type { Meta } from '../../store.js';
+import { thinkingArgument } from '../../thinking-command.js';
+import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
+import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 import { modelError, UserError, userMessage } from '../../errors.js';
 
 export type Prompt = NonNullable<SessionPromptAsyncData['body']>;
@@ -136,7 +139,7 @@ export class Runs {
 
   private assertIdle(session: Session) {
     const meta = this.store.meta(session.id);
-    if (this.active.has(session.id) || (meta?.running && !this.recover(meta))) throw new RequestError(409, 'The session is busy');
+    if (this.active.has(session.id) || (meta?.running && !this.recover(meta))) throw new RequestError(409, '会话正在生成，请等待完成或停止后重试；思考档位未修改。');
   }
 
   start(session: Session, prompt: Prompt, run: RunInput, interaction?: InteractionTarget) {
@@ -250,6 +253,45 @@ export class Runs {
       user.model = selection;
       this.store.putMessage(user);
       signal.throwIfAborted();
+      const thinking = thinkingArgument(prompt);
+      const savedThinking = this.store.thinking(session.id) as ModelThinkingLevel | undefined;
+      const available = getSupportedThinkingLevels(resolved);
+      if (thinking !== undefined) {
+        const settingsManager = SettingsManager.inMemory();
+        const resourceLoader = new DefaultResourceLoader({ cwd: this.root, agentDir: this.nativeAgentDir, settingsManager,
+          noExtensions: true, noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true,
+          disabledBuiltinExtensions: ['mcp', 'codemode', 'tool_search'] });
+        await resourceLoader.reload();
+        const { session: pi } = await createAgentSession({ cwd: this.root, agentDir: this.nativeAgentDir,
+          settingsManager, resourceLoader, sessionManager: manager, modelRuntime: runtime, model: resolved,
+          thinkingLevel: savedThinking, noTools: 'all' });
+        active.pi = pi;
+        signal.throwIfAborted();
+        let reply: string;
+        if (thinking && !available.includes(thinking as ModelThinkingLevel)) {
+          reply = `不支持思考档位 ${thinking}。模型 ${selection.providerID}/${selection.modelID} 支持：${available.join('、')}。设置未修改。`;
+        } else {
+          if (thinking) {
+            pi.setThinkingLevel(thinking as ModelThinkingLevel);
+            this.store.thinking(session.id, pi.thinkingLevel);
+          }
+          reply = `当前模型 ${selection.providerID}/${selection.modelID} 的实际思考档位：${pi.thinkingLevel}。支持：${available.join('、')}。` +
+            (thinking ? '已按会话保存，从下一次模型请求生效。' : '') +
+            (!thinking && savedThinking && savedThinking !== pi.thinkingLevel ? `保存档位 ${savedThinking} 不受当前模型支持，请重新设置后再发送消息。` : '');
+        }
+        const entry = manager.appendMessage({ role: 'user', content: [{ type: 'text', text }], timestamp: user.time.created });
+        this.store.mapMessage(session.id, messageID, entry);
+        const native: PiAssistant = { role: 'assistant', content: [{ type: 'text', text: reply }], api: resolved.api,
+          provider: resolved.provider, model: resolved.id, timestamp: Date.now(), stopReason: 'stop',
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+        manager.appendMessage(native);
+        projection = new Projection(this.store, session, user, manager, selection, this.root, active);
+        projection.handle({ type: 'message_end', message: native });
+        if (projection.error) throw projection.error;
+        return this.store.message(session.id, projection.last!.id);
+      }
+      if (savedThinking && !available.includes(savedThinking)) throw new UserError(`保存的思考档位 ${savedThinking} 不受当前模型支持。请先用 /thinking 查询并设置支持的档位：${available.join('、')}。`);
       const loadedSkills = skills(this.agentDir, this.root, this.skillSources, config, agent);
       let context = await this.context.instructions(agent === explorer, signal);
       const rewrite = contextSettings();
@@ -379,7 +421,7 @@ export class Runs {
       });
       await resourceLoader.reload();
       const { session: pi } = await createAgentSession({ cwd: this.root, agentDir: this.nativeAgentDir, settingsManager: settings,
-        resourceLoader, sessionManager: manager, modelRuntime: runtime, model: resolved, tools: toolNames.filter(enabled) });
+        resourceLoader, sessionManager: manager, modelRuntime: runtime, model: resolved, thinkingLevel: savedThinking, tools: toolNames.filter(enabled) });
       active.pi = pi;
       unsubscribe = pi.subscribe(event => projection!.handle(event));
       await pi.bindExtensions({ mode: 'rpc' });

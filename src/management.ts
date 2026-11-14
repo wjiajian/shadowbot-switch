@@ -107,7 +107,7 @@ function menuSync(home: string, install: Installation) {
   try { harness = registry.selected(mode(home)); }
   catch { return { added: 0, updated: 0, removed: 0 }; }
   return syncSkillCommands(install.resources, harnessCapabilities(install, harness).skills
-    ? skillRows(home, install).filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined);
+    ? skillRows(home, install).filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, harness.id === 'pi');
 }
 
 export function applicationList(home: string, install: Installation) {

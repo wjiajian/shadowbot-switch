@@ -200,6 +200,9 @@ Invoke-InstallationLock $agentExe {
     Write-AtomicJson (Join-Path $state 'activation.pending.json') $journal
     Complete-Activation $state $agentExe $pinnedHash ${function:Assert-HostStopped}
     if ($Update) {
+        # The host caches command files when Copilot connects. Publish menus while
+        # it is still stopped, rather than waiting for the first chat request.
+        Invoke-RuntimeControl $state $release @('reload') | Out-Host
         Write-Output "已更新 $Harness $($release.harnesses[$Harness].version)，当前继续使用 $(Get-SelectedHarness $state)。"
         return
     }

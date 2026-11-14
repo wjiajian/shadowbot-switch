@@ -50,7 +50,7 @@ async function main([command, arg]: string[]) {
     if (sha256(install.agentPath) !== install.launcherHash.toLowerCase()) throw new Error('Active launcher checksum mismatch');
     await switchBackend(home, install, harness.id, schema);
     syncSkillCommands(install.resources, harnessCapabilities(install, harness).skills ? skillInventory(agentDir, undefined, skillSources(home, install, harness.id), new HostConfig().value)
-      .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined);
+      .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, harness.id === 'pi');
     return;
   }
   throw new Error('Expected doctor, skills list, mcp list, or reload. Use install.ps1 to switch harnesses.');

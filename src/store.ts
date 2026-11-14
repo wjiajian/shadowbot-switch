@@ -65,6 +65,9 @@ export class Store {
         session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
         message_id TEXT NOT NULL, native_entry TEXT NOT NULL, PRIMARY KEY (session_id, message_id)
       );
+      CREATE TABLE IF NOT EXISTS adapter.thinking (
+        session_id TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE, level TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS adapter.removed_message (
         session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
         message_id TEXT NOT NULL, PRIMARY KEY (session_id, message_id)
@@ -103,6 +106,11 @@ export class Store {
 
   meta(sessionID: string) {
     return this.db.prepare('SELECT * FROM adapter.session WHERE id=?').get(sessionID) as Meta | undefined;
+  }
+
+  thinking(sessionID: string, level?: string) {
+    if (level !== undefined) this.db.prepare('INSERT INTO adapter.thinking VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET level=excluded.level').run(sessionID, level);
+    return this.db.prepare('SELECT level FROM adapter.thinking WHERE session_id=?').get(sessionID)?.level as string | undefined;
   }
 
   owned(sessionID: string, root: string) {

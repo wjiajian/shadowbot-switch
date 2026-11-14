@@ -896,3 +896,62 @@ test('ShadowBot rollback accepts assistant targets and repeated removal of a tur
     rmSync(fixture.root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
 });
+
+test('thinking commands persist per session and control actual requests', { timeout: 60_000 }, async () => {
+  const fixture = tempFixture();
+  const held = Promise.withResolvers();
+  const entered = Promise.withResolvers();
+  const model = modelFixture({ beforeReply: async content => {
+    if (content.includes('hold-thinking')) { entered.resolve(); await held.promise; }
+  } });
+  const modelURL = await listen(model.server);
+  const config = { model: 'fixture/model', provider: { fixture: { npm: '@ai-sdk/openai-compatible',
+    options: { baseURL: modelURL }, models: { model: { reasoning: true }, plain: { reasoning: false } } } } };
+  let bridge;
+  try {
+    bridge = await start(fixture, config);
+    const session = await get(bridge.api('/session', { method: 'POST', data: {} }));
+    const path = `/session/${session.id}`;
+    const command = (name, args = '', extra = {}) => get(bridge.api(`${path}/command`, {
+      method: 'POST', data: { command: name, arguments: args, ...extra } }));
+    const prompt = text => get(bridge.api(`${path}/message`, { method: 'POST', data: { parts: [{ type: 'text', text }] } }));
+    const reply = result => result.parts.filter(part => part.type === 'text').map(part => part.text).join('');
+    assert.ok((await get(bridge.api('/command'))).some(command => command.name === 'thinking'));
+    assert.match(reply(await command('thinking')), /实际思考档位：medium/);
+    assert.match(reply(await command('thinking', 'high')), /实际思考档位：high/);
+    assert.equal(model.requests.length, 0);
+    await prompt('first request');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, 'high');
+    await bridge.stop();
+    bridge = await start(fixture, config);
+    assert.match(reply(await command('thinking')), /实际思考档位：high/);
+    await prompt('restored request');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, 'high');
+    assert.match(reply(await command('thinking', 'bananas')), /不支持/);
+    assert.match(reply(await command('thinking', 'high', { model: 'fixture/plain' })), /不支持/);
+    assert.match(reply(await command('thinking')), /实际思考档位：high/);
+    assert.match(reply(await prompt('/thinking medium')), /实际思考档位：medium/);
+    await prompt('medium request');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, 'medium');
+    const other = await get(bridge.api('/session', { method: 'POST', data: {} }));
+    const otherResult = await get(bridge.api(`/session/${other.id}/command`, { method: 'POST', data: { command: 'thinking' } }));
+    assert.match(reply(otherResult), /实际思考档位：medium/);
+    await command('thinking', 'high');
+    const pending = prompt('hold-thinking');
+    await entered.promise;
+    await get(bridge.api(`${path}/command`, { method: 'POST', data: { command: 'thinking', arguments: 'medium' } }), 409);
+    held.resolve();
+    await pending;
+    assert.match(reply(await command('thinking')), /实际思考档位：high/);
+    const menu = readFileSync(join(fixture.root, 'Copilot', 'commands', 'thinking.md'), 'utf8');
+    assert.match(menu, /\$ARGUMENTS/);
+    syncSkillCommands(fixture.root);
+    assert.throws(() => readFileSync(join(fixture.root, 'Copilot', 'commands', 'thinking.md')));
+  } finally {
+    held.resolve();
+    await bridge?.stop();
+    model.server.closeAllConnections();
+    await new Promise(resolve => model.server.close(resolve));
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
