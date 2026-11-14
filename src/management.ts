@@ -68,15 +68,40 @@ function writeJson(path: string, value: unknown) { atomicWrite(path, JSON.string
 const labels: Record<string, string> = { name: '名称', status: '状态', state: '状态', source: '来源', path: '路径', reason: '说明', description: '描述',
   backend: '当前后端', recoveryPending: '需要恢复', applications: '应用', app: '应用目录', active: '运行中的任务', configuration: '配置状态',
   errors: '配置问题', error: '错误', next: '下一步', message: '结果', menu: '菜单同步', menuHint: '菜单提示', added: '新增', updated: '更新', removed: '删除',
-  unchanged: '未变化', conflicts: '同名冲突', check: '检查项', detail: '说明', files: '文件数', valid: '配置有效', warnings: '路径问题', transport: '传输',
-  enabled: '已启用', disabled: '已禁用', shadowed: '同名来源覆盖', invalid: '格式错误', warning: '可加载但有提示', installation: '安装级', official: '影刀内置', legacy: '旧目录',
-  connected: '已连接', failed: '失败' };
+  unchanged: '未变化', conflicts: '同名冲突', check: '检查项', detail: '说明', files: '文件数', valid: '配置有效', warnings: '路径问题', transport: '传输' };
+// Only status-like columns are translated, so a Skill or MCP named "failed" keeps its name.
+const valueLabels: Record<string, string> = { enabled: '已启用', disabled: '已禁用', shadowed: '被同名覆盖', invalid: '格式错误', warning: '可加载但有提示',
+  installation: '安装级', app: '应用级', official: '影刀内置', legacy: '旧目录', connected: '已连接', failed: '失败' };
+const valueKeys = new Set(['status', 'state', 'source']);
+function cell(key: string, value: unknown) {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  const text = String(value).replace(/\s*\n\s*/g, ' ');
+  return valueKeys.has(key) ? valueLabels[text] ?? text : text;
+}
+// CJK characters take two terminal columns.
+function displayWidth(text: string) {
+  let width = 0;
+  for (const char of text) width += /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(char) || char.codePointAt(0)! > 0xffff ? 2 : 1;
+  return width;
+}
+// A plain aligned table: no index column or quotes, empty columns hidden. Wide columns
+// such as paths move to the end so that a wrapped line does not break the alignment.
+function table(rows: Record<string, unknown>[], prefix = '') {
+  const used = [...new Set(rows.flatMap(row => Object.keys(row)))].filter(key => rows.some(row => cell(key, row[key])));
+  const columns = used.map(key => ({ key, texts: [labels[key] ?? key, ...rows.map(row => cell(key, row[key]))] }))
+    .map(column => ({ ...column, width: Math.max(...column.texts.map(displayWidth)) }));
+  const rank = (column: typeof columns[number]) => column.width <= 40 ? 0 : ['path', 'source', 'app'].includes(column.key) ? 2 : 1;
+  const ordered = [0, 1, 2].flatMap(level => columns.filter(column => rank(column) === level));
+  for (let i = 0; i <= rows.length; i++) {
+    console.log(prefix + ordered.map((column, index) => index === ordered.length - 1 ? column.texts[i] : column.texts[i] + ' '.repeat(column.width - displayWidth(column.texts[i]))).join('  '));
+  }
+}
 function human(value: unknown, prefix = ''): void {
   if (Array.isArray(value)) {
     if (!value.length) { console.log(`${prefix}无`); return; }
-    if (value.every(item => object(item) && Object.values(item).every(v => v === null || typeof v !== 'object'))) {
-      console.table(value.map(item => Object.fromEntries(Object.entries(item).map(([key, val]) => [labels[key] ?? key, typeof val === 'string' ? labels[val] ?? val : val]))));
-    } else for (const item of value) human(item, prefix + '  ');
+    if (value.every(item => object(item) && Object.values(item).every(v => v === null || typeof v !== 'object'))) table(value as Record<string, unknown>[], prefix);
+    else for (const item of value) human(item, prefix + '  ');
   } else if (object(value)) {
     for (const [key, val] of Object.entries(value)) {
       if (val === undefined) continue;
@@ -109,6 +134,12 @@ function menuSync(home: string, install: Installation) {
   catch { return { added: 0, updated: 0, removed: 0 }; }
   return syncSkillCommands(install.resources, harnessCapabilities(install, harness).skills
     ? skillRows(home, install).filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, thinkingEnabled(harness.id, new HostConfig().value));
+}
+// One readable line instead of the full counter table; conflicts are already warned on stderr.
+function menuSummary(menu: { added: number; updated: number; removed: number }) {
+  const changes = ([['新增', menu.added], ['更新', menu.updated], ['删除', menu.removed]] as const)
+    .filter(([, count]) => count).map(([label, count]) => `${label} ${count} 项`);
+  return changes.length ? `菜单：${changes.join('、')}，重新连接 Copilot 后显示。` : undefined;
 }
 
 export function applicationList(home: string, install: Installation) {
@@ -192,10 +223,12 @@ export async function manage(home: string, install: Installation, input: string[
   const registry = new HarnessRegistry();
   const selected = () => registry.selected(mode(home));
   const scope = app ? `应用：${app}` : '此安装下的所有应用';
-  const emit = (value: unknown, title = scope) => {
-    if (opts.flags.has('json')) console.log(JSON.stringify({ scope, data: value }, null, 2));
+  const json = opts.flags.has('json');
+  // `title: null` prints the value alone, for results that do not depend on the scope.
+  const emit = (value: unknown, title: string | null = `范围：${app ?? '此安装下的所有应用'}`) => {
+    if (json) console.log(JSON.stringify({ scope, data: value }, null, 2));
     else {
-      console.log(title);
+      if (title !== null) console.log(title);
       human(value);
     }
   };
@@ -203,36 +236,66 @@ export async function manage(home: string, install: Installation, input: string[
   const mcpFile = join(directory, 'mcp.json');
   const changed = (message: string) => {
     const menu = menuSync(home, install);
-    emit({ message, menu, next: menu.added + menu.updated + menu.removed ? '下一轮读取最新配置；重新连接 Copilot 刷新 / 菜单。' : '应用空闲后的下一轮自动生效。' });
+    const next = menu.added + menu.updated + menu.removed ? '下一轮读取最新配置；重新连接 Copilot 刷新 / 菜单。' : '应用空闲后的下一轮自动生效。';
+    if (json) { emit({ message, menu, next }); return; }
+    console.log(message);
+    console.log(`范围：${app ?? '此安装下的所有应用'}`);
+    const summary = menuSummary(menu);
+    if (summary) console.log(summary);
+    console.log('下一轮对话生效。');
   };
   if (command === 'help') { console.log(help); return; }
   if (command === 'status') {
     const harness = selected();
     const capabilities = harnessCapabilities(install, harness);
     const states = runtimeStates(home);
-    emit({ harness: harness.id, backend: `${harness.name} ${installedVersion(install, harness.id) ?? harness.version ?? ''}`, capabilities,
-      recoveryPending: ['activation.pending.json', 'switch.pending.json'].some(file => existsSync(join(home, file))),
-      applications: states.map(s => ({ app: s.root, active: s.active, configuration: s.configurationError || Object.keys(s.errors).length ? '失败（原可用连接已保留）' : s.pending ? '待应用' : '已应用', errors: s.errors })),
-      next: '运行 doctor 查看完整诊断；use <harness> 切换后端。' }, 'ShadowBot Switch 状态');
+    const backend = `${harness.name} ${installedVersion(install, harness.id) ?? harness.version ?? ''}`.trim();
+    const recoveryPending = ['activation.pending.json', 'switch.pending.json'].some(file => existsSync(join(home, file)));
+    const configuration = (s: typeof states[number]) => s.configurationError || Object.keys(s.errors).length ? '失败（原可用连接已保留）' : s.pending ? '待应用' : '已应用';
+    if (json) {
+      emit({ harness: harness.id, backend, capabilities, recoveryPending,
+        applications: states.map(s => ({ app: s.root, active: s.active, configuration: configuration(s), errors: s.errors })),
+        next: '运行 doctor 查看完整诊断；use <harness> 切换后端。' });
+      return;
+    }
+    const features = [capabilities.skills && 'Skill', capabilities.mcp && 'MCP'].filter(Boolean);
+    console.log(`当前后端：${backend}${features.length ? `（支持 ${features.join('、')}）` : ''}`);
+    if (recoveryPending) console.log('上次操作没有完成：关闭影刀后运行 .\\switch.ps1 repair。');
+    if (!states.length) console.log('运行中的应用：无');
+    else {
+      console.log('运行中的应用：');
+      for (const s of states) {
+        console.log(`  ${s.root}  配置${configuration(s)}${s.active ? '，正在处理请求' : ''}`);
+        if (s.configurationError) console.log(`    ${s.configurationError}`);
+        for (const [name, error] of Object.entries(s.errors)) console.log(`    ${name}：${error}`);
+      }
+    }
+    console.log('完整诊断：.\\switch.ps1 doctor');
     return;
   }
-  if (command === 'harnesses') { const harness = selected(); emit(registry.list().map(spec => ({ ...spec, installed: spec.kind === 'bundled' || Boolean(install.harnesses?.[spec.id]), selected: spec.id === harness.id }))); return; }
+  if (command === 'harnesses') {
+    const harness = selected();
+    const rows = registry.list().map(spec => ({ ...spec, installed: spec.kind === 'bundled' || Boolean(install.harnesses?.[spec.id]), selected: spec.id === harness.id }));
+    if (json) { emit(rows); return; }
+    table(rows.map(spec => ({ 标识: spec.id, name: spec.name, Skill: spec.capabilities.skills, MCP: spec.capabilities.mcp, 已安装: spec.installed, 正在使用: spec.selected ? '是' : '' })));
+    return;
+  }
   if (command === 'apps') {
-    if (action === 'clear') { writeJson(join(home, 'preferences.json'), {}); emit('已恢复安装级默认范围。'); return; }
+    if (action === 'clear') { writeJson(join(home, 'preferences.json'), {}); emit('已恢复默认范围：此安装下的所有应用。', null); return; }
     const apps = applicationList(home, install);
-    if (action === 'list') { emit(apps); return; }
+    if (action === 'list') { emit(apps, '影刀应用：'); return; }
     if (action !== 'select') throw new UserError('apps 支持 list、select、clear。');
     let chosen = target;
     if (!chosen) {
       if (!process.stdin.isTTY) throw new UserError('请使用 apps select <应用路径>，或在交互终端中选择。');
-      console.table(apps.map((item, i) => ({ number: i + 1, ...item })));
+      table(apps.map((item, i) => ({ 编号: i + 1, ...item })));
       const reader = createInterface({ input: process.stdin, output: process.stdout });
       try { chosen = await reader.question('输入编号或应用完整路径：'); } finally { reader.close(); }
     }
     const path = /^\d+$/.test(chosen) ? apps[Number(chosen) - 1]?.path : resolve(chosen);
     if (!path || !existsSync(path) || !lstatSync(path).isDirectory()) throw new UserError('请选择存在的应用目录。');
     writeJson(join(home, 'preferences.json'), { app: realpathSync.native(path) });
-    emit(`已记住应用：${path}。使用 --global 可临时查看安装级配置。`);
+    emit(`已记住应用：${path}。加 --global 可临时查看此安装下的所有应用。`, null);
     return;
   }
   if (command === 'reload') {
@@ -240,14 +303,19 @@ export async function manage(home: string, install: Installation, input: string[
     const request = randomUUID();
     atomicWrite(join(home, 'reload.request'), request + '\n');
     const states = runtimeStates(home);
-    emit({ menu, applications: states.map(s => ({ app: s.root, state: s.active ? '运行中，下一次空闲请求应用' : '等待下一次请求应用' })),
-      next: states.length ? '运行 status 或 mcp status 查看实际生效结果。' : '当前没有已登记的运行实例；下次打开 Copilot 时读取配置。',
-      menuHint: menu.added + menu.updated + menu.removed ? '菜单已同步，重新连接 Copilot 后显示。' : '菜单没有变化，无需为菜单重连。' });
+    if (json) {
+      emit({ menu, applications: states.map(s => ({ app: s.root, state: s.active ? '运行中，下一次空闲请求应用' : '等待下一次请求应用' })),
+        next: states.length ? '运行 status 或 mcp status 查看实际生效结果。' : '当前没有已登记的运行实例；下次打开 Copilot 时读取配置。',
+        menuHint: menu.added + menu.updated + menu.removed ? '菜单已同步，重新连接 Copilot 后显示。' : '菜单没有变化，无需为菜单重连。' });
+      return;
+    }
+    console.log(menuSummary(menu) ?? '菜单：没有变化。');
+    console.log(states.length ? `配置：${states.length} 个运行中的应用会在下一次请求时刷新，运行 status 查看结果。` : '配置：下次打开 Copilot 时读取。');
     return;
   }
   if (command === 'skills') {
     if (action === 'list') {
-      emit(skillRows(home, install, app).map(({ name, description, path, source, status, reason }) => ({ name, status, source, path, reason: reason ?? '', description })));
+      emit(skillRows(home, install, app).map(({ name, description, path, source, status, reason }) => ({ name, status, source, reason: reason ?? '', description, path })));
       return;
     }
     const name = required(target, action === 'add' ? 'Skill 目录' : 'Skill 名称');
@@ -376,7 +444,7 @@ export async function manage(home: string, install: Installation, input: string[
       const child = spawn('notepad.exe', [path], { detached: true, stdio: 'ignore', windowsHide: false });
       child.on('error', () => console.error(`无法打开编辑器，请手动打开 ${path}`));
       child.unref();
-      emit({ path });
+      if (json) emit({ path }); else console.log(`已打开配置文件：${path}`);
       return;
     }
     if (action === 'check') {
@@ -386,7 +454,16 @@ export async function manage(home: string, install: Installation, input: string[
       const warnings = [...entries].flatMap(([name, raw]) => pathWarnings(raw, name));
       warnings.push(...loadAgentRules(join(home, 'agent'), app).warnings);
       const errors = skillRows(home, install, app).filter(row => row.status === 'invalid').map(({ path, reason }) => ({ path, reason }));
-      emit({ valid: !errors.length && !warnings.length, warnings, skills: errors });
+      if (json) emit({ valid: !errors.length && !warnings.length, warnings, skills: errors });
+      else {
+        console.log(`范围：${app ?? '此安装下的所有应用'}`);
+        if (!warnings.length && !errors.length) console.log('配置检查通过。');
+        else {
+          console.log(`发现 ${warnings.length + errors.length} 个问题：`);
+          for (const warning of warnings) console.log(`  ${warning}`);
+          for (const { path, reason } of errors) console.log(`  ${path}：${reason}`);
+        }
+      }
       if (warnings.length || errors.length) process.exitCode = 1;
       return;
     }
@@ -407,7 +484,12 @@ export async function manage(home: string, install: Installation, input: string[
         ...(!app ? safeTree(join(home, 'skills')).map(e => ({ ...e, path: `skills/${e.path}` })) : []),
       ];
       writeJson(path, { format: 'shadowbot-switch-config', version: 1, entries });
-      emit({ path, files: entries.length, warnings: exported.warnings.map(warning => `${warning}；未导出该规则文件，其余配置已导出。`) });
+      const exportWarnings = exported.warnings.map(warning => `${warning}；未导出该规则文件，其余配置已导出。`);
+      if (json) emit({ path, files: entries.length, warnings: exportWarnings });
+      else {
+        console.log(`已导出 ${entries.length} 个文件到 ${path}（范围：${app ?? '此安装下的所有应用'}）`);
+        for (const warning of exportWarnings) console.log(`注意：${warning}`);
+      }
       if (exported.warnings.length) process.exitCode = 1;
       return;
     }
@@ -483,7 +565,17 @@ export async function manage(home: string, install: Installation, input: string[
       if (warnings.length) throw new UserError(warnings.join('\n'));
     }, '检查 AGENTS.md 的大小、UTF-8 编码和读取权限。');
     await check('恢复状态', () => { if (['activation.pending.json', 'switch.pending.json'].some(file => existsSync(join(home, file)))) throw new UserError('上次操作尚未完成。关闭影刀后运行 repair。'); }, '运行 repair。');
-    emit(checks, `安装诊断 · ${scope}`);
+    if (json) emit(checks);
+    else {
+      console.log(`安装诊断（范围：${app ?? '此安装下的所有应用'}）`);
+      for (const { check, status, detail } of checks) {
+        const [first, ...rest] = detail.split('\n');
+        console.log(`  ${status}  ${check}${first ? `：${first}` : ''}`);
+        for (const line of rest) console.log(`        ${line}`);
+      }
+      const failures = checks.filter(c => c.status === '失败').length;
+      console.log(failures ? `${failures} 项未通过，按上面的提示处理后再运行 doctor。` : '全部通过。');
+    }
     if (checks.some(c => c.status === '失败')) process.exitCode = 1;
     return;
   }

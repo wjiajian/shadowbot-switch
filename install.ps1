@@ -35,12 +35,15 @@ $spec = Get-Harness $project $Harness
 $bundled = Get-BundledHarness $project
 $Harness = $spec.id
 if ($Update -and $spec.kind -eq 'bundled') {
-    Write-Output "$($spec.name) 随影刀更新；当前选择和其他 harness 保持不变。"
+    Write-Output "$($spec.name) 随影刀一起更新，无需单独更新。"
     return
 }
+
+function Write-Step([string]$Text) { Write-Host "  $Text…" }
+function Get-HarnessName([string]$Id) { try { (Get-Harness $project $Id).name } catch { $Id } }
 if (!$ShadowBotDirectory) { $ShadowBotDirectory = Find-ShadowBotDirectory $manifest }
 if (!$ShadowBotDirectory -and ![Console]::IsInputRedirected) { $ShadowBotDirectory = Read-Host '影刀安装目录（包含 ShadowBot.exe）' }
-if (!$ShadowBotDirectory) { throw 'A ShadowBot installation directory is required.' }
+if (!$ShadowBotDirectory) { throw '没有找到影刀安装目录。请用 --shadowbot-dir 指定包含 ShadowBot.exe 的目录。' }
 
 $shadowBot = (Resolve-Path -LiteralPath $ShadowBotDirectory).Path
 $hostExe = Join-Path $shadowBot 'ShadowBot.exe'
@@ -62,7 +65,7 @@ function Read-Installation($StateDirectory) {
     $existing = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
     if ($existing.agentPath -ne $agentExe -or $existing.originalHash -ne $pinnedHash -or
         $existing.database -ne $database -or $existing.users -ne $users) {
-        throw 'The existing manifest belongs to another ShadowBot installation.'
+        throw '本项目的安装记录属于另一个影刀安装目录，不能用于当前影刀。'
     }
     $existing
 }
@@ -75,7 +78,7 @@ function Invoke-RuntimeControl($StateDirectory, $Install, [string[]]$Arguments) 
         $env:SHADOWBOT_PI_HOME = $StateDirectory
         $env:SHADOWBOT_SWITCH_HOME = $StateDirectory
         & (Join-Path $runtime 'node.exe') (Join-Path $runtime 'service/control.js') @Arguments
-        if ($LASTEXITCODE -ne 0) { throw "Harness operation failed: $($Arguments -join ' ')" }
+        if ($LASTEXITCODE -ne 0) { throw "运行时操作失败（$($Arguments -join ' ')），原因见上方输出。" }
     } finally {
         $env:SHADOWBOT_PI_HOME = $previousHome
         $env:SHADOWBOT_SWITCH_HOME = $previousSwitch
@@ -108,8 +111,9 @@ function Copy-LegacyState {
     Write-AtomicJson $mode @{ mode = $legacyMode }
 }
 
-if ((Get-Item -LiteralPath $hostExe).VersionInfo.ProductVersion -ne $supportedVersion) {
-    throw "Unsupported ShadowBot version. Expected $supportedVersion."
+$hostVersion = (Get-Item -LiteralPath $hostExe).VersionInfo.ProductVersion
+if ($hostVersion -ne $supportedVersion) {
+    throw "影刀版本是 $hostVersion，目前只支持 $supportedVersion。"
 }
 
 Invoke-InstallationLock $agentExe {
@@ -122,10 +126,12 @@ Invoke-InstallationLock $agentExe {
     if ($spec.kind -eq 'managed') {
         if ($projectInstall -and $projectInstall.harnesses -and $projectInstall.harnesses[$Harness] -and !$projectInstall.harnesses[$Harness].legacy -and !$Update) {
             $release = $projectInstall
-            Write-Host "复用已安装的 $Harness $($release.harnesses[$Harness].version)。"
+            Write-Host "使用已安装的 $($spec.name) $($release.harnesses[$Harness].version)。"
         } else {
-            Write-Host "正在准备 $Harness 运行时，下载和编译期间可以继续使用影刀…"
+            Write-Host "正在$(if ($Update) { '更新' } else { '安装' }) $($spec.name)，期间可以继续使用影刀…"
+            Write-Step '准备构建工具'
             $toolchain = Initialize-Toolchain $project
+            Write-Step '构建运行时'
             $release = New-RuntimeRelease $project $state $toolchain $spec $projectInstall @{ agentPath = $agentExe; originalHash = $pinnedHash; database = $database; users = $users; resources = $resources; hostSkills = $hostSkills }
         }
     }
@@ -171,11 +177,11 @@ Invoke-InstallationLock $agentExe {
             $owner = (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json).home
             if ($owner -in $state, $legacy) { Remove-Item -LiteralPath $locator -Force }
         }
-        Write-Output "Active harness: $Harness ($($spec.version))"
+        Write-Output "已切换到 $($spec.name)。"
         return
     }
 
-    if (!(Test-Path -LiteralPath $database)) { throw 'Open ShadowBot Copilot once to initialize its session database, then exit ShadowBot.' }
+    if (!(Test-Path -LiteralPath $database)) { throw '请先打开一次影刀 Copilot（用来创建会话数据库），然后退出影刀再运行。' }
     if ($activeHome -and (Test-Path -LiteralPath (Join-Path $activeHome 'switch.pending.json'))) {
         $current = (Get-Content -LiteralPath (Join-Path $activeHome 'backend.json') -Raw | ConvertFrom-Json).mode
         $recovery = if ($current -eq 'observe') { $bundled.id } else { $current }
@@ -193,8 +199,11 @@ Invoke-InstallationLock $agentExe {
     $runtime = Get-InstallationRuntime $state $release
     if ((& (Join-Path $runtime 'launcher.exe') --version | Out-String).Trim() -ne '1.18.12') { throw 'Launcher protocol mismatch.' }
     Write-AtomicJson (Join-Path $state 'prepared.json') $release
-    Invoke-RuntimeControl $state $release @('verify-install', $Harness) | Out-Host
+    Write-Step '检查安装'
+    # The JSON report is for scripts; failures are explained on stderr.
+    Invoke-RuntimeControl $state $release @('verify-install', $Harness) | Out-Null
     Assert-HostStopped
+    Write-Step $(if ($Update) { '启用新版本' } else { '切换后端' })
     $journal = @{ previousHash = $activeHash; release = $release }
     if ($Update -and (Get-SelectedHarness $state $project) -eq $bundled.id) { $journal.bundledMode = $bundled.id }
     Write-AtomicJson (Join-Path $state 'activation.pending.json') $journal
@@ -202,15 +211,15 @@ Invoke-InstallationLock $agentExe {
     if ($Update) {
         # The host caches command files when Copilot connects. Publish menus while
         # it is still stopped, rather than waiting for the first chat request.
-        try { Invoke-RuntimeControl $state $release @('reload') | Out-Host }
+        # The menu then appears on the next start, so the summary is not shown.
+        try { Invoke-RuntimeControl $state $release @('reload') | Out-Null }
         catch {
             $global:LASTEXITCODE = 0
-            Write-Warning '运行时已更新，但菜单同步失败。检查命令目录权限和配置后运行 .\switch.ps1 reload。'
+            Write-Warning '已更新，但 Skill 菜单同步失败。检查命令目录权限后运行 .\switch.ps1 reload。'
         }
-        Write-Output "已更新 $Harness $($release.harnesses[$Harness].version)，当前继续使用 $(Get-SelectedHarness $state)。"
+        Write-Output "已更新 $($spec.name) 到 $($release.harnesses[$Harness].version)，当前仍在使用 $(Get-HarnessName (Get-SelectedHarness $state $project))。"
         return
     }
     Invoke-RuntimeControl $state $release @('backend', $Harness) | Out-Host
-    Write-Output "Active harness: $Harness ($($release.harnesses[$Harness].version))"
-    Write-Output "Project state: $state"
+    Write-Output "已切换到 $($spec.name) $($release.harnesses[$Harness].version)。"
 }

@@ -35,5 +35,5 @@ function Repair-ProjectLocation($Project, [string]$ShadowBotDirectory, [switch]$
     $backend = (Get-Content -LiteralPath (Join-Path $state 'backend.json') -Raw | ConvertFrom-Json -AsHashtable).mode
     $harness = if ($backend -eq 'observe') { (Get-BundledHarness $Project).id } else { $backend }
     & (Join-Path $Project 'install.ps1') -Harness $harness -Wait:$Wait -WaitTimeoutSeconds $WaitTimeoutSeconds
-    Write-Host '项目定位和安装恢复检查已完成。运行 config check 检查自定义配置中的绝对路径。'
+    Write-Host '修复完成。如果配置里写了绝对路径，运行 .\switch.ps1 config check 检查是否还有效。'
 }

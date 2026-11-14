@@ -72,7 +72,7 @@ export function syncSkillCommands(resources: string, directory?: string | Pick<S
       else if (current !== next) { atomicWrite(path, next); report.updated++; }
       else report.unchanged++;
     } else if (next) {
-      console.warn(`ShadowBot Switch left existing command ${entry.name} in place`);
+      console.warn(`菜单命令 ${entry.name} 已有同名文件，保留原文件，未覆盖。`);
       report.conflicts.push(entry.name);
     }
     desired.delete(entry.name);
@@ -83,7 +83,7 @@ export function syncSkillCommands(resources: string, directory?: string | Pick<S
     try { writeFileSync(join(commands, name), content, { flag: 'wx' }); report.added++; }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      console.warn(`ShadowBot Switch left existing command ${name} in place`);
+      console.warn(`菜单命令 ${name} 已有同名文件，保留原文件，未覆盖。`);
       report.conflicts.push(name);
     }
   }

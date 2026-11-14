@@ -31,7 +31,7 @@ function New-RuntimeRelease($Project, $State, $Toolchain, $Spec, $Installed, $Ho
             Copy-Item -LiteralPath $Toolchain.node -Destination (Join-Path $stage 'node.exe')
             Copy-Item -LiteralPath (Join-Path $project 'contract/schema.sql') -Destination $stage
             Copy-Item -LiteralPath (Join-Path $project 'package.json'), (Join-Path $project 'package-lock.json') -Destination $stage
-            Invoke-ProjectNpm $Toolchain $stage @('ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund') | Out-Host
+            Invoke-ProjectNpm $Toolchain $stage @('ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund')
             Get-ChildItem -LiteralPath (Join-Path $project 'dist/service') | Copy-Item -Destination $service -Recurse
             foreach ($registration in (Get-HarnessRegistry $project)) {
                 $registryTarget = Join-Path $stage "harnesses/$($registration.id)"
@@ -42,7 +42,7 @@ function New-RuntimeRelease($Project, $State, $Toolchain, $Spec, $Installed, $Ho
                 $adapterDirectory = Join-Path $service (Split-Path $Spec.adapter)
                 New-Item -ItemType Directory -Force -Path $adapterDirectory | Out-Null
                 Copy-Item -LiteralPath $adapterPackage, (Join-Path (Split-Path $adapterPackage) 'package-lock.json') -Destination $adapterDirectory
-                Invoke-ProjectNpm $Toolchain $adapterDirectory @('ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund') | Out-Host
+                Invoke-ProjectNpm $Toolchain $adapterDirectory @('ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund')
             }
             Get-ChildItem -LiteralPath $skillSources -Directory | Copy-Item -Destination (Join-Path $stage 'skills') -Recurse
             $resolvedStage = (Resolve-Path -LiteralPath $stage).Path

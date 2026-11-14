@@ -4,7 +4,7 @@ function Get-ToolchainFile($Uri, $Path, $Hash, $Algorithm = 'SHA256') {
     try {
         curl.exe -fLsS --retry 2 --output $temporary $Uri
         if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $temporary -Algorithm $Algorithm).Hash -ne $Hash) {
-            throw "Download checksum mismatch for $Path"
+            throw "下载的文件校验失败：$Path。检查网络后重试。"
         }
         Move-Item -LiteralPath $temporary -Destination $Path -Force
     } finally {
@@ -29,7 +29,7 @@ function Initialize-Toolchain($Project) {
         Get-ToolchainFile 'https://registry.npmjs.org/npm/-/npm-11.17.0.tgz' $archive $npmHash 'SHA512'
         New-Item -ItemType Directory -Force -Path $directory | Out-Null
         tar.exe -xf $archive -C $directory --strip-components 1
-        if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $npm)) { throw 'npm extraction failed.' }
+        if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $npm)) { throw 'npm 解压失败，请重试。' }
     }
 
     $go = Join-Path $tools 'go/bin/go.exe'
@@ -37,17 +37,22 @@ function Initialize-Toolchain($Project) {
         $archive = Join-Path $tools 'go1.25.0.windows-amd64.zip'
         Get-ToolchainFile 'https://go.dev/dl/go1.25.0.windows-amd64.zip' $archive '89efb4f9b30812eee083cc1770fdd2913c14d301064f6454851428f9707d190b'
         tar.exe -xf $archive -C $tools
-        if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $go)) { throw 'Go extraction failed.' }
+        if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $go)) { throw 'Go 解压失败，请重试。' }
     }
     @{ tools = $tools; node = $node; nodeHash = $nodeHash; npm = $npm; go = $go }
 }
 
 function Invoke-ProjectNpm($Toolchain, $Prefix, [string[]]$Arguments) {
     $tools = $Toolchain.tools
-    & $Toolchain.node $Toolchain.npm --prefix $Prefix --cache (Join-Path $tools 'npm-cache') `
+    # Keep successful installs quiet: warnings are hidden and the stdout summary
+    # ("added N packages") is shown only when npm fails. Errors still reach stderr.
+    $output = & $Toolchain.node $Toolchain.npm --prefix $Prefix --cache (Join-Path $tools 'npm-cache') `
         --userconfig (Join-Path $tools 'npm-userrc') --globalconfig (Join-Path $tools 'npm-globalrc') `
-        --global=false --no-update-notifier @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "npm $($Arguments[0]) failed." }
+        --global=false --no-update-notifier --loglevel=error @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        $output | Out-Host
+        throw "npm $($Arguments[0]) 失败，原因见上方输出。"
+    }
 }
 
 function Build-Bridge($Project, $Toolchain, [switch]$SkipTests) {
@@ -68,14 +73,14 @@ function Build-Bridge($Project, $Toolchain, [switch]$SkipTests) {
             $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
             [Environment]::SetEnvironmentVariable($name, $settings[$name], 'Process')
         }
-        Invoke-ProjectNpm $Toolchain $Project @('ci', '--include=dev', '--ignore-scripts', '--no-audit', '--no-fund') | Out-Host
+        Invoke-ProjectNpm $Toolchain $Project @('ci', '--include=dev', '--ignore-scripts', '--no-audit', '--no-fund')
         $serviceOutput = [IO.Path]::GetFullPath((Join-Path $Project 'dist/service'))
         if ((Split-Path (Split-Path $serviceOutput)) -ne [IO.Path]::GetFullPath($Project).TrimEnd('\')) { throw 'Unexpected build output directory.' }
         if (Test-Path -LiteralPath $serviceOutput) { Remove-Item -LiteralPath $serviceOutput -Recurse -Force }
         & $Toolchain.node (Join-Path $Project 'node_modules/typescript/bin/tsc') --project tsconfig.json
-        if ($LASTEXITCODE -ne 0) { throw 'TypeScript build failed.' }
+        if ($LASTEXITCODE -ne 0) { throw 'TypeScript 编译失败，原因见上方输出。' }
         & $Toolchain.go build -trimpath -o dist/opencode.exe ./launcher
-        if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed.' }
+        if ($LASTEXITCODE -ne 0) { throw '启动器编译失败，原因见上方输出。' }
         if (!$SkipTests) {
             & $Toolchain.node --test 'test/*.test.mjs'
             if ($LASTEXITCODE -ne 0) { throw 'Node tests failed.' }
