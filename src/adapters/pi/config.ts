@@ -93,6 +93,12 @@ export class HostConfig extends BaseHostConfig {
     const catalog = runtime.getModel(providerID, actualID);
     if (!configuredModel && !catalog) throw new UserError(`模型 ${providerID}/${modelID} 不在宿主配置或当前 Pi 目录中。请重新选择模型，或补充模型配置。`);
     const api = protocol(provider, model, catalog?.api);
+    // OpenAI's Responses and Chat Completions use the same reasoning-effort
+    // values. Keep model restrictions when the host selects a compatible relay.
+    const openaiEffort = ['openai-responses', 'openai-completions'];
+    const thinkingLevelMap = catalog && (catalog.api === api ||
+      (openaiEffort.includes(catalog.api) && openaiEffort.includes(api)))
+      ? catalog.thinkingLevelMap : undefined;
     const configuredBase = model.provider?.api ?? provider.options?.baseURL ?? provider.api;
     const base = configuredBase ?? catalog?.baseUrl;
     if (typeof base !== 'string') throw new UserError(`模型 ${providerID}/${modelID} 未配置 API 地址。请检查影刀模型设置。`);
@@ -118,6 +124,7 @@ export class HostConfig extends BaseHostConfig {
           cost: { input: model.cost?.input ?? catalog?.cost.input ?? 0, output: model.cost?.output ?? catalog?.cost.output ?? 0,
             cacheRead: model.cost?.cache_read ?? catalog?.cost.cacheRead ?? 0, cacheWrite: model.cost?.cache_write ?? catalog?.cost.cacheWrite ?? 0 },
           compat: catalog?.api === api ? catalog.compat : undefined,
+          thinkingLevelMap,
         }],
       });
     }

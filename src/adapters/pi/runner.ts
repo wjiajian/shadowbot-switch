@@ -17,6 +17,10 @@ import type { RunInput } from '../../adapter.js';
 import { outsideWorkspace } from '../../config-paths.js';
 import { databaseBusy, failure, id, Store } from '../../store.js';
 import type { Meta } from '../../store.js';
+import { thinkingArgument } from '../../thinking-command.js';
+import { clampThinkingLevel, getSupportedThinkingLevels } from '@earendil-works/pi-ai';
+import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
+import { initialThinkingLevel } from './thinking.js';
 import { modelError, UserError, userMessage } from '../../errors.js';
 
 export type Prompt = NonNullable<SessionPromptAsyncData['body']>;
@@ -140,7 +144,8 @@ export class Runs {
   }
 
   start(session: Session, prompt: Prompt, run: RunInput, interaction?: InteractionTarget) {
-    this.assertIdle(session);
+    const thinking = thinkingArgument(prompt);
+    if (thinking === undefined) this.assertIdle(session);
     if (!Array.isArray(prompt.parts) || !prompt.parts.length) throw new RequestError(400, 'The prompt requires parts');
     if (prompt.messageID && !/^msg_[a-zA-Z0-9]{6,64}$/.test(prompt.messageID)) throw new RequestError(400, 'Invalid message ID');
     const messageID = prompt.messageID ?? id('msg');
@@ -161,6 +166,7 @@ export class Runs {
     const { text, images } = this.promptContent(prompt);
     const agent = prompt.agent || (session.parentID ? explorer : copilot);
     if (agent !== (session.parentID ? explorer : copilot)) throw new RequestError(400, 'This session cannot use the requested agent');
+    if (thinking !== undefined) return this.controlThinking(session, prompt, parts, messageID, agent, thinking);
     const manager = this.manager(this.store.meta(session.id)!);
     const abort = new AbortController();
     const done = Promise.withResolvers<Reply>();
@@ -178,6 +184,69 @@ export class Runs {
     this.active.set(session.id, active);
     void this.execute(session, prompt, parts, text, images, messageID, agent, active, manager).then(done.resolve, done.reject);
     return done.promise;
+  }
+
+  private savedThinking(session: Session): ModelThinkingLevel | undefined {
+    const own = this.store.thinking(session.id);
+    if (own) return own as ModelThinkingLevel;
+    const parent = session.parentID ? this.store.get(session.parentID) : undefined;
+    return parent ? this.savedThinking(parent) : undefined;
+  }
+
+  private async controlThinking(session: Session, prompt: Prompt, parts: Part[], messageID: string, agent: string, requested: string): Promise<Reply> {
+    const previous = this.store.messages(session.id).findLast(item => item.info.role === 'user' &&
+      item.info.model?.providerID && item.info.model?.modelID && !this.store.localCommand(session.id, item.info.id));
+    const model = prompt.model ?? (previous?.info.role === 'user' ? previous.info.model : undefined);
+    const { resolved, selection } = await this.config.model(model, agent);
+    const available = getSupportedThinkingLevels(resolved);
+    let response!: AssistantMessage;
+    let user!: UserMessage;
+    let replyPart!: Part;
+    let busy = false;
+    this.store.transaction(() => {
+      const meta = this.store.meta(session.id);
+      if (!meta) throw new RequestError(404, 'Session not found');
+      busy = Boolean(meta.running);
+      if (requested && busy) throw new RequestError(409, '会话正在生成，请等待完成或停止后重试；思考档位未修改。');
+      // A new command on a reverted timeline must not silently discard hidden history.
+      if (meta.cutoff) throw new RequestError(409, '请先恢复回退的会话，或发送普通消息确认回退，再使用 /thinking。');
+      if (this.store.message(session.id, messageID)) throw new RequestError(409, 'The prompt message was already admitted');
+      const saved = this.savedThinking(session);
+      let baseline = saved ?? this.active.get(session.id)?.pi?.thinkingLevel;
+      if (baseline === undefined) {
+        const manager = this.manager(meta);
+        baseline = (manager.getBranch().some(entry => entry.type === 'thinking_level_change')
+          ? manager.buildSessionContext().thinkingLevel : initialThinkingLevel) as ModelThinkingLevel;
+      }
+      const current = clampThinkingLevel(resolved, baseline);
+      const level = requested && available.includes(requested as ModelThinkingLevel) ? requested as ModelThinkingLevel : undefined;
+      const text = requested && !level
+        ? `不支持思考档位 ${requested}。模型 ${selection.providerID}/${selection.modelID} 支持：${available.join('、')}。设置未修改。`
+        : `当前模型 ${selection.providerID}/${selection.modelID} 的实际思考档位：${level ?? current}。支持：${available.join('、')}。` +
+          (level ? '已按会话保存，从下一次模型请求生效。回退或删除此设置记录会恢复此前设置。' : '') +
+          (!requested && this.store.thinking(session.id) && saved !== current ? `保存档位 ${saved} 不受当前模型支持，请重新设置后再发送消息。` : '') +
+          (busy ? '生成中的查询仅临时显示，不保存到会话历史。' : '');
+      const now = Date.now();
+      user = { id: messageID, role: 'user', sessionID: session.id, agent, model: selection, time: { created: now } };
+      for (const part of parts) if (this.store.db.prepare('SELECT 1 FROM main.part WHERE id=?').get(part.id)) {
+        throw new RequestError(409, 'The prompt part was already admitted');
+      }
+      response = { id: id('msg'), role: 'assistant', sessionID: session.id, parentID: user.id, agent, mode: agent,
+        modelID: selection.modelID, providerID: selection.providerID, path: { cwd: this.root, root: this.root },
+        time: { created: now, completed: now }, finish: 'stop', cost: 0, tokens: emptyTokens() };
+      replyPart = { id: id('prt'), sessionID: session.id, messageID: response.id, type: 'text', text, time: { start: now, end: now } };
+      if (busy) return; // Never anchor a query to a partial tool exchange or interleave it with the active turn.
+      this.store.putMessage(user, false);
+      for (const part of parts) this.store.putPart(part, false);
+      this.store.putMessage(response, false);
+      this.store.putPart(replyPart, false);
+      this.store.recordCommand(session.id, user.id, response.id, meta.native_leaf, level);
+    });
+    this.store.event(session.id, 'message.updated', { info: user });
+    for (const part of parts) this.store.event(session.id, 'message.part.updated', { part, time: Date.now() });
+    this.store.event(session.id, 'message.updated', { info: response });
+    this.store.event(session.id, 'message.part.updated', { part: replyPart, time: Date.now() });
+    return { info: response, parts: [replyPart] };
   }
 
   private promptContent(prompt: Prompt) {
@@ -250,6 +319,11 @@ export class Runs {
       user.model = selection;
       this.store.putMessage(user);
       signal.throwIfAborted();
+      const ownThinking = this.store.thinking(session.id) as ModelThinkingLevel | undefined;
+      const inheritedThinking = this.savedThinking(session);
+      const savedThinking = ownThinking ?? (inheritedThinking ? clampThinkingLevel(resolved, inheritedThinking) : undefined);
+      const available = getSupportedThinkingLevels(resolved);
+      if (savedThinking && !available.includes(savedThinking)) throw new UserError(`保存的思考档位 ${savedThinking} 不受当前模型支持。请先用 /thinking 查询并设置支持的档位：${available.join('、')}。`);
       const loadedSkills = skills(this.agentDir, this.root, this.skillSources, config, agent);
       let context = await this.context.instructions(agent === explorer, signal);
       const rewrite = contextSettings();
@@ -379,7 +453,7 @@ export class Runs {
       });
       await resourceLoader.reload();
       const { session: pi } = await createAgentSession({ cwd: this.root, agentDir: this.nativeAgentDir, settingsManager: settings,
-        resourceLoader, sessionManager: manager, modelRuntime: runtime, model: resolved, tools: toolNames.filter(enabled) });
+        resourceLoader, sessionManager: manager, modelRuntime: runtime, model: resolved, thinkingLevel: savedThinking, tools: toolNames.filter(enabled) });
       active.pi = pi;
       unsubscribe = pi.subscribe(event => projection!.handle(event));
       await pi.bindExtensions({ mode: 'rpc' });
@@ -502,7 +576,8 @@ export class Runs {
       return true;
     }
     // A bridge-side error can create a projected assistant message without a Pi entry.
-    const cutoff = item.info.role === 'assistant' && item.info.error && !this.store.mapped(session.id, messageID)
+    const local = this.store.localCommand(session.id, messageID);
+    const cutoff = local ? local.user_id : item.info.role === 'assistant' && item.info.error && !this.store.mapped(session.id, messageID)
       ? item.info.parentID : messageID;
     const leaf = this.branchBefore(meta, cutoff);
     this.store.removeMessages(session, cutoff, leaf);
@@ -510,6 +585,8 @@ export class Runs {
   }
 
   private branchBefore(meta: Meta, messageID: string) {
+    const local = this.store.localCommand(meta.id, messageID);
+    if (local) return local.native_leaf;
     const piID = this.store.mapped(meta.id, messageID);
     if (!piID) throw new RequestError(409, 'The message has no native Pi entry');
     const entry = this.manager(meta).getEntry(piID);

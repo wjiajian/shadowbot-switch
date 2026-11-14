@@ -7,6 +7,7 @@ import { HostConfig } from './config.js';
 import { skillSources } from './host-skills.js';
 import { skillInventory } from './shadowbot.js';
 import { syncSkillCommands } from './skill-commands.js';
+import { thinkingEnabled } from './thinking-command.js';
 import { assertHostStopped, switchBackend, verifySchema } from './switch.js';
 import { manage, managementHelp } from './management.js';
 
@@ -49,8 +50,9 @@ async function main([command, arg]: string[]) {
     if (install.originalHash.toLowerCase() !== originalHash || sha256(backup) !== originalHash) throw new Error('Original OpenCode checksum mismatch');
     if (sha256(install.agentPath) !== install.launcherHash.toLowerCase()) throw new Error('Active launcher checksum mismatch');
     await switchBackend(home, install, harness.id, schema);
-    syncSkillCommands(install.resources, harnessCapabilities(install, harness).skills ? skillInventory(agentDir, undefined, skillSources(home, install, harness.id), new HostConfig().value)
-      .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined);
+    const config = new HostConfig().value;
+    syncSkillCommands(install.resources, harnessCapabilities(install, harness).skills ? skillInventory(agentDir, undefined, skillSources(home, install, harness.id), config)
+      .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, thinkingEnabled(harness.id, config));
     return;
   }
   throw new Error('Expected doctor, skills list, mcp list, or reload. Use install.ps1 to switch harnesses.');

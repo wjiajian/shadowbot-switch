@@ -275,11 +275,17 @@ test('Pi chat, MCP, skills, permission, question, restore and revert', { timeout
     await prompt('probe-custom');
     const permission = await events.until(event => event.type === 'permission.asked');
     assert.equal(custom.calls(), 0);
+    const beforeQuery = await get(api(`${path}/message`));
+    const busyQuery = await get(api(`${path}/command`, { method: 'POST', data: { command: 'thinking' } }));
+    assert.match(busyQuery.parts.find(part => part.type === 'text').text, /仅临时显示/);
+    assert.deepEqual(await get(api(`${path}/message`)), beforeQuery);
     await get(api('/config', { method: 'PATCH', data: { model: 'fixture/second', provider: { fixture: { models: { second: { name: 'Second' } } } } } }));
     await get(api('/auth/fixture', { method: 'PUT', data: { type: 'api', key: 'fixture-updated-key' } }));
     await get(api(`/permission/${permission.properties.id}/reply`, { method: 'POST', data: { reply: 'once' } }));
     await events.until(event => event.type === 'session.idle');
     assert.equal(custom.calls(), 1);
+    await get(api(`${path}/message/${busyQuery.info.id}`, { method: 'DELETE' }), 404);
+    await get(api(`${path}/revert`, { method: 'POST', data: { messageID: busyQuery.info.id } }), 404);
     assert.equal(model.requests.at(-1).request.model, 'model');
     assert.equal(model.requests.at(-1).authorization, 'Bearer fixture-model-key');
 
@@ -894,5 +900,219 @@ test('ShadowBot rollback accepts assistant targets and repeated removal of a tur
     await bridge?.stop();
     for (const { server } of [model, studio]) { server.closeAllConnections(); server.close(); }
     rmSync(fixture.root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  }
+});
+
+test('thinking commands persist per session and control actual requests', { timeout: 60_000 }, async () => {
+  const fixture = tempFixture();
+  const held = Promise.withResolvers();
+  const entered = Promise.withResolvers();
+  const model = modelFixture({ beforeReply: async content => {
+    if (content.includes('hold-thinking')) { entered.resolve(); await held.promise; }
+  } });
+  const modelURL = await listen(model.server);
+  const config = { model: 'fixture/model', provider: { fixture: { npm: '@ai-sdk/openai-compatible',
+    options: { baseURL: modelURL }, models: { model: { reasoning: true }, plain: { reasoning: false } } } } };
+  let bridge;
+  try {
+    bridge = await start(fixture, config);
+    const session = await get(bridge.api('/session', { method: 'POST', data: {} }));
+    const path = `/session/${session.id}`;
+    const command = (name, args = '', extra = {}) => get(bridge.api(`${path}/command`, {
+      method: 'POST', data: { command: name, arguments: args, ...extra } }));
+    const prompt = text => get(bridge.api(`${path}/message`, { method: 'POST', data: { parts: [{ type: 'text', text }] } }));
+    const reply = result => result.parts.filter(part => part.type === 'text').map(part => part.text).join('');
+    assert.ok((await get(bridge.api('/command'))).some(command => command.name === 'thinking'));
+    assert.match(reply(await command('thinking')), /实际思考档位：medium/);
+    assert.match(reply(await command('thinking', 'high')), /实际思考档位：high/);
+    assert.equal(model.requests.length, 0);
+    await prompt('first request');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, 'high');
+    assert.doesNotMatch(JSON.stringify(model.requests.at(-1).request.messages), /\/thinking|实际思考档位/);
+    await bridge.stop();
+    bridge = await start(fixture, config);
+    assert.match(reply(await command('thinking')), /实际思考档位：high/);
+    await prompt('restored request');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, 'high');
+    assert.match(reply(await command('thinking', 'bananas')), /不支持/);
+    assert.match(reply(await command('thinking', 'high', { model: 'fixture/plain' })), /不支持/);
+    assert.match(reply(await command('thinking')), /实际思考档位：high/);
+    assert.match(reply(await prompt('/thinking medium')), /实际思考档位：medium/);
+    await prompt('medium request');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, 'medium');
+    await command('thinking', 'high');
+    const other = await get(bridge.api('/session', { method: 'POST', data: {} }));
+    const otherResult = await get(bridge.api(`/session/${other.id}/command`, { method: 'POST', data: { command: 'thinking' } }));
+    assert.match(reply(otherResult), /实际思考档位：medium/);
+    const child = await get(bridge.api('/session', { method: 'POST', data: { parentID: session.id } }));
+    const childResult = await get(bridge.api(`/session/${child.id}/command`, { method: 'POST', data: { command: 'thinking', arguments: 'low' } }));
+    assert.match(reply(childResult), /实际思考档位：low/);
+    const count = model.requests.length;
+    await get(bridge.api(`${path}/command`, { method: 'POST', data: { command: 'thinking', arguments: 'low', parts: [{ type: 'file', mime: 'text/plain', url: 'file:///missing' }] } }), 400);
+    assert.equal(model.requests.length, count);
+    const pending = prompt('hold-thinking');
+    await entered.promise;
+    assert.match(reply(await command('thinking')), /实际思考档位：high/);
+    const busyPrompt = await bridge.api(`${path}/message`, { method: 'POST', data: { parts: [{ type: 'text', text: 'busy ordinary prompt' }] } });
+    assert.equal(busyPrompt.status, 409);
+    assert.doesNotMatch(await busyPrompt.text(), /思考档位/);
+    await get(bridge.api(`${path}/command`, { method: 'POST', data: { command: 'thinking', arguments: 'medium' } }), 409);
+    held.resolve();
+    await pending;
+    assert.match(reply(await command('thinking')), /实际思考档位：high/);
+    const faultDB = new DatabaseSync(fixture.database);
+    try {
+      faultDB.exec(`CREATE TRIGGER reject_thinking_reply BEFORE INSERT ON part
+        WHEN json_extract(NEW.data, '$.text') LIKE '%实际思考档位：low%'
+        BEGIN SELECT RAISE(FAIL, 'Injected projection failure'); END`);
+      await get(bridge.api(`${path}/command`, { method: 'POST', data: { command: 'thinking', arguments: 'low' } }), 500);
+    } finally { faultDB.exec('DROP TRIGGER reject_thinking_reply'); faultDB.close(); }
+    assert.match(reply(await command('thinking')), /实际思考档位：high/);
+    const menu = readFileSync(join(fixture.root, 'Copilot', 'commands', 'thinking.md'), 'utf8');
+    assert.match(menu, /\/thinking <!-- xbot-command-arguments:start -->\$ARGUMENTS<!-- xbot-command-arguments:end -->/);
+    const expanded = menu.replace(/^---[\s\S]*?\n---\n/, '').replaceAll('$ARGUMENTS', 'low');
+    assert.match(reply(await prompt(expanded)), /实际思考档位：low/);
+    assert.equal(model.requests.length, count + 1);
+    syncSkillCommands(fixture.root);
+    assert.throws(() => readFileSync(join(fixture.root, 'Copilot', 'commands', 'thinking.md')));
+    writeFileSync(join(fixture.root, 'Copilot', 'commands', 'thinking.md'), '---\ndescription: User command\n---\ncustom file thinking command');
+    await command('thinking');
+    assert.ok(JSON.stringify(model.requests.at(-1).request.messages).includes('custom file thinking command'));
+    await get(bridge.api('/config', { method: 'PATCH', data: { command: { thinking: { template: 'custom thinking command' } } } }));
+    await command('thinking');
+    assert.ok(JSON.stringify(model.requests.at(-1).request.messages).includes('custom thinking command'));
+    syncSkillCommands(fixture.root);
+    assert.match(readFileSync(join(fixture.root, 'Copilot', 'commands', 'thinking.md'), 'utf8'), /custom file thinking command/);
+  } finally {
+    held.resolve();
+    await bridge?.stop();
+    model.server.closeAllConnections();
+    await new Promise(resolve => model.server.close(resolve));
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('local thinking controls keep native context clean and follow history and session models', { timeout: 60_000 }, async () => {
+  const fixture = tempFixture();
+  const model = modelFixture();
+  const modelURL = await listen(model.server);
+  const config = { model: 'fixture/reasoner', provider: { fixture: { npm: '@ai-sdk/openai-compatible', options: { baseURL: modelURL },
+    models: { reasoner: { reasoning: true }, plain: { reasoning: false } } } } };
+  let bridge;
+  try {
+    bridge = await start(fixture, config);
+    const { api } = bridge;
+    const session = await get(api('/session', { method: 'POST', data: {} }));
+    const path = `/session/${session.id}`;
+    const control = args => get(api(`${path}/command`, { method: 'POST', data: { command: 'thinking', arguments: args } }));
+    const prompt = (text, selected) => get(api(`${path}/message`, { method: 'POST', data: { parts: [{ type: 'text', text }], model: selected } }));
+    const reply = x => x.parts.filter(p => p.type === 'text').map(p => p.text).join('');
+    for (const parts of [[null], [{ type: 'text' }]]) await get(api(`${path}/message`, { method: 'POST', data: { parts } }), 400);
+    const baseline = await get(api(`${path}/message`));
+    const fault = new DatabaseSync(fixture.database);
+    try {
+      fault.exec(`CREATE TRIGGER reject_local BEFORE INSERT ON part WHEN json_extract(NEW.data, '$.text') LIKE '%实际思考档位：low%'
+        BEGIN SELECT RAISE(FAIL, 'projection fault'); END`);
+      await get(api(`${path}/command`, { method: 'POST', data: { command: 'thinking', arguments: 'low' } }), 500);
+    } finally { fault.exec('DROP TRIGGER reject_local'); fault.close(); }
+    assert.deepEqual(await get(api(`${path}/message`)), baseline);
+    await prompt('baseline');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, 'medium');
+    const high = await control('High');
+    assert.match(reply(high), /实际思考档位：high/);
+    await prompt('after control');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, 'high');
+    assert.doesNotMatch(JSON.stringify(model.requests.at(-1).request.messages), /\/thinking|实际思考档位/);
+    await get(api(`${path}/revert`, { method: 'POST', data: { messageID: high.info.id } }));
+    await get(api(`${path}/unrevert`, { method: 'POST', data: {} }));
+    assert.match(reply(await control('')), /实际思考档位：high/);
+    await get(api(`${path}/revert`, { method: 'POST', data: { messageID: high.info.id } }));
+    await prompt('after revert');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, 'medium');
+    const low = await control('low');
+    await get(api(`${path}/message/${low.info.id}`, { method: 'DELETE' }));
+    await prompt('after delete');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, 'medium');
+    await prompt('/thinking about this flow, what would you change?');
+    assert.match(JSON.stringify(model.requests.at(-1).request.messages), /thinking about this flow/);
+    await control('high');
+    const child = await get(api('/session', { method: 'POST', data: { parentID: session.id } }));
+    await get(api(`/session/${child.id}/message`, { method: 'POST', data: { parts: [{ type: 'text', text: 'child inherits high' }] } }));
+    assert.equal(model.requests.at(-1).request.reasoning_effort, 'high');
+    const count = model.requests.length;
+    const incompatible = await prompt('switch to plain', { providerID: 'fixture', modelID: 'plain' });
+    assert.ok(incompatible.info.error);
+    assert.equal(model.requests.length, count);
+    assert.match(reply(await control('')), /fixture\/plain/);
+    assert.match(reply(await control('high')), /不支持/);
+    await control('off');
+    await prompt('plain request', { providerID: 'fixture', modelID: 'plain' });
+    assert.equal(model.requests.at(-1).request.reasoning_effort, undefined);
+    const menu = join(fixture.root, 'Copilot', 'commands', 'thinking.md');
+    unlinkSync(menu); mkdirSync(menu);
+    await get(api('/session'));
+    await get(api(`${path}/message`));
+    assert.ok(!(await get(api('/command'))).some(c => c.name === 'thinking'));
+    await get(api('/config', { method: 'PATCH', data: { command: { unrelated: { template: 'unrelated command' } } } }));
+    await get(api(`${path}/command`, { method: 'POST', data: { command: 'unrelated' } }));
+    await get(api(`${path}/command`, { method: 'POST', data: { command: 'thinking' } }), 400);
+    rmSync(menu, { recursive: true });
+    writeFileSync(menu, '---\ndescription: Custom description\n---\ncustom template');
+    assert.equal((await get(api('/command'))).find(c => c.name === 'thinking').description, 'Custom description');
+  } finally {
+    await bridge?.stop(); model.server.closeAllConnections();
+    await new Promise(resolve => model.server.close(resolve));
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('thinking undo restores implicit defaults and children clamp inherited preferences', { timeout: 60_000 }, async () => {
+  const fixture = tempFixture();
+  const model = modelFixture();
+  const modelURL = await listen(model.server);
+  const config = { model: 'fixture/reasoner', provider: { fixture: { npm: '@ai-sdk/openai-compatible', options: { baseURL: modelURL },
+    models: { reasoner: { reasoning: true }, plain: { reasoning: false } } } }, agent: { 'shadowbot-explorer': { model: 'fixture/plain' } } };
+  let bridge;
+  try {
+    bridge = await start(fixture, config);
+    const { api } = bridge;
+    const session = await get(api('/session', { method: 'POST', data: {} }));
+    const path = `/session/${session.id}`;
+    const control = (target, args, selected) => get(api(`${target}/command`, { method: 'POST', data: { command: 'thinking', arguments: args, model: selected } }));
+    const send = (target, text, selected, noReply = false) => get(api(`${target}/message`, { method: 'POST', data: { parts: [{ type: 'text', text }], model: selected, noReply } }));
+    const text = result => result.parts.filter(part => part.type === 'text').map(part => part.text).join('');
+    await send(path, 'context only', undefined, true);
+    assert.match(text(await control(path, '')), /fixture\/reasoner.*：medium/);
+    const high = await control(path, 'high');
+    await get(api(`${path}/message/${high.info.id}`, { method: 'DELETE' }));
+    assert.equal((await send(path, 'implicit plain', { providerID: 'fixture', modelID: 'plain' })).info.error, undefined);
+    assert.equal(model.requests.at(-1).request.reasoning_effort, undefined);
+    await send(path, 'more context only', undefined, true);
+    await get(api('/config', { method: 'PATCH', data: { model: 'fixture/missing' } }));
+    assert.ok((await send(path, 'failed model selection')).info.error);
+    await get(api('/config', { method: 'PATCH', data: { model: 'fixture/reasoner' } }));
+    assert.match(text(await control(path, '')), /fixture\/plain.*：off/);
+    await control(path, 'high', 'fixture/reasoner');
+    const child = await get(api('/session', { method: 'POST', data: { parentID: session.id } }));
+    const childPath = `/session/${child.id}`;
+    assert.equal((await send(childPath, 'weaker child model')).info.error, undefined);
+    assert.equal(model.requests.at(-1).request.model, 'plain');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, undefined);
+    const own = await control(childPath, 'off');
+    await get(api(`${childPath}/message/${own.info.id}`, { method: 'DELETE' }));
+    await control(path, 'low', 'fixture/reasoner');
+    await get(api('/config', { method: 'PATCH', data: { agent: { 'shadowbot-explorer': { model: 'fixture/reasoner' } } } }));
+    await send(childPath, 'follow changed parent');
+    assert.equal(model.requests.at(-1).request.reasoning_effort, 'low');
+    await control(childPath, 'high');
+    const requestCount = model.requests.length;
+    assert.ok((await send(childPath, 'explicit mismatch', { providerID: 'fixture', modelID: 'plain' })).info.error);
+    assert.equal(model.requests.length, requestCount);
+    await bridge.stop(); bridge = await start(fixture, config);
+    const restored = await get(bridge.api(`${path}/command`, { method: 'POST', data: { command: 'thinking', model: 'fixture/reasoner' } }));
+    assert.match(text(restored), /：low/);
+  } finally {
+    await bridge?.stop(); model.server.closeAllConnections(); await new Promise(resolve => model.server.close(resolve));
+    rmSync(fixture.root, { recursive: true, force: true });
   }
 });

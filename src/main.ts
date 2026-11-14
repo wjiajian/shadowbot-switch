@@ -24,7 +24,8 @@ import type { Frame } from './store.js';
 import { verifySchema } from './switch.js';
 import { configurationRevision, publishRuntimeState } from './runtime-state.js';
 import { skillInventory } from './shadowbot.js';
-import { skillCommand, syncSkillCommands } from './skill-commands.js';
+import { thinkingMenuCommand, skillCommand, syncSkillCommands } from './skill-commands.js';
+import { thinkingEnabled } from './thinking-command.js';
 import { userMessage } from './errors.js';
 import { agentRules } from './agent-rules.js';
 
@@ -156,7 +157,7 @@ class Bridge {
     try {
       const global = this.harness.capabilities.skills ? skillInventory(this.agentDir, undefined, this.skillSources, this.config.value)
         .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined;
-      const menu = syncSkillCommands(this.installation.resources, global);
+      const menu = syncSkillCommands(this.installation.resources, global, thinkingEnabled(this.harness.id, this.config.value));
       if (menu.added + menu.updated + menu.removed) local.menuReconnect = true;
     } catch (error) { local.configurationError = userMessage(error, 'Skill 菜单同步失败。检查影刀 Resources/Copilot/commands 目录权限。'); }
     this.publish(root, local);
@@ -271,6 +272,11 @@ class Bridge {
         prompt: role?.prompt, variant: role?.variant, options: role?.options ?? {}, steps: role?.steps ?? role?.maxSteps };
     }));
     const commands = { ...this.config.value.command };
+    let thinkingMenuError: unknown;
+    if ((path === '/command' || action === 'command') && thinkingEnabled(this.harness.id, this.config.value)) {
+      try { commands.thinking = thinkingMenuCommand(this.installation.resources); }
+      catch (error) { thinkingMenuError = error; }
+    }
     if (this.harness.capabilities.skills && (path === '/command' || action === 'command')) {
       for (const skill of skills(this.agentDir, root, this.skillSources, this.config.value)) {
         const name = `skill-${skill.name}`;
@@ -377,6 +383,7 @@ class Bridge {
       }
       if (['message', 'prompt_async', 'command'].includes(action) && !subID && method === 'POST') {
         const input = await body(req);
+        if (action === 'command' && input.command === 'thinking' && thinkingMenuError) throw thinkingMenuError;
         const prompt = action === 'command' ? this.expandCommand(input, commands) : input as Prompt;
         const { result } = await this.enqueue(local, async () => {
           await this.refresh(root, local);
