@@ -9,7 +9,7 @@ import { skillInventory } from './shadowbot.js';
 import { syncSkillCommands } from './skill-commands.js';
 import { thinkingEnabled } from './thinking-command.js';
 import { assertHostStopped, switchBackend, verifySchema } from './switch.js';
-import { manage, managementHelp } from './management.js';
+import { manage, managementHelp, visible } from './management.js';
 
 async function main([command, arg]: string[]) {
   if (command === 'help' || command === '--help' || command === '-h') { console.log(managementHelp); return; }
@@ -61,6 +61,6 @@ async function main([command, arg]: string[]) {
 void main(process.argv.slice(2)).catch(error => {
   const message = error instanceof Error ? error.message : '命令失败。运行 help 或 doctor 查看帮助。';
   if (process.argv.includes('--json')) console.log(JSON.stringify({ error: message }));
-  else console.error(`ShadowBot Switch：${message}`);
+  else console.error(`ShadowBot Switch：${visible(message)}`);
   process.exitCode = 1;
 });

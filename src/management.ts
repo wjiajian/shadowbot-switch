@@ -73,10 +73,21 @@ const labels: Record<string, string> = { name: '名称', status: '状态', state
 const valueLabels: Record<string, string> = { enabled: '已启用', disabled: '已禁用', shadowed: '被同名覆盖', invalid: '格式错误', warning: '可加载但有提示',
   installation: '安装级', app: '应用级', official: '影刀内置', legacy: '旧目录', connected: '已连接', failed: '失败' };
 const valueKeys = new Set(['status', 'state', 'source']);
+// Skill text, MCP settings and paths come from third parties. Show terminal control and
+// bidirectional formatting characters as visible escapes so they cannot rewrite or spoof
+// the terminal. Line breaks stay, since several messages are deliberately multi-line.
+const unsafeCharacters = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+export function visible(text: string) {
+  return text.replace(unsafeCharacters, char => {
+    const code = char.charCodeAt(0);
+    return code <= 0xff ? `\\x${code.toString(16).padStart(2, '0')}` : `\\u${code.toString(16).padStart(4, '0')}`;
+  });
+}
+function say(text: string) { console.log(visible(text)); }
 function cell(key: string, value: unknown) {
   if (value === undefined || value === null) return '';
   if (typeof value === 'boolean') return value ? '是' : '否';
-  const text = String(value).replace(/\s*\n\s*/g, ' ');
+  const text = visible(String(value).replace(/\s*[\r\n]\s*/g, ' ').replace(/\t/g, ' '));
   return valueKeys.has(key) ? valueLabels[text] ?? text : text;
 }
 // CJK characters take two terminal columns.
@@ -94,22 +105,22 @@ function table(rows: Record<string, unknown>[], prefix = '') {
   const rank = (column: typeof columns[number]) => column.width <= 40 ? 0 : ['path', 'source', 'app'].includes(column.key) ? 2 : 1;
   const ordered = [0, 1, 2].flatMap(level => columns.filter(column => rank(column) === level));
   for (let i = 0; i <= rows.length; i++) {
-    console.log(prefix + ordered.map((column, index) => index === ordered.length - 1 ? column.texts[i] : column.texts[i] + ' '.repeat(column.width - displayWidth(column.texts[i]))).join('  '));
+    say(prefix + ordered.map((column, index) => index === ordered.length - 1 ? column.texts[i] : column.texts[i] + ' '.repeat(column.width - displayWidth(column.texts[i]))).join('  '));
   }
 }
 function human(value: unknown, prefix = ''): void {
   if (Array.isArray(value)) {
-    if (!value.length) { console.log(`${prefix}无`); return; }
+    if (!value.length) { say(`${prefix}无`); return; }
     if (value.every(item => object(item) && Object.values(item).every(v => v === null || typeof v !== 'object'))) table(value as Record<string, unknown>[], prefix);
     else for (const item of value) human(item, prefix + '  ');
   } else if (object(value)) {
     for (const [key, val] of Object.entries(value)) {
       if (val === undefined) continue;
       const label = labels[key] ?? key;
-      if (val !== null && typeof val === 'object') { console.log(`${prefix}${label}：`); human(val, prefix + '  '); }
-      else console.log(`${prefix}${label}：${typeof val === 'boolean' ? val ? '是' : '否' : String(val)}`);
+      if (val !== null && typeof val === 'object') { say(`${prefix}${label}：`); human(val, prefix + '  '); }
+      else say(`${prefix}${label}：${typeof val === 'boolean' ? val ? '是' : '否' : String(val)}`);
     }
-  } else console.log(prefix + String(value));
+  } else say(prefix + String(value));
 }
 function required(value: string | undefined, label: string): string {
   if (!value) throw new UserError(`请提供${label}。运行 help 查看用法。`);
@@ -228,7 +239,7 @@ export async function manage(home: string, install: Installation, input: string[
   const emit = (value: unknown, title: string | null = `范围：${app ?? '此安装下的所有应用'}`) => {
     if (json) console.log(JSON.stringify({ scope, data: value }, null, 2));
     else {
-      if (title !== null) console.log(title);
+      if (title !== null) say(title);
       human(value);
     }
   };
@@ -238,11 +249,11 @@ export async function manage(home: string, install: Installation, input: string[
     const menu = menuSync(home, install);
     const next = menu.added + menu.updated + menu.removed ? '下一轮读取最新配置；重新连接 Copilot 刷新 / 菜单。' : '应用空闲后的下一轮自动生效。';
     if (json) { emit({ message, menu, next }); return; }
-    console.log(message);
-    console.log(`范围：${app ?? '此安装下的所有应用'}`);
+    say(message);
+    say(`范围：${app ?? '此安装下的所有应用'}`);
     const summary = menuSummary(menu);
-    if (summary) console.log(summary);
-    console.log('下一轮对话生效。');
+    if (summary) say(summary);
+    say('下一轮对话生效。');
   };
   if (command === 'help') { console.log(help); return; }
   if (command === 'status') {
@@ -259,18 +270,18 @@ export async function manage(home: string, install: Installation, input: string[
       return;
     }
     const features = [capabilities.skills && 'Skill', capabilities.mcp && 'MCP'].filter(Boolean);
-    console.log(`当前后端：${backend}${features.length ? `（支持 ${features.join('、')}）` : ''}`);
-    if (recoveryPending) console.log('上次操作没有完成：关闭影刀后运行 .\\switch.ps1 repair。');
-    if (!states.length) console.log('运行中的应用：无');
+    say(`当前后端：${backend}${features.length ? `（支持 ${features.join('、')}）` : ''}`);
+    if (recoveryPending) say('上次操作没有完成：关闭影刀后运行 .\\switch.ps1 repair。');
+    if (!states.length) say('运行中的应用：无');
     else {
-      console.log('运行中的应用：');
+      say('运行中的应用：');
       for (const s of states) {
-        console.log(`  ${s.root}  配置${configuration(s)}${s.active ? '，正在处理请求' : ''}`);
-        if (s.configurationError) console.log(`    ${s.configurationError}`);
-        for (const [name, error] of Object.entries(s.errors)) console.log(`    ${name}：${error}`);
+        say(`  ${s.root}  配置${configuration(s)}${s.active ? '，正在处理请求' : ''}`);
+        if (s.configurationError) say(`    ${s.configurationError}`);
+        for (const [name, error] of Object.entries(s.errors)) say(`    ${name}：${error}`);
       }
     }
-    console.log('完整诊断：.\\switch.ps1 doctor');
+    say('完整诊断：.\\switch.ps1 doctor');
     return;
   }
   if (command === 'harnesses') {
@@ -309,8 +320,8 @@ export async function manage(home: string, install: Installation, input: string[
         menuHint: menu.added + menu.updated + menu.removed ? '菜单已同步，重新连接 Copilot 后显示。' : '菜单没有变化，无需为菜单重连。' });
       return;
     }
-    console.log(menuSummary(menu) ?? '菜单：没有变化。');
-    console.log(states.length ? `配置：${states.length} 个运行中的应用会在下一次请求时刷新，运行 status 查看结果。` : '配置：下次打开 Copilot 时读取。');
+    say(menuSummary(menu) ?? '菜单：没有变化。');
+    say(states.length ? `配置：${states.length} 个运行中的应用会在下一次请求时刷新，运行 status 查看结果。` : '配置：下次打开 Copilot 时读取。');
     return;
   }
   if (command === 'skills') {
@@ -444,7 +455,7 @@ export async function manage(home: string, install: Installation, input: string[
       const child = spawn('notepad.exe', [path], { detached: true, stdio: 'ignore', windowsHide: false });
       child.on('error', () => console.error(`无法打开编辑器，请手动打开 ${path}`));
       child.unref();
-      if (json) emit({ path }); else console.log(`已打开配置文件：${path}`);
+      if (json) emit({ path }); else say(`已打开配置文件：${path}`);
       return;
     }
     if (action === 'check') {
@@ -456,12 +467,12 @@ export async function manage(home: string, install: Installation, input: string[
       const errors = skillRows(home, install, app).filter(row => row.status === 'invalid').map(({ path, reason }) => ({ path, reason }));
       if (json) emit({ valid: !errors.length && !warnings.length, warnings, skills: errors });
       else {
-        console.log(`范围：${app ?? '此安装下的所有应用'}`);
-        if (!warnings.length && !errors.length) console.log('配置检查通过。');
+        say(`范围：${app ?? '此安装下的所有应用'}`);
+        if (!warnings.length && !errors.length) say('配置检查通过。');
         else {
-          console.log(`发现 ${warnings.length + errors.length} 个问题：`);
-          for (const warning of warnings) console.log(`  ${warning}`);
-          for (const { path, reason } of errors) console.log(`  ${path}：${reason}`);
+          say(`发现 ${warnings.length + errors.length} 个问题：`);
+          for (const warning of warnings) say(`  ${warning}`);
+          for (const { path, reason } of errors) say(`  ${path}：${reason}`);
         }
       }
       if (warnings.length || errors.length) process.exitCode = 1;
@@ -487,8 +498,8 @@ export async function manage(home: string, install: Installation, input: string[
       const exportWarnings = exported.warnings.map(warning => `${warning}；未导出该规则文件，其余配置已导出。`);
       if (json) emit({ path, files: entries.length, warnings: exportWarnings });
       else {
-        console.log(`已导出 ${entries.length} 个文件到 ${path}（范围：${app ?? '此安装下的所有应用'}）`);
-        for (const warning of exportWarnings) console.log(`注意：${warning}`);
+        say(`已导出 ${entries.length} 个文件到 ${path}（范围：${app ?? '此安装下的所有应用'}）`);
+        for (const warning of exportWarnings) say(`注意：${warning}`);
       }
       if (exported.warnings.length) process.exitCode = 1;
       return;
@@ -567,14 +578,14 @@ export async function manage(home: string, install: Installation, input: string[
     await check('恢复状态', () => { if (['activation.pending.json', 'switch.pending.json'].some(file => existsSync(join(home, file)))) throw new UserError('上次操作尚未完成。关闭影刀后运行 repair。'); }, '运行 repair。');
     if (json) emit(checks);
     else {
-      console.log(`安装诊断（范围：${app ?? '此安装下的所有应用'}）`);
+      say(`安装诊断（范围：${app ?? '此安装下的所有应用'}）`);
       for (const { check, status, detail } of checks) {
         const [first, ...rest] = detail.split('\n');
-        console.log(`  ${status}  ${check}${first ? `：${first}` : ''}`);
-        for (const line of rest) console.log(`        ${line}`);
+        say(`  ${status}  ${check}${first ? `：${first}` : ''}`);
+        for (const line of rest) say(`        ${line}`);
       }
       const failures = checks.filter(c => c.status === '失败').length;
-      console.log(failures ? `${failures} 项未通过，按上面的提示处理后再运行 doctor。` : '全部通过。');
+      say(failures ? `${failures} 项未通过，按上面的提示处理后再运行 doctor。` : '全部通过。');
     }
     if (checks.some(c => c.status === '失败')) process.exitCode = 1;
     return;

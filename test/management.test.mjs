@@ -10,7 +10,7 @@ import { skillInventory } from '../dist/service/shadowbot.js';
 import { skillSources } from '../dist/service/host-skills.js';
 import { configurationRevision, publishRuntimeState, runtimeStates } from '../dist/service/runtime-state.js';
 import { loadAgentRules, maxRuleBytes } from '../dist/service/agent-rules.js';
-import { manage } from '../dist/service/management.js';
+import { manage, visible } from '../dist/service/management.js';
 import { UserError } from '../dist/service/errors.js';
 
 const control = resolve('dist/service/control.js');
@@ -261,5 +261,22 @@ test('root help and status work from another directory before installation or wi
     assert.equal(status().installed, false);
     put(join(root, '.shadowbot-switch', 'install.json'), '{');
     assert.match(status().next, /安装记录无法读取/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('human output shows terminal control and bidi characters from third-party text as visible escapes', () => {
+  assert.equal(visible('a\x1b[2Jb\rc\u202ed\ne'), 'a\\x1b[2Jb\\x0dc\\u202ed\ne');
+  const root = mkdtempSync(join(tmpdir(), 'shadowbot-escape-'));
+  const home = join(root, 'state');
+  try {
+    put(join(home, 'install.json'), { runtimeRelease: 'c'.repeat(64), piVersion: '1.5.2', resources: join(root, 'resources'), users: join(root, 'users') });
+    put(join(home, 'backend.json'), { mode: 'pi' });
+    put(join(home, 'agent', 'skills', 'spoof', 'SKILL.md'), '---\nname: spoof\ndescription: "fake \\e[2J\\u202e done"\n---\nBody\n');
+    const env = { ...process.env, SHADOWBOT_PI_HOME: home, OPENCODE_CONFIG_CONTENT: '{}', OPENCODE_CONFIG: '', OPENCODE_CONFIG_DIR: '', XDG_CONFIG_HOME: '' };
+    const result = spawnSync(process.execPath, [control, 'skills'], { env, cwd: root, encoding: 'utf8', windowsHide: true });
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    assert.match(result.stdout, /spoof/);
+    assert.doesNotMatch(result.stdout, /[\x1b\u202e]/);
+    assert.match(result.stdout, /fake \\x1b\[2J\\u202e done/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

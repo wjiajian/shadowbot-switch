@@ -44,6 +44,11 @@ function Get-HarnessName([string]$Id) { try { (Get-Harness $project $Id).name } 
 if (!$ShadowBotDirectory) { $ShadowBotDirectory = Find-ShadowBotDirectory $manifest }
 if (!$ShadowBotDirectory -and ![Console]::IsInputRedirected) { $ShadowBotDirectory = Read-Host '影刀安装目录（包含 ShadowBot.exe）' }
 if (!$ShadowBotDirectory) { throw '没有找到影刀安装目录。请用 --shadowbot-dir 指定包含 ShadowBot.exe 的目录。' }
+# Check before Resolve-Path and the version read, so a mistyped path gets a clear message.
+$ShadowBotDirectory = $ShadowBotDirectory.Trim().Trim('"')
+if (!(Test-Path -LiteralPath (Join-Path $ShadowBotDirectory 'ShadowBot.exe') -PathType Leaf)) {
+    throw "在 $ShadowBotDirectory 中没有找到 ShadowBot.exe。请用 --shadowbot-dir 指定影刀安装目录（包含 ShadowBot.exe 的那个目录）。"
+}
 
 $shadowBot = (Resolve-Path -LiteralPath $ShadowBotDirectory).Path
 $hostExe = Join-Path $shadowBot 'ShadowBot.exe'
