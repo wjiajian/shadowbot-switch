@@ -25,7 +25,7 @@ ShadowBot Switch 接管影刀 Copilot 背后的 agent 进程，让你在不同 h
 
 ## 功能
 
-- `use pi` / `use original` 一条命令切换，各自恢复自己的聊天记录，不动业务项目文件。
+- `use <harness>` 一条命令切换，每个 harness 恢复自己的聊天记录，不动业务项目文件。
 - 兼容 OpenCode 1.18.12 的 HTTP/SSE 接口，影刀的面板、授权弹窗、工具卡片照常使用。
 - Skills 分安装级和应用级两层目录，同名时应用级优先，安装级 Skill 自动同步到原生 `/` 菜单。
 - 自定义 MCP 支持 stdio 和 Streamable HTTP，保存配置后在下一次空闲请求时自动生效。
@@ -38,8 +38,8 @@ ShadowBot Switch 接管影刀 Copilot 背后的 agent 进程，让你在不同 h
 ```mermaid
 flowchart LR
     UI[影刀 Copilot 面板] --> L[兼容启动器<br/>替换 opencode.exe]
-    L -->|pi| S[兼容服务<br/>HTTP / SSE]
-    S --> A[Pi 适配器]
+    L -->|托管 harness| S[兼容服务<br/>HTTP / SSE]
+    S --> A[harness 适配器<br/>目前为 Pi]
     A --> MCP[影刀 MCP + 自定义 MCP]
     A --> SK[官方 + 自定义 Skills]
     L -->|original| O[备份的原版 opencode.exe]
@@ -80,13 +80,13 @@ flowchart LR
 
 准备阶段（下载工具链、编译）期间影刀可以照常使用，工具缓存在项目的 `.tools/` 中。脚本不会强行结束进程，`--wait` 默认最多等待 300 秒。
 
-所有操作都从 `switch.ps1` 进入，从其他目录用完整路径调用也可以。旧入口 `install.ps1 -Harness pi` / `opencode-origin` 仍然可用。
+所有操作都从 `switch.ps1` 进入，从其他目录用完整路径调用也可以。旧入口 `install.ps1 -Harness <harness>` 仍然可用，原版也可以用旧名 `opencode-origin`。
 
 ## 日常命令
 
 ```powershell
 .\switch.ps1                    # 当前后端和操作菜单
-.\switch.ps1 use pi             # 复用已安装版本，恢复 Pi 聊天记录
+.\switch.ps1 use <harness>      # 复用已安装版本，恢复该 harness 的聊天记录
 .\switch.ps1 use original       # 恢复影刀原版程序和聊天记录
 .\switch.ps1 update [harness]   # 更新指定或当前 harness，不改变当前选择
 .\switch.ps1 reload             # 同步 Skill 菜单，安排 MCP 配置刷新
@@ -115,7 +115,7 @@ flowchart LR
 .\switch.ps1 apps clear                    # 恢复安装级默认范围
 ```
 
-`apps select` 不带路径时可交互选择。应用列表来自已登记的运行实例和当前影刀用户目录。新配置写入应用下的 `.shadowbot-switch/`；已有的 `.pi/` 配置继续读取，同名时新目录优先。
+`apps select` 不带路径时可交互选择。应用列表来自已登记的运行实例和当前影刀用户目录。新配置写入应用下的 `.shadowbot-switch/`；旧版的 `.pi/` 配置继续读取，同名时新目录优先。
 
 ## Skills
 
@@ -143,7 +143,9 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 
 项目内置三个 Skill：`shadowbot-flow-edit`（流程编辑）、`shadowbot-run-diagnostics`（运行诊断）和 `shadowbot-web-exploration`（Explorer 委派），见 [skills/](skills/)。
 
-### 在聊天中调整思考强度（Pi）
+### 在聊天中调整思考强度
+
+目前只有 Pi 支持以下命令。
 
 - `/thinking`：查看当前档位，以及当前模型支持哪些档位。
 - `/thinking <档位>`：设置当前会话的档位，例如 `/thinking high`。
@@ -188,33 +190,27 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 
 ## Agent 规则（AGENTS.md）
 
-托管 harness（目前为 Pi）会自动加载两层规则。规则由公共层统一读取，再交给当前 harness，新增的 harness 无需自行实现：
+托管 harness（目前为 Pi）会自动加载两层规则，影刀原版 OpenCode 不使用：
 
 - 安装级：本项目的 `.shadowbot-switch/agent/AGENTS.md`，适用于所有影刀应用。
-- 应用级：`<影刀应用根目录>/AGENTS.md`，只适用于当前应用；冲突时优先于安装级规则。
+- 应用级：`<影刀应用根目录>/AGENTS.md`，只适用于当前应用，冲突时优先于安装级。根目录没有这个文件时，改读 `.shadowbot-switch/AGENTS.md`（导入配置时写在这里）。
 
-应用根目录没有 `AGENTS.md` 时，读取 `<影刀应用根目录>/.shadowbot-switch/AGENTS.md`，以支持配置导入。根目录文件存在但为空或无效时，不启用备用文件。`config export --app` 会包含当前应用规则；导入到新应用时写入 `.shadowbot-switch/AGENTS.md`，目标应用已有根目录规则时则遵循文件冲突检查，使用 `--replace` 才会备份并覆盖。
+应用根目录指影刀传给 Copilot 的应用工作区，不是本仓库目录。
 
-安装级和应用级导出都会跳过无效规则，并在导出结果中列出警告，其余配置正常导出；部分导出返回退出码 `1`，生成的配置包仍可使用。导入会统一规则文件名为 `AGENTS.md`，并在写入任何文件前校验大小及 UTF-8 编码。根目录规则为断链时会报告诊断，导入不会绕过断链写入备用位置；请先修复或移除断链。
+规则每轮对话重新读取，保存后下一轮生效，不需要 reload。主 Agent 和它发起的子 Agent（如浏览器探索）都会加载。只读取上面两个位置，不扫描父目录或子目录；规则也不会改变工具授权。
 
-规则会在每轮对话自动发送给模型，所以安装级也拒绝目录外链接，避免链接改动把其他本地文件带入提示。加载器允许读取目录内链接；配置迁移沿用不跟随链接写入、不递归复制链接目录的约定，即使 `--replace` 也不会覆盖链接目标。使用链接规则或链接配置目录时，迁移前应将它们整理为普通文件和目录。
-
-每次发起请求时重新读取，保存后下一轮对话生效，无需 reload。主 Agent 和浏览器探索 Agent 都会加载。文件不存在或内容为空时忽略，不会向上扫描父目录或自动加载子目录规则；规则不会改变工具授权。
-
-规则文件须使用 UTF-8，每层最多 32 KiB。无法读取、编码无效、超限、读取期间变化或链接目标越出对应目录的文件会被跳过，并记录诊断；不会截断规则内容。可运行 `.\switch.ps1 config check` 或 `.\switch.ps1 doctor` 检查，应用级检查加 `--app <应用根目录>`。
-
-这里的应用根目录是影刀传给接入层的工作区（优先使用 `SHADOWBOT_OPENCODE_WORKSPACE_ROOT`），不是本仓库目录，也不是可能指向临时运行目录的会话 `directory`。影刀原版 OpenCode 不经过公共层，切回原版后不使用这套规则。更新本项目后需执行 `.\switch.ps1 update <harness> --wait`（例如 `update pi --wait`）重建运行时。
+规则文件须为 UTF-8，每层最多 32 KiB，不能是指向所在目录之外的链接。不符合要求的文件会整个跳过，不会截断。可用 `.\switch.ps1 config check` 或 `doctor` 检查，应用级加 `--app <应用根目录>`。`config export --app` 会一并导出应用规则。
 
 ## 更新与迁移
 
 ```powershell
-.\switch.ps1 update pi --wait                   # 即使当前用原版，也可以更新 Pi
+.\switch.ps1 update <harness> --wait            # 即使当前用原版，也可以更新托管 harness
 .\switch.ps1 repair --wait                      # 搬迁项目目录或中断后恢复
 .\switch.ps1 config export 'D:\backup\shadowbot-config.json' --global
 .\switch.ps1 config import 'D:\backup\shadowbot-config.json' --global
 ```
 
-**更新本项目**：重新下载源码，覆盖到原项目目录，保留 `.shadowbot-switch/`（配置和聊天数据）与 `.tools/`（工具缓存），再运行 `update pi --wait`。用 Git 获取的项目先 `git pull` 再执行同一命令。`update` 只从本地源码和锁定依赖构建，不会自动拉取 GitHub 或追踪 npm latest。原版 OpenCode 随影刀更新，`update original` 只会给出说明；当前使用原版时，不带参数的 `update` 也一样，要重建 Pi 请写明 `update pi`。
+**更新本项目**：重新下载源码，覆盖到原项目目录，保留 `.shadowbot-switch/`（配置和聊天数据）与 `.tools/`（工具缓存），再对要用的托管 harness 运行 `update <harness> --wait`。用 Git 获取的项目先 `git pull` 再执行同一命令。`update` 只从本地源码和锁定依赖构建，不会自动拉取 GitHub 或追踪 npm latest。原版 OpenCode 随影刀更新，`update original` 只会给出说明；当前使用原版时，不带参数的 `update` 也一样，要重建托管 harness 请写明 ID，例如 `update pi`。
 
 **搬迁目录**：移动整个项目目录（包括 `.shadowbot-switch/`）后运行 `repair`。旧目录仍存在时会拒绝接管，避免两套会话混用。
 
