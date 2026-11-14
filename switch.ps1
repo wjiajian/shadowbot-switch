@@ -45,7 +45,7 @@ Skill 与权限下一轮生效；MCP 在空闲后的下一轮自动应用。
 }
 
 function Read-LocalStatus {
-    $result = [ordered]@{ installed = $false; backend = 'unknown'; recoveryPending = $false; next = '.\switch.ps1 harnesses' }
+    $result = [ordered]@{ installed = $false; backend = 'unknown'; recoveryPending = $false; next = '运行 .\switch.ps1 use pi 安装 Pi；.\switch.ps1 harnesses 查看全部选项。' }
     if (Test-Path -LiteralPath $manifestPath) {
         try {
             $installation = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
@@ -90,8 +90,8 @@ function Invoke-Selection([string]$Command, [string[]]$Tail, [string]$Target) {
 try {
     if (!$arguments.Count) {
         $status = Read-LocalStatus
-        Write-Host "当前后端：$($status.backend)"
-        if (!$status.installed) { Write-Host '尚未安装托管 harness。' }
+        if ($status.installed) { Write-Host "当前后端：$($status.backend)" }
+        else { Write-Host '还没有安装，从下面选择一个后端开始。' }
         if ([Console]::IsInputRedirected) { Show-Help; return }
         . (Join-Path $project 'scripts/harnesses.ps1')
         $registered = @(Get-HarnessRegistry $project)
@@ -99,8 +99,9 @@ try {
         Write-Host 'r 刷新配置  d 诊断  h 帮助  0 退出'
         $choice = Read-Host '选择操作'
         if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $registered.Count) { $arguments = @('use', $registered[[int]$choice - 1].id, '--wait') }
-        else { $arguments = switch ($choice) { 'r' { @('reload') }; 'd' { @('doctor') }; '0' { return }; default { @('help') } } }
-        if (!$arguments.Count) { return }
+        elseif ($choice -eq '0') { return }
+        # switch output is unrolled, so wrap it: a bare 'reload' would make $arguments[0] the letter 'r'.
+        else { $arguments = @(switch ($choice) { 'r' { 'reload' }; 'd' { 'doctor' }; default { 'help' } }) }
     }
     $command = $arguments[0]
     if ($command -in 'help', '--help', '-h') { Show-Help; return }
@@ -112,7 +113,14 @@ try {
     if ($command -eq 'harnesses') {
         . (Join-Path $project 'scripts/harnesses.ps1')
         $registered = @(Get-HarnessRegistry $project)
-        if ($jsonOutput) { $registered | ConvertTo-Json -Depth 8 } else { $registered | Select-Object id, name, kind, capabilities | Format-Table }
+        if ($jsonOutput) { $registered | ConvertTo-Json -Depth 8 }
+        else {
+            $current = try { Get-SelectedHarness $state $project } catch { $null }
+            $registered | Select-Object @{ n = '标识'; e = { $_.id } }, @{ n = '名称'; e = { $_.name } },
+                @{ n = 'Skill'; e = { if ($_.capabilities.skills) { '是' } else { '否' } } },
+                @{ n = 'MCP'; e = { if ($_.capabilities.mcp) { '是' } else { '否' } } },
+                @{ n = '正在使用'; e = { if ($_.id -eq $current) { '是' } else { '' } } } | Format-Table -AutoSize
+        }
         return
     }
     if ($command -in 'update', 'repair') {
@@ -127,7 +135,7 @@ try {
     $status = Read-LocalStatus
     if (!$status.installed -or !(Test-Path -LiteralPath $control)) {
         if ($jsonOutput) { $status | ConvertTo-Json }
-        else { Write-Host "当前后端：$($status.backend)"; Write-Host "下一步：$($status.next)" }
+        else { Write-Host "当前后端：$(if ($status.installed) { $status.backend } else { '未安装' })"; Write-Host "下一步：$($status.next)" }
         if ($command -notin 'status', 'doctor') { throw '安装尚未就绪。先运行 .\switch.ps1 use <harness>。' }
         if ($command -eq 'doctor') { $global:LASTEXITCODE = 1; exit 1 }
         return

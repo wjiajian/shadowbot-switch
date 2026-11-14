@@ -36,7 +36,7 @@ function Invoke-InstallationLock($AgentPath, [scriptblock]$Action) {
     try {
         try { $acquired = $mutex.WaitOne(0) }
         catch [Threading.AbandonedMutexException] { $acquired = $true }
-        if (!$acquired) { throw 'An installation or backend switch is already running.' }
+        if (!$acquired) { throw '另一个安装或切换正在进行，等它结束后再试。' }
         try { & $Action }
         finally { $mutex.ReleaseMutex() }
     } finally { $mutex.Dispose() }
