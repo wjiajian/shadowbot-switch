@@ -933,20 +933,46 @@ test('thinking commands persist per session and control actual requests', { time
     assert.match(reply(await prompt('/thinking medium')), /实际思考档位：medium/);
     await prompt('medium request');
     assert.equal(model.requests.at(-1).request.reasoning_effort, 'medium');
+    await command('thinking', 'high');
     const other = await get(bridge.api('/session', { method: 'POST', data: {} }));
     const otherResult = await get(bridge.api(`/session/${other.id}/command`, { method: 'POST', data: { command: 'thinking' } }));
     assert.match(reply(otherResult), /实际思考档位：medium/);
-    await command('thinking', 'high');
+    const child = await get(bridge.api('/session', { method: 'POST', data: { parentID: session.id } }));
+    const childResult = await get(bridge.api(`/session/${child.id}/command`, { method: 'POST', data: { command: 'thinking', arguments: 'low' } }));
+    assert.match(reply(childResult), /实际思考档位：low/);
+    const count = model.requests.length;
+    await get(bridge.api(`${path}/command`, { method: 'POST', data: { command: 'thinking', arguments: 'low', parts: [{ type: 'file', mime: 'text/plain', url: 'file:///missing' }] } }), 400);
+    assert.equal(model.requests.length, count);
     const pending = prompt('hold-thinking');
     await entered.promise;
     await get(bridge.api(`${path}/command`, { method: 'POST', data: { command: 'thinking', arguments: 'medium' } }), 409);
     held.resolve();
     await pending;
     assert.match(reply(await command('thinking')), /实际思考档位：high/);
+    const faultDB = new DatabaseSync(fixture.database);
+    try {
+      faultDB.exec(`CREATE TRIGGER reject_thinking_reply BEFORE INSERT ON part
+        WHEN json_extract(NEW.data, '$.text') LIKE '%实际思考档位：low%'
+        BEGIN SELECT RAISE(FAIL, 'Injected projection failure'); END`);
+      const failed = await command('thinking', 'low');
+      assert.ok(failed.info.error);
+    } finally { faultDB.exec('DROP TRIGGER reject_thinking_reply'); faultDB.close(); }
+    assert.match(reply(await command('thinking')), /实际思考档位：high/);
     const menu = readFileSync(join(fixture.root, 'Copilot', 'commands', 'thinking.md'), 'utf8');
-    assert.match(menu, /\$ARGUMENTS/);
+    assert.match(menu, /\/thinking <!-- xbot-command-arguments:start -->\$ARGUMENTS<!-- xbot-command-arguments:end -->/);
+    const expanded = menu.replace(/^---[\s\S]*?\n---\n/, '').replaceAll('$ARGUMENTS', 'low');
+    assert.match(reply(await prompt(expanded)), /实际思考档位：low/);
+    assert.equal(model.requests.length, count + 1);
     syncSkillCommands(fixture.root);
     assert.throws(() => readFileSync(join(fixture.root, 'Copilot', 'commands', 'thinking.md')));
+    writeFileSync(join(fixture.root, 'Copilot', 'commands', 'thinking.md'), '---\ndescription: User command\n---\ncustom file thinking command');
+    await command('thinking');
+    assert.ok(JSON.stringify(model.requests.at(-1).request.messages).includes('custom file thinking command'));
+    await get(bridge.api('/config', { method: 'PATCH', data: { command: { thinking: { template: 'custom thinking command' } } } }));
+    await command('thinking');
+    assert.ok(JSON.stringify(model.requests.at(-1).request.messages).includes('custom thinking command'));
+    syncSkillCommands(fixture.root);
+    assert.match(readFileSync(join(fixture.root, 'Copilot', 'commands', 'thinking.md'), 'utf8'), /custom file thinking command/);
   } finally {
     held.resolve();
     await bridge?.stop();

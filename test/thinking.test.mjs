@@ -18,7 +18,7 @@ test('menu upgrade removes generated shortcuts and preserves user files', () => 
     const result = syncSkillCommands(root, undefined, true);
     assert.equal(result.removed, 2);
     assert.deepEqual(readdirSync(commands), ['thinking.md']);
-    assert.match(readFileSync(join(commands, 'thinking.md'), 'utf8'), /\$ARGUMENTS/);
+    assert.match(readFileSync(join(commands, 'thinking.md'), 'utf8'), /\/thinking <!-- xbot-command-arguments:start -->\$ARGUMENTS<!-- xbot-command-arguments:end -->/);
     writeFileSync(join(commands, 'thinking-high.md'), 'User command');
     syncSkillCommands(root, undefined, true);
     assert.equal(readFileSync(join(commands, 'thinking-high.md'), 'utf8'), 'User command');

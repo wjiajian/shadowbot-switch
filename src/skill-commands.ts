@@ -11,6 +11,10 @@ const commandFile = /^skill-[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
 // Include retired shortcuts so upgrades remove only our generated files.
 const thinkingFile = /^thinking(?:-high|-medium)?\.md$/;
 
+export function generatedCommand(content: string) {
+  return content.replaceAll('\r\n', '\n').includes(`\n---\n${generated}\n`);
+}
+
 export function skillCommand(name: string) {
   return `请先调用 skill 工具读取 ${name}，再按该 Skill 的要求完成任务。\n\n$ARGUMENTS\n`;
 }
@@ -21,7 +25,7 @@ export function syncSkillCommands(resources: string, directory?: string | Pick<S
   const desired = new Map<string, string>();
   if (thinking) for (const [name, command] of Object.entries(thinkingCommands)) {
     desired.set(`${name}.md`, ['---', `displayName: ${name}`, `description: ${JSON.stringify(command.description)}`,
-      'agent: shadowbot-copilot', 'subtask: false', '---', generated,
+      'subtask: false', '---', generated,
       command.template.replace('$ARGUMENTS', '<!-- xbot-command-arguments:start -->$ARGUMENTS<!-- xbot-command-arguments:end -->'), ''].join('\n'));
   }
   if (directory) {
@@ -42,7 +46,7 @@ export function syncSkillCommands(resources: string, directory?: string | Pick<S
     const path = join(commands, entry.name);
     const current = readFileSync(path, 'utf8');
     const next = desired.get(entry.name);
-    if (current.replaceAll('\r\n', '\n').includes(`\n---\n${generated}\n`)) {
+    if (generatedCommand(current)) {
       if (!next) { unlinkSync(path); report.removed++; }
       else if (current !== next) { atomicWrite(path, next); report.updated++; }
       else report.unchanged++;

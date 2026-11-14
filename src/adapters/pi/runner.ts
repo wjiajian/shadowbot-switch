@@ -144,6 +144,7 @@ export class Runs {
 
   start(session: Session, prompt: Prompt, run: RunInput, interaction?: InteractionTarget) {
     this.assertIdle(session);
+    thinkingArgument(prompt); // Reject malformed local commands before reading attachments or admitting a run.
     if (!Array.isArray(prompt.parts) || !prompt.parts.length) throw new RequestError(400, 'The prompt requires parts');
     if (prompt.messageID && !/^msg_[a-zA-Z0-9]{6,64}$/.test(prompt.messageID)) throw new RequestError(400, 'Invalid message ID');
     const messageID = prompt.messageID ?? id('msg');
@@ -235,6 +236,7 @@ export class Runs {
     let unsubscribe: (() => void) | undefined;
     let selection = prompt.model ?? { providerID: '', modelID: '' };
     let error: unknown;
+    let commandLeaf: string | null | undefined;
     const user: UserMessage = { id: messageID, role: 'user', sessionID: session.id, agent,
       model: selection, time: { created: Date.now() }, system: prompt.system };
     try {
@@ -257,6 +259,7 @@ export class Runs {
       const savedThinking = this.store.thinking(session.id) as ModelThinkingLevel | undefined;
       const available = getSupportedThinkingLevels(resolved);
       if (thinking !== undefined) {
+        commandLeaf = manager.getLeafId();
         const settingsManager = SettingsManager.inMemory();
         const resourceLoader = new DefaultResourceLoader({ cwd: this.root, agentDir: this.nativeAgentDir, settingsManager,
           noExtensions: true, noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true,
@@ -273,7 +276,6 @@ export class Runs {
         } else {
           if (thinking) {
             pi.setThinkingLevel(thinking as ModelThinkingLevel);
-            this.store.thinking(session.id, pi.thinkingLevel);
           }
           reply = `当前模型 ${selection.providerID}/${selection.modelID} 的实际思考档位：${pi.thinkingLevel}。支持：${available.join('、')}。` +
             (thinking ? '已按会话保存，从下一次模型请求生效。' : '') +
@@ -288,7 +290,9 @@ export class Runs {
         manager.appendMessage(native);
         projection = new Projection(this.store, session, user, manager, selection, this.root, active);
         projection.handle({ type: 'message_end', message: native });
+        await Promise.resolve(); // Let the projection persist its native message mapping.
         if (projection.error) throw projection.error;
+        if (thinking && available.includes(thinking as ModelThinkingLevel)) this.store.thinking(session.id, pi.thinkingLevel);
         return this.store.message(session.id, projection.last!.id);
       }
       if (savedThinking && !available.includes(savedThinking)) throw new UserError(`保存的思考档位 ${savedThinking} 不受当前模型支持。请先用 /thinking 查询并设置支持的档位：${available.join('、')}。`);
@@ -432,6 +436,10 @@ export class Runs {
       error = projection.last?.error ? new UserError('message' in projection.last.error.data ? String(projection.last.error.data.message) : '模型请求失败。') : undefined;
     } catch (caught) { error = caught; }
     finally {
+      if (error && commandLeaf !== undefined) {
+        if (commandLeaf === null) manager.resetLeaf();
+        else manager.branch(commandLeaf);
+      }
       unsubscribe?.();
       active.pi?.dispose();
       this.active.delete(session.id);
