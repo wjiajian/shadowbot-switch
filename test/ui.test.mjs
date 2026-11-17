@@ -1,12 +1,43 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
+import vm from 'node:vm';
 
 const read = path => fs.readFileSync(new URL(`../${path}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const script = read('ui/app.js');
 const styles = read('ui/app.css');
 const page = read('ui/index.html');
 const server = read('scripts/ui-server.ps1');
+
+test('completed tasks keep logs in the task panel and show only a short success notice', async () => {
+  const finish = /async function finishJob\(job\) \{[\s\S]+?\n}/.exec(script)[0];
+  const section = /function taskSection\(\) \{[\s\S]+?\n}/.exec(script)[0];
+  for (const outcome of [{ exitCode: 0, stopped: false }, { exitCode: 1, stopped: false }, { exitCode: 1, stopped: true }]) {
+    const job = { ...outcome, title: '更新 Test Harness', lines: ['<Objs>' + 'log'.repeat(10000) + '</Objs>'], steps: [], done: true, collapsed: false };
+    const notices = [];
+    const state = { job, page: 'harness' };
+    const context = vm.createContext({ state, job, toast: message => notices.push(message), refreshBase: async () => {}, resetData() {}, render() {}, ensureData: async () => {}, loadCounts() {},
+      h: (tag, props, ...children) => ({ tag, props, children: children.flat(Infinity).filter(Boolean) }), icon: () => ({ classList: { add() {} } }),
+    });
+    await vm.runInContext(`${finish}\nfinishJob(job)`, context);
+    assert.equal(state.job, job, 'logs must remain available in the task panel');
+    if (outcome.exitCode === 0) {
+      assert.deepEqual(notices, ['更新 Test Harness已完成。']);
+      assert.equal(job.collapsed, true);
+      const nodes = tree => [tree, ...(tree.children || []).flatMap(nodes)];
+      const panel = vm.runInContext(`${section}\ntaskSection()`, context);
+      nodes(panel).find(node => node.props?.['aria-label'] === '展开任务日志').props.onclick();
+      assert.equal(job.collapsed, false, 'completed logs must still be expandable');
+      const expanded = vm.runInContext('taskSection()', context);
+      assert.deepEqual(nodes(expanded).find(node => node.tag === 'pre').children, job.lines);
+      nodes(expanded).find(node => node.props?.['aria-label'] === '关闭任务').props.onclick();
+      assert.equal(state.job, null, 'completed task can be dismissed');
+    } else {
+      assert.deepEqual(notices, [], 'failed or cancelled tasks must not announce success');
+      assert.equal(job.collapsed, false);
+    }
+  }
+});
 
 test('page code renders third-party text only through DOM text nodes', () => {
   for (const sink of ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval(', 'new Function', "setAttribute('style'", 'style:']) {

@@ -146,6 +146,10 @@ function Get-SwitchProcesses {
     }
 }
 try {
+    Write-Host '检查安装：中文日志' -ForegroundColor Gray
+    Write-Warning 'fixture warning'
+    [Console]::Error.WriteLine('fixture stderr')
+    Write-Progress -Activity 'fixture progress' -Status 'working' -PercentComplete 50
     $timeout = if (Test-Path (Join-Path $PSScriptRoot 'timeout')) { 1 } else { 15 }
     Wait-SwitchProcesses -Wait -TimeoutSeconds $timeout
     Set-Content (Join-Path $PSScriptRoot 'changed') 'mutation started'
@@ -175,6 +179,19 @@ try {
         [void](Start-UiJob @{ cmd = $Command; harness = 'original' })
     }
     $script:Ui.Project = $jobProject
+    # Encoded PowerShell commands must stream readable host/warning/error output,
+    # rather than serializing information and progress records as CLIXML.
+    Start-TestJob @()
+    Wait-TestJob { Test-Path (Join-Path $jobProject 'changed') }
+    Wait-TestJob { ($script:Ui.Job.Lines -join "`n") -match '检查安装：中文日志' }
+    Set-Content (Join-Path $jobProject 'finish') 'continue'
+    Wait-TestJob { $script:Ui.Job.Done }
+    $progress = Get-UiJobProgress @{ id = $script:Ui.Job.Id }
+    $logText = $progress.lines -join "`n"
+    if ($progress.exitCode -ne 0 -or $logText -notmatch 'fixture warning' -or $logText -notmatch 'fixture stderr' -or $logText -match '#< CLIXML|<Objs|<Obj |<S S=') {
+        throw 'Task logs must preserve readable Chinese, warning and stderr text without PowerShell XML.'
+    }
+
     Start-TestJob @('running')
     Wait-TestJob { (Get-UiJobProgress @{ id = $script:Ui.Job.Id }).waiting }
     if (!(Invoke-UiApi '/api/jobs/stop' @{ id = $script:Ui.Job.Id }).accepted) { throw 'A waiting job must accept cancellation.' }

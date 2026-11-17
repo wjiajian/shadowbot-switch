@@ -270,7 +270,8 @@ function Start-UiJob($Request) {
     $arguments = ConvertTo-UiJobArguments $Request
     $encoded = New-UiEncodedCommand (Join-Path $script:Ui.Project 'switch.ps1') $arguments
     $shell = (Get-Process -Id $PID).Path
-    $info = New-UiProcessInfo $shell @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded)
+    # EncodedCommand otherwise serializes redirected host/progress streams as CLIXML.
+    $info = New-UiProcessInfo $shell @('-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded)
     $waitControl = Open-SwitchWaitControl "Local\ShadowBotSwitch-Wait-$([Guid]::NewGuid())" -Create
     $info.Environment['SHADOWBOT_SWITCH_WAIT_CONTROL'] = $waitControl.Name
     try { $process = [Diagnostics.Process]::Start($info) }
@@ -345,7 +346,7 @@ $dialog = New-Object System.Windows.Forms.FolderBrowserDialog -Property @{ Descr
 if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath) }
 '@
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
-    $result = Invoke-UiProcess (Get-Process -Id $PID).Path @('-STA', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded) 900
+    $result = Invoke-UiProcess (Get-Process -Id $PID).Path @('-STA', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', $encoded) 900
     $result.stdout.Trim()
 }
 

@@ -458,9 +458,8 @@ async function pollJob() {
 
 async function finishJob(job) {
   if (job.exitCode === 0 && !job.stopped) {
-    const last = [...job.lines].reverse().find(line => line.trim());
-    toast(last ? last.trim() : '已完成。');
-    state.job = null;
+    toast(`${job.title}已完成。`);
+    job.collapsed = true;
   }
   try { await refreshBase(); } catch (error) { toast(error.message, 'error'); }
   resetData();
@@ -645,9 +644,8 @@ function taskSection() {
       running ? h('span', { class: 'muted', 'data-clock': 'elapsed' }, clock((Date.now() - job.startedAt) / 1000))
         : h('span', { class: failed ? 'bad' : 'ok' }, statusText),
       running && job.waiting ? button('停止等待', 'btn-secondary push', stopJob, { disabled: isBusy('stop') }) : null,
-      running
-        ? h('button', { type: 'button', class: `icon-btn${job.waiting ? '' : ' push'}`, 'aria-label': job.collapsed ? '展开任务日志' : '收起任务日志', 'aria-expanded': String(!job.collapsed), onclick: () => { job.collapsed = !job.collapsed; render(); } }, caret)
-        : h('button', { type: 'button', class: 'icon-btn push', 'aria-label': '关闭任务', onclick: () => { state.job = null; render(); } }, icon('x'))),
+      h('button', { type: 'button', class: `icon-btn${running && job.waiting ? '' : ' push'}`, 'aria-label': job.collapsed ? '展开任务日志' : '收起任务日志', 'aria-expanded': String(!job.collapsed), onclick: () => { job.collapsed = !job.collapsed; render(); } }, caret),
+      running ? null : h('button', { type: 'button', class: 'icon-btn', 'aria-label': '关闭任务', onclick: () => { state.job = null; render(); } }, icon('x'))),
     job.collapsed ? null : [
       steps.length ? h('ol', { class: 'steps' }, steps) : null,
       running && job.waiting ? h('div', { class: 'notice', role: 'status' },
