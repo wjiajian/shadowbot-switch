@@ -13,6 +13,7 @@ function Show-Help {
 ShadowBot Switch — 在项目根目录管理影刀 Copilot
 
   .\switch.ps1                         当前状态和菜单
+  .\switch.ps1 ui                      打开图形界面
   .\switch.ps1 use <harness>           安装 / 切换 harness（例如 use pi）
   .\switch.ps1 harnesses               查看已注册的 harness 和能力
   .\switch.ps1 use original            恢复影刀原版与原聊天记录
@@ -96,15 +97,16 @@ try {
         . (Join-Path $project 'scripts/harnesses.ps1')
         $registered = @(Get-HarnessRegistry $project)
         for ($i = 0; $i -lt $registered.Count; $i++) { Write-Host "$($i + 1) 切换 $($registered[$i].name)" }
-        Write-Host 'r 刷新配置  d 诊断  h 帮助  0 退出'
+        Write-Host 'r 刷新配置  d 诊断  u 图形界面  h 帮助  0 退出'
         $choice = Read-Host '选择操作'
         if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $registered.Count) { $arguments = @('use', $registered[[int]$choice - 1].id, '--wait') }
         elseif ($choice -eq '0') { return }
         # switch output is unrolled, so wrap it: a bare 'reload' would make $arguments[0] the letter 'r'.
-        else { $arguments = @(switch ($choice) { 'r' { 'reload' }; 'd' { 'doctor' }; default { 'help' } }) }
+        else { $arguments = @(switch ($choice) { 'r' { 'reload' }; 'd' { 'doctor' }; 'u' { 'ui' }; default { 'help' } }) }
     }
     $command = $arguments[0]
     if ($command -in 'help', '--help', '-h') { Show-Help; return }
+    if ($command -eq 'ui') { & (Join-Path $project 'ui.ps1'); return }
     if ($command -eq 'use') {
         if ($arguments.Count -lt 2) { throw '请使用 .\switch.ps1 use <harness>；harnesses 查看可用列表。' }
         Invoke-Selection 'use' @($arguments | Select-Object -Skip 2) $arguments[1]

@@ -82,6 +82,25 @@ flowchart LR
 
 所有操作都从 `switch.ps1` 进入，从其他目录用完整路径调用也可以。旧入口 `install.ps1 -Harness <harness>` 仍然可用，原版也可以用旧名 `opencode-origin`。
 
+## 图形界面
+
+不想记命令时，可以用图形界面管理 Skill、MCP 和 harness：
+
+```powershell
+.\ui.ps1                 # 或 .\switch.ps1 ui，菜单里按 u
+.\ui.ps1 -NoBrowser      # 不自动开窗口，只打印地址
+```
+
+界面用 Edge 应用窗口打开，没有 Edge 时用默认浏览器。不需要安装或编译任何东西，页面只是 `ui/` 下的三个静态文件。
+
+- **Harness**：安装、切换、更新，切换时显示进度和日志，等待影刀退出时可以停止。首次安装前可以修改影刀安装目录。
+- **Skills / MCP**：按范围查看、启用、停用、添加、移除；MCP 可以单独测试连接。
+- **诊断**：显示未通过的检查项，AGENTS.md 的问题可以直接打开文件。
+
+安装完成前只能使用 Harness 页面。关闭窗口后服务会自动退出；切换进行中时，会等切换结束再退出。
+
+界面服务只监听本机 `localhost` 的随机端口，每次启动生成新的访问凭证，只能执行白名单内的命令。页面不加载任何网络资源，可以离线使用。
+
 ## 日常命令
 
 ```powershell
@@ -92,6 +111,7 @@ flowchart LR
 .\switch.ps1 reload             # 同步 Skill 菜单，安排 MCP 配置刷新
 .\switch.ps1 status             # 后端、运行中的应用和配置生效状态
 .\switch.ps1 doctor             # 完整诊断，每个问题附修复提示
+.\switch.ps1 ui                 # 打开图形界面
 .\switch.ps1 help               # 完整命令帮助，未安装时也可用
 ```
 
@@ -245,6 +265,7 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 
 ```text
 switch.ps1 / install.ps1   命令入口与安装流程
+ui.ps1 / ui/               图形界面入口与静态页面（服务在 scripts/ui-server.ps1）
 scripts/                   工具链、发现、激活、进程等 PowerShell 模块
 launcher/                  Go 兼容启动器（替换 opencode.exe）
 src/                       公共管理层与影刀兼容服务（TypeScript）

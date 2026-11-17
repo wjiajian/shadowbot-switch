@@ -9,7 +9,9 @@ function Resolve-ShadowBotDirectories([string[]]$Candidates) {
     }
 }
 
-function Find-ShadowBotDirectory([string]$ManifestPath) {
+# Every directory that looks like a ShadowBot installation, without asking anything.
+# The recorded installation wins; the registry comes before Start menu shortcuts.
+function Get-ShadowBotDirectoryCandidates([string]$ManifestPath) {
     if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
         $previous = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
         if ($previous.agentPath) {
@@ -52,6 +54,11 @@ function Find-ShadowBotDirectory([string]$ManifestPath) {
             }
         }
     }
+    $directories
+}
+
+function Find-ShadowBotDirectory([string]$ManifestPath) {
+    $directories = @(Get-ShadowBotDirectoryCandidates $ManifestPath)
     if ($directories.Count -gt 1) {
         if ([Console]::IsInputRedirected) { throw "找到多个影刀安装：$($directories -join ', ')。使用 --shadowbot-dir 指定路径。" }
         for ($i = 0; $i -lt $directories.Count; $i++) {
