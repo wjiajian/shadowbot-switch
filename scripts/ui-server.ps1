@@ -2,6 +2,7 @@
 # The page only reaches whitelisted management commands, always with explicit arguments.
 . (Join-Path $PSScriptRoot 'harnesses.ps1')
 . (Join-Path $PSScriptRoot 'discovery.ps1')
+. (Join-Path $PSScriptRoot 'processes.ps1')
 
 $script:UiSkillPattern = '^[a-z0-9]+(?:-[a-z0-9]+)*$'   # same rule as management.ts
 $script:UiMcpPattern = '^[A-Za-z0-9_-]{1,64}$'          # same rule as mcp-config.ts
@@ -256,12 +257,15 @@ function Start-UiJob($Request) {
     $encoded = New-UiEncodedCommand (Join-Path $script:Ui.Project 'switch.ps1') $arguments
     $shell = (Get-Process -Id $PID).Path
     $info = New-UiProcessInfo $shell @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded)
-    $process = [Diagnostics.Process]::Start($info)
+    $waitControl = Open-SwitchWaitControl "Local\ShadowBotSwitch-Wait-$([Guid]::NewGuid())" -Create
+    $info.Environment['SHADOWBOT_SWITCH_WAIT_CONTROL'] = $waitControl.Name
+    try { $process = [Diagnostics.Process]::Start($info) }
+    catch { Close-SwitchWaitControl $waitControl; throw }
     $process.StandardInput.Close()
     $script:Ui.JobCount++
     $script:Ui.Job = @{
         Id = $script:Ui.JobCount; Cmd = [string]$Request.cmd; Harness = [string]$Request.harness
-        Process = $process; Lines = [Collections.Generic.List[string]]::new()
+        Process = $process; WaitControl = $waitControl; Lines = [Collections.Generic.List[string]]::new()
         Out = $process.StandardOutput.ReadLineAsync(); Err = $process.StandardError.ReadLineAsync()
         Done = $false; ExitCode = $null; Stopped = $false; Started = [DateTime]::UtcNow; ExitedAt = $null
     }
@@ -286,16 +290,20 @@ function Update-UiJob($Job) {
         # A process the task left running can hold the pipes open; stop waiting shortly after exit.
         if ((!$Job.Out -and !$Job.Err) -or ([DateTime]::UtcNow - $Job.ExitedAt).TotalSeconds -gt 3) {
             $Job.ExitCode = $Job.Process.ExitCode
+            $Job.Stopped = $Job.WaitControl.Stopped.WaitOne(0)
             $Job.Done = $true
+            Close-SwitchWaitControl $Job.WaitControl
             $Job.Process.Dispose()
         }
     }
 }
 
 function Stop-UiJob($Job) {
-    if (!$Job -or $Job.Done) { return }
-    $Job.Stopped = $true
-    try { $Job.Process.Kill($true) } catch { }
+    if (!$Job -or $Job.Done -or !$Job.WaitControl.Waiting.WaitOne(0)) { return $false }
+    # This is only a request. A late request is harmless: the child acknowledges
+    # it only inside the initial wait, never after installation changes begin.
+    [void]$Job.WaitControl.Cancel.Set()
+    return $true
 }
 
 function Get-UiJobProgress($Request) {
@@ -308,6 +316,7 @@ function Get-UiJobProgress($Request) {
         lines = @($job.Lines.GetRange($since, $job.Lines.Count - $since))
         cursor = $job.Lines.Count
         done = $job.Done; exitCode = $job.ExitCode; stopped = $job.Stopped
+        waiting = !$job.Done -and $job.WaitControl.Waiting.WaitOne(0)
         elapsed = [int]([DateTime]::UtcNow - $job.Started).TotalSeconds
     }
 }
@@ -365,8 +374,8 @@ function Invoke-UiApi([string]$Path, $Request) {
         '/api/jobs/start' { return @{ id = Start-UiJob $Request } }
         '/api/jobs/poll' { return Get-UiJobProgress $Request }
         '/api/jobs/stop' {
-            if ($script:Ui.Job -and $script:Ui.Job.Id -eq [int]$Request.id) { Stop-UiJob $script:Ui.Job }
-            return @{ ok = $true }
+            if (!$script:Ui.Job -or $script:Ui.Job.Id -ne [int]$Request.id) { throw '找不到这个任务，界面服务可能已经重启。' }
+            return @{ accepted = Stop-UiJob $script:Ui.Job }
         }
         '/api/pick-folder' { return @{ path = Select-UiFolder } }
         '/api/skill-preview' { return @{ name = Get-UiSkillPreview $Request.path } }

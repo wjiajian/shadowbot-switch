@@ -100,11 +100,95 @@ try {
     Assert-Throws { Invoke-UiApi '/api/run' @{ cmd = 'skills.list' } } '安装尚未就绪' 'Management commands need the installed control program.'
     Assert-Throws { Invoke-UiApi '/api/nope' @{} } '找不到' 'Unknown endpoints must be refused.'
 
+    # Real child processes exercise cancellation without touching ShadowBot.
+    $jobProject = Join-Path $root 'jobs'
+    New-Item -ItemType Directory -Path $jobProject | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repository 'harnesses') -Destination $jobProject -Recurse
+    Copy-Item -LiteralPath (Join-Path $repository 'scripts/processes.ps1') -Destination $jobProject
+    Set-Content -LiteralPath (Join-Path $jobProject 'switch.ps1') -Encoding utf8 -Value @'
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'processes.ps1')
+function Get-SwitchProcesses {
+    if (Test-Path (Join-Path $PSScriptRoot 'running')) {
+        return [pscustomobject]@{ Id = 123; ProcessName = 'fixture'; Path = 'fixture.exe' }
+    }
+    # Pause after the last process snapshot, before the waiting flag resets.
+    if (Test-Path (Join-Path $PSScriptRoot 'race')) {
+        Set-Content (Join-Path $PSScriptRoot 'snapshot') 'ready'
+        while (!(Test-Path (Join-Path $PSScriptRoot 'release'))) { Start-Sleep -Milliseconds 20 }
+    }
+}
+try {
+    $timeout = if (Test-Path (Join-Path $PSScriptRoot 'timeout')) { 1 } else { 15 }
+    Wait-SwitchProcesses -Wait -TimeoutSeconds $timeout
+    Set-Content (Join-Path $PSScriptRoot 'changed') 'mutation started'
+    if (Test-Path (Join-Path $PSScriptRoot 'second')) {
+        Set-Content (Join-Path $PSScriptRoot 'running') 'busy again'
+        Wait-SwitchProcesses -Wait -TimeoutSeconds 15
+    }
+    while (!(Test-Path (Join-Path $PSScriptRoot 'finish'))) { Start-Sleep -Milliseconds 20 }
+    exit 0
+} catch { Write-Host $_.Exception.Message; exit 1 }
+'@
+    function Wait-TestJob([scriptblock]$Condition) {
+        $deadline = [DateTime]::UtcNow.AddSeconds(20)
+        while ($true) {
+            Update-UiJob $script:Ui.Job
+            if (& $Condition) { return }
+            if ([DateTime]::UtcNow -gt $deadline) { throw "Timed out waiting for fixture job: $($script:Ui.Job.Lines -join ' ')" }
+            Start-Sleep -Milliseconds 30
+        }
+    }
+    function Start-TestJob([string[]]$Flags, [string]$Command = 'use') {
+        foreach ($name in 'running', 'race', 'snapshot', 'release', 'changed', 'finish', 'timeout', 'second') {
+            $path = Join-Path $jobProject $name
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
+        }
+        foreach ($name in $Flags) { Set-Content -LiteralPath (Join-Path $jobProject $name) 'fixture' }
+        [void](Start-UiJob @{ cmd = $Command; harness = 'original' })
+    }
+    $script:Ui.Project = $jobProject
+    Start-TestJob @('running')
+    Wait-TestJob { (Get-UiJobProgress @{ id = $script:Ui.Job.Id }).waiting }
+    if (!(Invoke-UiApi '/api/jobs/stop' @{ id = $script:Ui.Job.Id }).accepted) { throw 'A waiting job must accept cancellation.' }
+    Wait-TestJob { $script:Ui.Job.Done }
+    $progress = Get-UiJobProgress @{ id = $script:Ui.Job.Id }
+    if (!$progress.stopped -or $progress.waiting -or $progress.exitCode -eq 0 -or (Test-Path (Join-Path $jobProject 'changed'))) { throw 'Cancellation must be acknowledged before any mutation.' }
+
+    # A cancellation racing with the final process snapshot must not kill the job.
+    Start-TestJob @('running', 'race')
+    Wait-TestJob { (Get-UiJobProgress @{ id = $script:Ui.Job.Id }).waiting }
+    Remove-Item -LiteralPath (Join-Path $jobProject 'running')
+    Wait-TestJob { Test-Path (Join-Path $jobProject 'snapshot') }
+    if (!(Stop-UiJob $script:Ui.Job)) { throw 'Race fixture must still advertise waiting.' }
+    Set-Content (Join-Path $jobProject 'release') 'continue'
+    Wait-TestJob { Test-Path (Join-Path $jobProject 'changed') }
+    $progress = Get-UiJobProgress @{ id = $script:Ui.Job.Id }
+    if ($progress.waiting -or $progress.stopped -or (Stop-UiJob $script:Ui.Job)) { throw 'A late stop must not cancel a mutation or claim it stopped.' }
+    Set-Content (Join-Path $jobProject 'finish') 'continue'
+    Wait-TestJob { $script:Ui.Job.Done }
+    if ($script:Ui.Job.Stopped -or $script:Ui.Job.ExitCode -ne 0) { throw 'A late cancellation must leave the job running to completion.' }
+
+    # Repair waits again after changing the locator; that wait cannot be cancelled.
+    Start-TestJob @('second') 'repair'
+    Wait-TestJob { Test-Path (Join-Path $jobProject 'running') }
+    if ((Get-UiJobProgress @{ id = $script:Ui.Job.Id }).waiting -or (Stop-UiJob $script:Ui.Job)) { throw 'A second wait after mutation must refuse cancellation.' }
+    [void]$script:Ui.Job.WaitControl.Cancel.Set()
+    Remove-Item -LiteralPath (Join-Path $jobProject 'running')
+    Set-Content (Join-Path $jobProject 'finish') 'continue'
+    Wait-TestJob { $script:Ui.Job.Done }
+    if ($script:Ui.Job.Stopped -or $script:Ui.Job.ExitCode -ne 0) { throw 'Repair must ignore late requests in subsequent waits.' }
+
+    Start-TestJob @('running', 'timeout')
+    Wait-TestJob { $script:Ui.Job.Done }
+    if ($script:Ui.Job.Stopped -or $script:Ui.Job.ExitCode -eq 0 -or (Test-Path (Join-Path $jobProject 'changed'))) { throw 'Timeout must fail without claiming cancellation or mutating.' }
+    $script:Ui.Project = $repository
+
     # The real server: token required, static files carry CSP, and bye lets it exit.
     $project = Join-Path $root 'project'
     New-Item -ItemType Directory -Path (Join-Path $project 'scripts') | Out-Null
     foreach ($name in @('ui.ps1', 'ui', 'harnesses')) { Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $project -Recurse }
-    foreach ($name in @('ui-server.ps1', 'harnesses.ps1', 'discovery.ps1')) { Copy-Item -LiteralPath (Join-Path $repository "scripts/$name") -Destination (Join-Path $project 'scripts') }
+    foreach ($name in @('ui-server.ps1', 'harnesses.ps1', 'discovery.ps1', 'processes.ps1')) { Copy-Item -LiteralPath (Join-Path $repository "scripts/$name") -Destination (Join-Path $project 'scripts') }
     $log = Join-Path $root 'server.log'
     $server = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoProfile', '-File', (Join-Path $project 'ui.ps1'), '-NoBrowser') -RedirectStandardOutput $log -PassThru -NoNewWindow
     $url = $null
@@ -130,6 +214,9 @@ try {
     if (!$server.WaitForExit(15000)) { throw 'The server did not exit after the page said goodbye.' }
     $server = $null
 } finally {
+    if ($script:Ui.Job -and !$script:Ui.Job.Done) { try { $script:Ui.Job.Process.Kill($true); $script:Ui.Job.Process.Dispose(); Close-SwitchWaitControl $script:Ui.Job.WaitControl } catch { } }
     if ($server -and !$server.HasExited) { try { $server.Kill($true) } catch { } }
-    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    $resolved = (Resolve-Path -LiteralPath $root).Path
+    if ((Split-Path $resolved) -ne $base -or !(Split-Path -Leaf $resolved).StartsWith('shadowbot-ui-')) { throw 'Unexpected test path.' }
+    Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
 }

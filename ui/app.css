@@ -243,6 +243,7 @@ dialog::backdrop { background: rgba(27, 31, 36, 0.32); }
 .dialog-head .icon-btn { margin-left: auto; }
 .form { display: flex; flex-direction: column; gap: 16px; }
 .form-row { display: flex; flex-direction: column; gap: 8px; }
+.form-row[hidden] { display: none; }
 .form-row > label, .form-label { color: var(--text-2); }
 .inline { display: flex; gap: 8px; }
 .inline .field { flex: 1; min-width: 0; }

@@ -421,10 +421,9 @@ function absorbLine(job, line) {
   job.lines.push(line);
   const wait = /正在等待影刀退出（最多 (\d+) 秒）/.exec(line);
   if (wait) {
-    job.waiting = true;
     job.waitStartedAt = Date.now();
     job.waitSeconds = Number(wait[1]);
-  } else if (/检查安装|切换后端|启用新版本|已切换到|已更新|修复完成/.test(line)) job.waiting = false;
+  }
   job.steps.forEach((step, index) => { if (step.match.test(line)) job.reached = Math.max(job.reached, index); });
 }
 
@@ -438,6 +437,7 @@ async function pollJob() {
     if (job.cursor === 0) job.startedAt = Date.now() - progress.elapsed * 1000;
     for (const line of progress.lines) absorbLine(job, line);
     job.cursor = progress.cursor;
+    job.waiting = progress.waiting;
     job.pollError = null;
     if (progress.done) {
       job.done = true;
@@ -473,7 +473,11 @@ function stopJob() {
   const job = state.job;
   if (!job) return;
   withBusy('stop', async () => {
-    try { await api('/api/jobs/stop', { id: job.id }); } catch (error) { toast(error.message, 'error'); }
+    try {
+      const result = await api('/api/jobs/stop', { id: job.id });
+      if (!result.accepted) toast('等待已结束，当前任务会继续执行。');
+      await pollJob();
+    } catch (error) { toast(error.message, 'error'); }
   });
 }
 
