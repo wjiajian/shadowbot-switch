@@ -89,6 +89,7 @@ function Build-Bridge($Project, $Toolchain, [switch]$SkipTests) {
             & ./test/activation.test.ps1
             & ./test/experience.test.ps1
             & ./test/harnesses.test.ps1
+            & ./test/ui.test.ps1
         }
     } finally {
         foreach ($name in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process') }
