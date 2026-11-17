@@ -246,6 +246,12 @@ export class Runs {
     for (const part of parts) this.store.event(session.id, 'message.part.updated', { part, time: Date.now() });
     this.store.event(session.id, 'message.updated', { info: response });
     this.store.event(session.id, 'message.part.updated', { part: replyPart, time: Date.now() });
+    // The host waits for lifecycle events even when a local command replies immediately.
+    // A query during generation must leave the active turn's status untouched.
+    if (!busy) {
+      this.store.event(session.id, 'session.status', { sessionID: session.id, status: { type: 'idle' } });
+      this.store.event(session.id, 'session.idle', { sessionID: session.id });
+    }
     return { info: response, parts: [replyPart] };
   }
 

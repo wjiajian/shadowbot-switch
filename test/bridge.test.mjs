@@ -903,6 +903,55 @@ test('ShadowBot rollback accepts assistant targets and repeated removal of a tur
   }
 });
 
+test('thinking commands finish the host task without ending an active generation', { timeout: 60_000 }, async () => {
+  const fixture = tempFixture();
+  const held = Promise.withResolvers();
+  const entered = Promise.withResolvers();
+  const model = modelFixture({ beforeReply: async () => { entered.resolve(); await held.promise; } });
+  const modelURL = await listen(model.server);
+  let bridge;
+  let events;
+  try {
+    bridge = await start(fixture, { model: 'fixture/model', provider: { fixture: {
+      npm: '@ai-sdk/openai-compatible', options: { baseURL: modelURL }, models: { model: { reasoning: true } },
+    } } });
+    const session = await get(bridge.api('/session', { method: 'POST', data: {} }));
+    const path = `/session/${session.id}`;
+    events = await stream(bridge.api);
+    await events.until(event => event.type === 'server.connected');
+    for (const text of ['/thinking', '/thinking high', '/thinking bananas']) {
+      const offset = events.history.length;
+      await get(bridge.api(`${path}/prompt_async`, { method: 'POST', data: { parts: [{ type: 'text', text }] } }), 204);
+      await events.until(event => event.type === 'session.idle' && event.properties.sessionID === session.id);
+      const turn = events.history.slice(offset);
+      assert.deepEqual(turn.slice(-2).map(event => event.type), ['session.status', 'session.idle']);
+      assert.equal(turn.at(-2).properties.status.type, 'idle');
+      assert.ok(turn.some(event => event.type === 'message.part.updated' && event.properties.part.text.includes('思考档位')));
+    }
+    assert.equal(model.requests.length, 0);
+    const pending = get(bridge.api(`${path}/message`, { method: 'POST', data: { parts: [{ type: 'text', text: 'hold' }] } }));
+    await entered.promise;
+    await events.until(event => event.type === 'session.status' && event.properties.status.type === 'busy');
+    const offset = events.history.length;
+    const query = await get(bridge.api(`${path}/command`, { method: 'POST', data: { command: 'thinking' } }));
+    held.resolve();
+    await pending;
+    await events.until(event => event.type === 'session.idle');
+    const turn = events.history.slice(offset);
+    assert.ok(turn.some(event => event.type === 'message.updated' && event.properties.info.id === query.info.id));
+    assert.equal(turn.filter(event => event.type === 'session.idle').length, 1);
+    assert.equal(turn.filter(event => event.type === 'session.status' && event.properties.status.type === 'idle').length, 1);
+    assert.ok(turn.some(event => event.type === 'message.part.updated' && event.properties.part.text === 'Pi fixture reply'));
+  } finally {
+    held.resolve();
+    await events?.close().catch(() => undefined);
+    await bridge?.stop();
+    model.server.closeAllConnections();
+    await new Promise(resolve => model.server.close(resolve));
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('thinking commands persist per session and control actual requests', { timeout: 60_000 }, async () => {
   const fixture = tempFixture();
   const held = Promise.withResolvers();
