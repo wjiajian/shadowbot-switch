@@ -7,19 +7,31 @@ function Remove-ProjectStage($State, $Path) {
     Remove-Item -LiteralPath $target -Recurse -Force
 }
 
-function New-RuntimeRelease($Project, $State, $Toolchain, $Spec, $Installed, $HostInstallation) {
+function Get-RuntimeVersion($Project, $Spec) {
     $adapterPackage = Join-Path $project "harnesses/$($Spec.id)/package.json"
     $adapterVersion = if ($Spec.versionPackage) { (Get-Content -LiteralPath $adapterPackage -Raw | ConvertFrom-Json -AsHashtable).dependencies[$Spec.versionPackage] } else { $Spec.version }
     if (!$adapterVersion) { throw 'Harness version is missing.' }
+    $adapterVersion
+}
+
+# Shared by installation and the read-only UI comparison. Never downloads or builds.
+function Get-RuntimeReleaseId($Project, $Spec, $NodeHash, $AdapterVersion) {
     $skillSources = Join-Path $project 'skills'
     $inputs = @((Get-ChildItem -File -Recurse -LiteralPath @(
         (Join-Path $project 'launcher'), (Join-Path $project 'src'), (Join-Path $project 'harnesses'), (Join-Path $project 'scripts'), $skillSources
     ) | Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' }).FullName)
     $inputs += @('package.json', 'package-lock.json', 'go.mod', 'go.sum', 'tsconfig.json', 'contract/schema.sql', 'scripts/toolchain.ps1', 'install.ps1' | ForEach-Object { Join-Path $project $_ })
-    $fingerprint = @($Toolchain.nodeHash, $Spec.id, $adapterVersion) + @(foreach ($path in ($inputs | Sort-Object)) {
+    $fingerprint = @($NodeHash, $Spec.id, $AdapterVersion) + @(foreach ($path in ($inputs | Sort-Object)) {
         "$([IO.Path]::GetRelativePath($project, $path)) $((Get-FileHash -LiteralPath $path).Hash)"
     })
-    $id = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($fingerprint -join "`n")))).ToLowerInvariant()
+    [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($fingerprint -join "`n")))).ToLowerInvariant()
+}
+
+function New-RuntimeRelease($Project, $State, $Toolchain, $Spec, $Installed, $HostInstallation) {
+    $adapterPackage = Join-Path $project "harnesses/$($Spec.id)/package.json"
+    $adapterVersion = Get-RuntimeVersion $Project $Spec
+    $skillSources = Join-Path $project 'skills'
+    $id = Get-RuntimeReleaseId $Project $Spec $Toolchain.nodeHash $adapterVersion
     $release = Get-ReleasePath $state $id '' $Spec.id
     if (!(Test-Path -LiteralPath $release)) {
         Build-Bridge $project $Toolchain -SkipTests

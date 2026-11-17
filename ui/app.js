@@ -495,8 +495,9 @@ function scopeSelect() {
   if (state.scope && !options.some(([value]) => value === state.scope)) options.push([state.scope, state.scope]);
   return h('label', { class: 'scope' },
     h('span', null, '范围'),
-    h('select', { class: 'field', id: 'scope', value: state.scope, onchange: event => changeScope(event.target.value) },
-      options.map(([value, label]) => h('option', { value }, label))));
+    h('span', { class: 'select-field' },
+      h('select', { class: 'field', id: 'scope', value: state.scope, onchange: event => changeScope(event.target.value) },
+        options.map(([value, label]) => h('option', { value }, label))), icon('caret', 16)));
 }
 
 function toggleButton({ id, pressed, label, disabled, title, onclick }) {
@@ -587,21 +588,36 @@ function harnessColumn(spec) {
   let badge = null;
   if (mine) badge = h('span', { class: 'harness-state accent' }, job.verb);
   else if (spec.selected) badge = h('span', { class: 'harness-state ok' }, '正在使用');
-  let action = null;
-  if (spec.selected && spec.kind === 'managed') action = button('更新', 'btn-secondary', () => startJob('update', spec.id), { disabled: Boolean(job) });
-  else if (!spec.selected) {
+  else badge = h('span', { class: 'harness-state muted' }, spec.installed ? '未使用' : '未安装');
+  const actions = [];
+  if (!spec.selected) {
     const host = state.base.shadowbot;
     const needsHost = !state.base.installed && !(host.directory && host.version);
-    action = button(spec.installed ? '切换到此' : '安装并切换', 'btn-primary', () => startJob('use', spec.id),
-      { disabled: Boolean(job) || Boolean(state.base.problem) || needsHost, title: needsHost ? '先在下方填写影刀安装目录' : null });
+    actions.push(button(spec.installed ? '切换到此' : '安装并切换', 'btn-primary', () => startJob('use', spec.id),
+      { disabled: Boolean(job) || Boolean(state.base.problem) || needsHost, title: needsHost ? '先在下方填写影刀安装目录' : null }));
   }
+  if (spec.installed && spec.kind === 'managed') {
+    actions.push(button(spec.updateStatus === 'current' ? '重新应用本地版本' : '应用本地更新', 'btn-secondary', () => startJob('update', spec.id),
+      { disabled: Boolean(job) || Boolean(state.base.problem) || !spec.availableVersion }));
+  }
+  const status = {
+    current: ['与本地一致，无需更新', 'ok'],
+    different: ['本地内容有变化，可应用更新', 'accent'],
+    unknown: ['无法判断是否需要更新', 'warn'],
+    'not-installed': ['安装后即可使用', 'muted'],
+    bundled: ['随影刀更新，无需单独更新', 'muted'],
+  }[spec.updateStatus] || ['无法判断是否需要更新', 'warn'];
   return h('article', { class: 'harness' },
     h('div', { class: 'harness-head' },
       h('h2', null, spec.name),
-      h('span', { class: 'muted' }, spec.version || (spec.kind === 'managed' ? '未安装' : '')),
       badge),
+    h('div', { class: 'harness-versions' },
+      h('div', null, h('span', { class: 'muted' }, spec.kind === 'bundled' ? '随影刀提供' : '已安装'), h('span', null, spec.version || '未安装')),
+      spec.kind === 'managed' ? h('div', null, h('span', { class: 'muted' }, '本地可用'), h('span', null, spec.availableVersion || '无法读取')) : null),
     h('div', { class: `caps${spec.skills || spec.mcp ? '' : ' muted'}` }, capability('Skill', spec.skills), capability('MCP', spec.mcp)),
-    action ? h('div', { class: 'actions' }, action) : null);
+    h('div', { class: 'harness-footer' },
+      h('p', { class: status[1] }, status[0]),
+      actions.length ? h('div', { class: 'actions' }, actions) : null));
 }
 
 function taskSection() {
@@ -815,7 +831,7 @@ function mcpPage() {
   let body;
   if (box.error) body = problemBlock(box.error, loadMcp);
   else if (box.rows && !box.rows.length) {
-    body = emptyState('plug', '还没有配置 MCP', '添加后，Pi 就能调用它提供的工具。', [
+    body = emptyState('plug', '还没有配置 MCP', '添加后，支持 MCP 的 Harness 就能调用它提供的工具。', [
       h('button', { type: 'button', class: 'btn btn-primary', disabled: jobRunning(), onclick: openMcpDialog }, icon('plus', 16), h('span', null, '添加 MCP')),
       button('编辑 mcp.json', 'btn-secondary', () => openConfig('mcp'), { disabled: isBusy('config:mcp') }),
     ]);

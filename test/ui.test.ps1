@@ -97,6 +97,33 @@ try {
     $pi = @($view.harnesses | Where-Object id -eq 'pi')[0]
     if (!$view.installed -or $view.ready -or $view.selected -cne 'pi' -or !$pi.selected -or $pi.version -cne '1.5.2' -or !$view.recoveryPending) { throw 'State after installation is wrong.' }
     if ($view.shadowbot.directory -cne $shadowbotHome) { throw 'The install record must decide the ShadowBot directory.' }
+    if ($pi.availableVersion -cne (Get-RuntimeVersion $repository (Get-Harness $repository 'pi')) -or $pi.updateStatus -cne 'unknown') { throw 'Missing release metadata must not claim the runtime is current.' }
+
+    # Compare the exact build inputs, including changes with no SDK version bump.
+    $comparisonProject = Join-Path $root 'comparison'
+    New-Item -ItemType Directory -Path $comparisonProject | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repository 'harnesses') -Destination $comparisonProject -Recurse
+    foreach ($directory in 'launcher', 'src', 'scripts', 'skills', 'contract') {
+        New-Item -ItemType Directory -Path (Join-Path $comparisonProject $directory) | Out-Null
+    }
+    foreach ($file in 'package.json', 'package-lock.json', 'go.mod', 'go.sum', 'tsconfig.json', 'contract/schema.sql', 'scripts/toolchain.ps1', 'install.ps1', 'src/fixture.ts') {
+        Set-Content -LiteralPath (Join-Path $comparisonProject $file) -Value 'fixture'
+    }
+    $spec = Get-Harness $comparisonProject 'pi'
+    $localVersion = Get-RuntimeVersion $comparisonProject $spec
+    $localRelease = Get-RuntimeReleaseId $comparisonProject $spec (Get-ToolchainNodeHash) $localVersion
+    $comparisonInstall = @{ harnesses = @{ pi = @{ version = $localVersion; release = $localRelease } } }
+    $comparisonInstall | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $state 'install.json')
+    $script:Ui.Project = $comparisonProject
+    $view = Get-UiState @{}
+    if (($view.harnesses | Where-Object id -eq 'pi').updateStatus -cne 'current') { throw 'Matching build inputs must report current.' }
+    if (($view.harnesses | Where-Object id -eq 'original').updateStatus -cne 'bundled') { throw 'Bundled harness updates belong to ShadowBot.' }
+    Set-Content -LiteralPath (Join-Path $comparisonProject 'src/fixture.ts') -Value 'changed adapter'
+    $pi = (Get-UiState @{}).harnesses | Where-Object id -eq 'pi'
+    if ($pi.updateStatus -cne 'different' -or $pi.version -cne $pi.availableVersion) { throw 'Adapter-only changes must be visible even at the same version.' }
+    Remove-Item -LiteralPath (Join-Path $comparisonProject 'harnesses/pi/package.json')
+    if (((Get-UiState @{}).harnesses | Where-Object id -eq 'pi').updateStatus -cne 'unknown') { throw 'Unreadable local metadata must report unknown.' }
+    $script:Ui.Project = $repository
     Assert-Throws { Invoke-UiApi '/api/run' @{ cmd = 'skills.list' } } '安装尚未就绪' 'Management commands need the installed control program.'
     Assert-Throws { Invoke-UiApi '/api/nope' @{} } '找不到' 'Unknown endpoints must be refused.'
 
@@ -188,7 +215,7 @@ try {
     $project = Join-Path $root 'project'
     New-Item -ItemType Directory -Path (Join-Path $project 'scripts') | Out-Null
     foreach ($name in @('ui.ps1', 'ui', 'harnesses')) { Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $project -Recurse }
-    foreach ($name in @('ui-server.ps1', 'harnesses.ps1', 'discovery.ps1', 'processes.ps1')) { Copy-Item -LiteralPath (Join-Path $repository "scripts/$name") -Destination (Join-Path $project 'scripts') }
+    foreach ($name in @('ui-server.ps1', 'harnesses.ps1', 'discovery.ps1', 'processes.ps1', 'runtime.ps1', 'toolchain.ps1')) { Copy-Item -LiteralPath (Join-Path $repository "scripts/$name") -Destination (Join-Path $project 'scripts') }
     $log = Join-Path $root 'server.log'
     $server = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoProfile', '-File', (Join-Path $project 'ui.ps1'), '-NoBrowser') -RedirectStandardOutput $log -PassThru -NoNewWindow
     $url = $null

@@ -12,12 +12,16 @@ function Get-ToolchainFile($Uri, $Path, $Hash, $Algorithm = 'SHA256') {
     }
 }
 
+function Get-ToolchainNodeHash {
+    '86FC4785327DB5F5C7558DC6156C543B433C313E813A222E088086222AB4AFA6'
+}
+
 function Initialize-Toolchain($Project) {
     $tools = Join-Path $Project '.tools'
     $nodeDirectory = Join-Path $tools 'node'
     New-Item -ItemType Directory -Force -Path $nodeDirectory | Out-Null
     $node = Join-Path $nodeDirectory 'node.exe'
-    $nodeHash = '86FC4785327DB5F5C7558DC6156C543B433C313E813A222E088086222AB4AFA6'
+    $nodeHash = Get-ToolchainNodeHash
     Get-ToolchainFile 'https://nodejs.org/dist/v24.22.3/win-x64/node.exe' $node $nodeHash
 
     $npm = Join-Path $tools 'npm-11.17.0/bin/npm-cli.js'

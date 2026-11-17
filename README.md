@@ -14,19 +14,19 @@
 
 </div>
 
-ShadowBot Switch 接管影刀 Copilot 背后的 agent 进程，让你在不同 harness（执行引擎）之间切换，同时保留影刀原有的聊天面板、模型设置、工具授权和会话展示。每个 harness 有独立的运行时和聊天记录，切换时互不覆盖。
+ShadowBot Switch 接管影刀 Copilot 背后的 agent 进程，让你在不同 harness 之间切换，同时保留影刀原有的聊天面板、模型设置、工具授权和会话展示。每个 harness 有独立的运行时和聊天记录，切换时互不覆盖。
 
 目前可选两个 harness：
 
 | ID | 名称 | 类型 | Skills / 自定义 MCP |
 | --- | --- | --- | --- |
-| `pi` | Pi | 托管（由本项目构建） | 支持 |
-| `original` | 影刀原版 OpenCode | 随影刀附带 | 不支持（可离线管理配置） |
+| `pi` | Pi | 托管 | 支持 |
+| `original` | 影刀原版 OpenCode | 随影刀附带 | 不支持 |
 
 ## 功能
 
 - `use <harness>` 一条命令切换，每个 harness 恢复自己的聊天记录，不动业务项目文件。
-- 兼容 OpenCode 1.18.12 的 HTTP/SSE 接口，影刀的面板、授权弹窗、工具卡片照常使用。
+- 兼容 OpenCode 的 HTTP/SSE 接口，影刀的面板、授权弹窗、工具卡片照常使用。
 - Skills 分安装级和应用级两层目录，同名时应用级优先，安装级 Skill 自动同步到原生 `/` 菜单。
 - 自定义 MCP 支持 stdio 和 Streamable HTTP，保存配置后在下一次空闲请求时自动生效。
 - 首次运行自动下载并校验 Node、npm、Go，无需自己安装开发工具，所有依赖锁定版本。
@@ -45,7 +45,7 @@ flowchart LR
     L -->|original| O[备份的原版 opencode.exe]
 ```
 
-安装时，Go 编写的启动器替换影刀目录中的 `opencode.exe`，原程序连同 SHA-256 校验一起备份。影刀启动 agent 时，启动器按当前选择转发到兼容服务或原版程序，并用 Windows Job Object 管理子进程，避免退出后残留。
+安装时，Go 编写的启动器替换影刀目录中的 `opencode.exe`，原程序备份。影刀启动 agent 时，启动器按当前选择转发到兼容服务或原版程序，并用 Windows Job Object 管理子进程，避免退出后残留。
 
 ## 开始使用
 
@@ -53,11 +53,11 @@ flowchart LR
 
 - Windows x64
 - [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)
-- 影刀 **6.3.39**（随附 OpenCode **1.18.12**）
+- 影刀 **6.3.39**
 - 首次安装需要联网
 
 > [!IMPORTANT]
-> 启动器只接管已验证的影刀版本，会校验原版 `opencode.exe` 的哈希。影刀升级后，需等本项目完成兼容验证再切换。
+> 启动器只接管已验证的影刀版本，会校验原版 `opencode.exe`。影刀升级后，需等本项目完成兼容验证再切换。
 
 ### 安装并切换
 
@@ -91,15 +91,9 @@ flowchart LR
 .\ui.ps1 -NoBrowser      # 不自动开窗口，只打印地址
 ```
 
-界面用 Edge 应用窗口打开，没有 Edge 时用默认浏览器。不需要安装或编译任何东西，页面只是 `ui/` 下的三个静态文件。
-
 - **Harness**：安装、切换、更新，切换时显示进度和日志，等待影刀退出时可以停止。首次安装前可以修改影刀安装目录。
 - **Skills / MCP**：按范围查看、启用、停用、添加、移除；MCP 可以单独测试连接。
 - **诊断**：显示未通过的检查项，AGENTS.md 的问题可以直接打开文件。
-
-安装完成前只能使用 Harness 页面。关闭窗口后服务会自动退出；切换进行中时，会等切换结束再退出。
-
-界面服务只监听本机 `localhost` 的随机端口，每次启动生成新的访问凭证，只能执行白名单内的命令。页面不加载任何网络资源，可以离线使用。
 
 ## 日常命令
 
@@ -208,7 +202,7 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 
 示例：[examples/mcp.json](examples/mcp.json) · [examples/shadowbot.json](examples/shadowbot.json)
 
-## Agent 规则（AGENTS.md）
+## AGENTS.md
 
 托管 harness（目前为 Pi）会自动加载两层规则，影刀原版 OpenCode 不使用：
 
@@ -276,10 +270,3 @@ test/                      Node、Go、PowerShell 测试及测试用适配器
 ```
 
 想接入新的 harness，参见 [Harness 接入约定](contract/README.md#harness-接入约定)。`test/fixtures/harness/` 中的测试适配器只在隔离测试中注册，可作为参考。
-
-### 相关文档
-
-- [兼容契约](contract/README.md)：OpenCode 1.18.12 接口、会话库与录制样本
-- [实施计划](archive-docs/PLAN.md)：架构边界与 Pi 适配器实施记录
-- [使用体验验收](archive-docs/EXPERIENCE-PLAN.md)
-- [验证记录](archive-docs/TEST-REPORT.md)

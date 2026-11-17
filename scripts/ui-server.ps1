@@ -3,6 +3,8 @@
 . (Join-Path $PSScriptRoot 'harnesses.ps1')
 . (Join-Path $PSScriptRoot 'discovery.ps1')
 . (Join-Path $PSScriptRoot 'processes.ps1')
+. (Join-Path $PSScriptRoot 'runtime.ps1')
+. (Join-Path $PSScriptRoot 'toolchain.ps1')
 
 $script:UiSkillPattern = '^[a-z0-9]+(?:-[a-z0-9]+)*$'   # same rule as management.ts
 $script:UiMcpPattern = '^[A-Za-z0-9_-]{1,64}$'          # same rule as mcp-config.ts
@@ -213,11 +215,23 @@ function Get-UiState($Request) {
             elseif ($spec.id -eq 'pi' -and $installation -and $installation.piVersion) { [string]$installation.piVersion }
             elseif ($spec.kind -eq 'bundled') { [string]$spec.version }
             else { $null }
+        $availableVersion = $null
+        $updateStatus = if ($spec.kind -eq 'bundled') { 'bundled' } elseif (!$version) { 'not-installed' } else { 'unknown' }
+        if ($spec.kind -eq 'managed') {
+            try {
+                $availableVersion = Get-RuntimeVersion $project $spec
+                if ($version -and $record.release -and !$record.legacy) {
+                    $localRelease = Get-RuntimeReleaseId $project $spec (Get-ToolchainNodeHash) $availableVersion
+                    $updateStatus = if ($localRelease -eq $record.release) { 'current' } else { 'different' }
+                }
+            } catch { $updateStatus = 'unknown' }
+        }
         [ordered]@{
             id = $spec.id; name = $spec.name; kind = $spec.kind
             installed = $spec.kind -eq 'bundled' -or [bool]$version
             selected = $spec.id -eq $selected
             version = $version
+            availableVersion = $availableVersion; updateStatus = $updateStatus
             skills = [bool]$spec.capabilities.skills; mcp = [bool]$spec.capabilities.mcp
         }
     })
