@@ -35,8 +35,10 @@ ShadowBot Switch — 在项目根目录管理影刀 Copilot
   .\switch.ps1 config import <文件>     导入配置，--replace 先备份再覆盖
   .\switch.ps1 apps list|select|clear   选择应用或恢复安装级默认范围
   .\switch.ps1 update [harness]        更新指定或当前 harness，保持当前选择
+  .\switch.ps1 uninstall             恢复原版，清理工具链和运行时；--purge-data 删除历史，--yes 确认
   .\switch.ps1 repair                  修复项目搬迁定位及中断的操作
 
+安装、更新和修复：--mirror <direct|aliyun>；--offline-dir <离线包目录>。
 通用：--json；--global；--app <应用路径>。
 切换：--shadowbot-dir <影刀安装目录>；--wait（等待退出）；--timeout <秒>。
 未选择应用时默认管理此安装的全部应用；apps select 会记住选择。
@@ -67,14 +69,44 @@ function Invoke-Selection([string]$Command, [string[]]$Tail, [string]$Target) {
         switch ($Tail[$i]) {
             '--json' { }
             '--wait' { $parameters.Wait = $true }
+            { $_ -in '--mirror', '--offline-dir' } {
+                if ($Command -notin 'use', 'update', 'repair') { throw "不支持的选项：$_" }
+                $key = if ($_ -eq '--mirror') { 'Mirror' } else { 'OfflineToolchainDir' }
+                $i++
+                if ($i -ge $Tail.Count -or !$Tail[$i] -or $Tail[$i].StartsWith('--')) { throw "$_ 需要参数。" }
+                if ($key -eq 'Mirror' -and $Tail[$i] -notin 'direct', 'aliyun') { throw '下载源无效，请选择 direct 或 aliyun。' }
+                $parameters[$key] = $Tail[$i]
+            }
+            { $_ -in '--purge-data', '--yes' } {
+                if ($Command -ne 'uninstall') { throw "不支持的选项：$_" }
+                if ($_ -eq '--yes') { $parameters.Yes = $true } else { $parameters.PurgeData = $true }
+            }
             '--timeout' { $i++; if ($i -ge $Tail.Count) { throw '--timeout 需要秒数。' }; $parameters.WaitTimeoutSeconds = [int]$Tail[$i] }
             '--shadowbot-dir' { $i++; if ($i -ge $Tail.Count) { throw '--shadowbot-dir 需要路径。' }; $parameters.ShadowBotDirectory = $Tail[$i] }
             default { throw "未知切换选项：$($Tail[$i])" }
         }
     }
+    if ($Command -eq 'uninstall') {
+        . (Join-Path $project 'scripts/maintenance.ps1')
+        $result = if ($jsonOutput) { Uninstall-Project $project @parameters 6>$null } else { Uninstall-Project $project @parameters }
+        if ($jsonOutput) { $result | ConvertTo-Json -Depth 5 }
+        else {
+            if ($result.restored) { Write-Host "已恢复原版：$($result.restored)" }
+            foreach ($path in $result.removed) { Write-Host "已清理：$path" }
+            foreach ($path in $result.retained) { Write-Host "已保留：$path" }
+        }
+        if ($result.failed.Count) {
+            $details = $result.failed | ForEach-Object { "$($_.path)（$($_.reason)）" }
+            [Console]::Error.WriteLine("以下路径未清理成功：$($details -join '，')")
+            exit 1
+        }
+        if (!$jsonOutput) { Write-Host '卸载完成。' }
+        return
+    }
+    if ($jsonOutput) { $parameters.Json = $true }
     if ($Command -eq 'repair') {
         . (Join-Path $project 'scripts/maintenance.ps1')
-        Repair-ProjectLocation $project @parameters
+        Invoke-InstallationLock $project { Repair-ProjectLocation $project @parameters }
         return
     }
     . (Join-Path $project 'scripts/harnesses.ps1')
@@ -125,7 +157,7 @@ try {
         }
         return
     }
-    if ($command -in 'update', 'repair') {
+    if ($command -in 'update', 'repair', 'uninstall') {
         $tail = @($arguments | Select-Object -Skip 1)
         $target = $null
         if ($command -eq 'update' -and $tail.Count -and !$tail[0].StartsWith('--')) {

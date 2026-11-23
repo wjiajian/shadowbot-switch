@@ -295,3 +295,5 @@ dialog::backdrop { background: rgba(27, 31, 36, 0.32); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+.install-settings { display: flex; align-items: end; justify-content: space-between; flex-wrap: wrap; gap: 1rem; }

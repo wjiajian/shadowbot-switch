@@ -233,6 +233,37 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 > [!WARNING]
 > 导出文件可能包含你填写的 MCP 凭据，请保存在私人位置。
 
+## 下载源与离线安装
+
+`use`、`update` 和 `repair` 支持 `--mirror direct`（官方源）与 `--mirror aliyun`。例如：
+
+```powershell
+.\switch.ps1 use pi --mirror aliyun --wait
+.\switch.ps1 update pi --offline-dir 'D:\工具链' --wait
+```
+
+`install.ps1` 和 `scripts/build.ps1` 对应参数为 `-Mirror` 和 `-OfflineToolchainDir`。也可设置环境变量 `SHADOWBOT_SWITCH_MIRROR` 和 `SHADOWBOT_SWITCH_OFFLINE_DIR`。显式参数优先。未指定镜像参数时，可用 `SHADOWBOT_SWITCH_NODE_BASE_URL`、`SHADOWBOT_SWITCH_NPM_REGISTRY`、`SHADOWBOT_SWITCH_GO_BASE_URL`、`SHADOWBOT_SWITCH_GOPROXY` 分别覆盖下载地址。交互安装需要构建且没有配置下载源或离线目录时，会提示选择源，回车使用官方源。传入 `--json` 时跳过下载源提示。图形界面在 Harness 页记住当前浏览器的下载源选择。
+
+WebUI 的下载源默认为「默认（跟随环境）」。安装、更新和修复都可以显式选择官方源或阿里云镜像。
+
+使用 `--offline-dir <目录>` 时，优先复用项目 `.tools/` 中的工具。Node 按 SHA256 校验，已解压的 npm、Go 按固定版本的文件清单逐项核对相对路径和大小。工具缺失或清单不符时，先查找项目内已缓存的压缩包，再从离线目录读取以下文件，并校验固定哈希：
+
+```text
+node.exe                    # 也支持 v24.22.3/win-x64/node.exe
+npm-11.17.0.tgz
+go1.25.0.windows-amd64.zip
+npm-cache/                  # 可选，复制自 .tools/npm-cache/
+go-mod/                     # 可选，复制自 .tools/go-work/pkg/mod/，也可放在 pkg/mod/
+```
+
+完整离线构建需要按相同锁文件预热依赖，npm 下载源应与预热时一致。依赖缓存可留在项目内，也可按上面的结构放入离线目录。默认卸载会删除项目内的 `.tools/` 缓存。
+
+## 卸载
+
+运行 `.\switch.ps1 uninstall --wait`，或在 Harness 页点击「卸载 ShadowBot Switch」并确认。卸载会等影刀退出、切回原版会话，删除本项目的运行时、`.tools/`、`dist/` 和根目录及各 harness 的 `node_modules/`。默认保留 `.shadowbot-switch/` 下的会话备份、安装级 Skill、安装级配置和偏好。各 harness 仅清理 releases 子目录，适配器专属配置继续保留。影刀程序或安装记录缺失时，默认保留 `original/` 原版备份。只想切回原版并保留工具链时，使用 `.\switch.ps1 use original --wait`。
+
+加 `--purge-data` 可永久删除整个 `.shadowbot-switch/`。无人值守时必须显式传入 `--yes`。可用 `--shadowbot-dir` 核对影刀目录、`--timeout` 设置等待秒数、`--json` 获取恢复、删除和保留的路径，以及清理失败的路径与原因。
+
 ## 本地数据
 
 | 目录 | 内容 |

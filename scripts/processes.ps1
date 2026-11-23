@@ -38,7 +38,7 @@ function Wait-SwitchProcesses([switch]$Wait, [int]$TimeoutSeconds = 300) {
         $running = @(Get-SwitchProcesses)
         if (!$running.Count) { return }
         Write-Host '需要先退出影刀：保存工作后从托盘退出影刀，并关闭下面这些进程。'
-        $running | Select-Object Id, ProcessName, Path | Format-Table | Out-Host
+        Write-Host ($running | Select-Object Id, ProcessName, Path | Format-Table | Out-String).TrimEnd()
         if (!$Wait) { throw '影刀还在运行。退出后重新运行这条命令，或加上 --wait 自动等待。' }
         Write-Host "正在等待影刀退出（最多 $TimeoutSeconds 秒）…"
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)

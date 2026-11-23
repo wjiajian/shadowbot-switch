@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $repository = Split-Path $PSScriptRoot
 . (Join-Path $repository 'scripts/ui-server.ps1')
-$base = (Resolve-Path -LiteralPath ([IO.Path]::GetTempPath())).Path.TrimEnd('\')
+$base = (Resolve-Path -LiteralPath ([IO.Path]::GetTempPath())).Path.TrimEnd([IO.Path]::DirectorySeparatorChar)
 $root = Join-Path $base "shadowbot-ui-$([Guid]::NewGuid())"
 New-Item -ItemType Directory -Path $root | Out-Null
 $server = $null
@@ -18,6 +18,30 @@ try {
     $state = Join-Path $root 'state'
     New-Item -ItemType Directory -Path $state | Out-Null
     $script:Ui = @{ Project = $repository; State = $state; Token = (New-UiToken); Job = $null; JobCount = 0; Detected = @{ value = $null } }
+
+    foreach ($job in 'repair', 'use', 'update') {
+        if ((ConvertTo-UiJobArguments @{cmd = $job; harness = 'pi'}) -contains '--mirror') { throw 'Default source overrode environment.' }
+        Assert-Throws { ConvertTo-UiJobArguments @{cmd = $job; harness = 'pi'; mirror = @( 'aliyun' )} } '下载源无效' 'Mirror array accepted.'
+    }
+    $repair = ConvertTo-UiJobArguments @{cmd = 'repair'; mirror = 'direct'; offlineDir = $root}
+    if (($repair -join '|') -ne "repair|--mirror|direct|--offline-dir|$root|--wait|--timeout|$script:UiWaitSeconds") { throw 'Repair sources were lost.' }
+    $registryDir = New-Item -ItemType Directory -Force -Path (Join-Path $root 'harnesses/original')
+    Copy-Item -LiteralPath (Join-Path $repository 'harnesses/original/harness.json') -Destination $registryDir.FullName
+    $script:Ui.Project = $root
+    $script:Ui.State = Join-Path $root 'missing'
+    if ((Get-UiState @{}).canUninstall) { throw 'Empty project offered uninstall.' }
+    $script:Ui.Project = $repository
+    $script:Ui.State = $state
+    if (!(Get-UiState @{}).canUninstall) { throw 'Existing project state cannot be uninstalled.' }
+    foreach ($job in 'use', 'update') {
+        $arguments = ConvertTo-UiJobArguments @{ cmd = $job; harness = 'pi'; mirror = 'aliyun' }
+        if (($arguments -join '|') -cne "$job|pi|--mirror|aliyun|--wait|--timeout|$script:UiWaitSeconds") { throw 'Mirror was lost.' }
+        Assert-Throws { ConvertTo-UiJobArguments @{ cmd = $job; harness = 'pi'; mirror = '--yes' } } '下载源无效' 'Unknown mirror accepted.'
+    }
+    $arguments = ConvertTo-UiJobArguments @{ cmd = 'uninstall'; purgeData = $true; shadowbotDir = $root }
+    if (($arguments -join '|') -cne "uninstall|--yes|--purge-data|--wait|--timeout|$script:UiWaitSeconds|--shadowbot-dir|$root") { throw 'Unexpected uninstall options.' }
+    if ((ConvertTo-UiJobArguments @{cmd = 'uninstall'}) -contains '--purge-data') { throw 'Uninstall must preserve history by default.' }
+    Assert-Throws { ConvertTo-UiJobArguments @{cmd = 'uninstall'; purgeData = 'false'} } '布尔值' 'Invalid purge option accepted.'
 
     # Tokens are random hex and compared in full.
     $token = New-UiToken
@@ -60,7 +84,7 @@ try {
     $arguments = ConvertTo-UiJobArguments @{ cmd = 'update'; harness = 'pi' }
     if (($arguments -join '|') -cne "update|pi|--wait|--timeout|$script:UiWaitSeconds") { throw "Update arguments are wrong: $($arguments -join ' ')" }
     Assert-Throws { ConvertTo-UiJobArguments @{ cmd = 'use'; harness = 'repair' } } '未知 harness' 'Job harnesses must come from the registry.'
-    Assert-Throws { ConvertTo-UiJobArguments @{ cmd = 'uninstall' } } '不支持的任务' 'Unknown jobs must be refused.'
+    Assert-Throws { ConvertTo-UiJobArguments @{ cmd = 'remove-all' } } '不支持的任务' 'Unknown jobs must be refused.'
 
     # Arguments survive the -EncodedCommand round trip literally, including quote look-alikes.
     if ((ConvertTo-UiQuoted "it's") -cne "'it''s'" -or (ConvertTo-UiQuoted "a$([char]0x2019)b") -cne "'a$([char]0x2019)$([char]0x2019)b'") { throw 'Quoting must double every single quote character.' }

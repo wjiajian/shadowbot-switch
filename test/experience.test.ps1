@@ -2,11 +2,11 @@ $ErrorActionPreference = 'Stop'
 $project = Split-Path $PSScriptRoot
 . (Join-Path $project 'scripts/activation.ps1')
 . (Join-Path $project 'scripts/maintenance.ps1')
-$base = (Resolve-Path -LiteralPath ([IO.Path]::GetTempPath())).Path.TrimEnd('\')
+$base = (Resolve-Path -LiteralPath ([IO.Path]::GetTempPath())).Path.TrimEnd([IO.Path]::DirectorySeparatorChar)
 $root = Join-Path $base "shadowbot-experience-$([Guid]::NewGuid())"
 New-Item -ItemType Directory -Path $root | Out-Null
 try {
-    $state = Join-Path $root 'state'
+    $state = Join-Path $root '.shadowbot-switch'
     $id = 'a' * 64
     $runtime = Get-ReleasePath $state $id 'fixture'
     New-Item -ItemType Directory -Path $runtime -Force | Out-Null
@@ -31,6 +31,16 @@ try {
     $rejected = $false
     try { Repair-InstallationLocator $state $hash {} } catch { $rejected = $true }
     if (!$rejected) { throw 'An existing project was taken over.' }
+
+    Write-AtomicJson "$agent.shadowbot-pi.json" @{ home = $state }
+    Write-AtomicJson (Join-Path $state 'backend.json') @{ mode = 'pi' }
+    @'
+param($Harness, $Mirror, $OfflineToolchainDir, [switch]$Json, [switch]$Wait, $WaitTimeoutSeconds)
+if ($Harness -ne 'pi' -or $Mirror -ne 'aliyun' -or $OfflineToolchainDir -ne $PSScriptRoot -or !$Json) { throw 'Repair did not forward build settings.' }
+'@ | Set-Content -LiteralPath (Join-Path $root 'install.ps1')
+    function Get-BundledExecutableHash { $hash }
+    function Get-SwitchProcesses { }
+    Repair-ProjectLocation $root -Mirror aliyun -OfflineToolchainDir $root -Json
 
     # Deterministic process snapshots exercise the actual waiting code, without touching live processes.
     $script:processChecks = 0
