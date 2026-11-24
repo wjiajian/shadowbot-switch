@@ -225,3 +225,24 @@ test('legacy adapter databases migrate native mapping columns without losing tra
     store.db.close();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('registry validates lockstep packages and their shared npm name rule', () => {
+  const pi = new HarnessRegistry().get('pi');
+  assert.ok(pi.upstream.packages.includes(pi.versionPackage));
+  const dir = mkdtempSync(join(tmpdir(), 'registration-'));
+  const spec = JSON.parse(readFileSync('test/fixtures/harness/harness.json'));
+  const path = join(dir, spec.id, 'harness.json');
+  try {
+    put(path, spec);
+    assert.equal(new HarnessRegistry(dir).get(spec.id).upstream, undefined);
+    const valid = { type: 'npm-lockstep', packages: ['pkg'] };
+    for (const override of [
+      { kind: 'bundled' }, { upstream: null }, { upstream: { ...valid, type: 'unknown' } },
+      ...[[], ['Bad'], ['pkg', 'pkg'], ['other'], ['pkg', 'a'.repeat(215)], ['pkg', ...Array.from({ length: 16 }, (_, i) => 'p' + i)]]
+        .map(packages => ({ upstream: { ...valid, packages } })),
+    ]) {
+      put(path, { ...spec, upstream: valid, versionPackage: 'pkg', ...override });
+      assert.throws(() => new HarnessRegistry(dir), /upstream/);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

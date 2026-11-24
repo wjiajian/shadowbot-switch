@@ -24,22 +24,25 @@ export function assertHostStopped() {
   if (count !== '0') throw new Error('Exit ShadowBot and all OpenCode processes before switching');
 }
 
-function schemaOf(db: DatabaseSync) {
-  return JSON.stringify(db.prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all()
-    .map(row => [row.type, row.name, row.tbl_name, String(row.sql).replace(/\s+/g, ' ').trim()]));
-}
-
-export function verifySchema(path: string, schema: string) {
-  const expected = new DatabaseSync(':memory:');
+export function verifySchema(path: string) {
+  const required = {
+    project: ['id','worktree','time_created','time_updated','sandboxes'],
+    session: ['id','project_id','parent_id','directory','path','slug','version','title','permission','time_created','time_updated','time_archived','revert'],
+    message: ['id','session_id','time_created','time_updated','data'],
+    part: ['id','session_id','message_id','time_created','time_updated','data'],
+  };
   const actual = new DatabaseSync(path, { readOnly: true });
   try {
-    expected.exec(schema);
-    if (schemaOf(expected) !== schemaOf(actual)) throw new Error('ShadowBot SQLite schema mismatch');
+    for (const [table, columns] of Object.entries(required)) {
+      const names = new Set(actual.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name));
+      for (const column of columns) {
+        if (!names.has(column)) throw new Error(`ShadowBot SQLite schema missing ${table}.${column}`);
+      }
+    }
     const result = actual.prepare('PRAGMA quick_check(1)').get();
     if (result?.quick_check !== 'ok') throw new Error('ShadowBot SQLite quick_check failed');
   } finally {
     actual.close();
-    expected.close();
   }
 }
 
@@ -107,7 +110,7 @@ function backendPaths(home: string, backend: Backend) {
   return { database: join(dir, `${id}.db`), pointers: join(dir, `${id}.json`) };
 }
 
-async function saveSnapshot(home: string, backend: Backend, source: string | undefined, pointers: Pointers, schema: string) {
+async function saveSnapshot(home: string, backend: Backend, source: string | undefined, pointers: Pointers, schema: string, template?: string) {
   const dir = join(home, 'backends', backend);
   mkdirSync(dir, { recursive: true });
   const id = randomUUID();
@@ -116,9 +119,17 @@ async function saveSnapshot(home: string, backend: Backend, source: string | und
   if (source) await copyDatabase(source, path);
   else {
     const db = new DatabaseSync(path);
-    try { db.exec(schema); } finally { db.close(); }
+    try {
+      if (template && existsSync(template)) {
+        const host = new DatabaseSync(template, { readOnly: true });
+        try {
+          const ddl = host.prepare("SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' ORDER BY (type='table') DESC, rowid");
+          for (const row of ddl.iterate()) db.exec(String(row.sql));
+        } finally { host.close(); }
+      } else db.exec(schema);
+    } finally { db.close(); }
   }
-  verifySchema(path, schema);
+  verifySchema(path);
   atomicWrite(join(dir, `${id}.json`), JSON.stringify(pointers));
   atomicWrite(join(dir, 'snapshot.json'), JSON.stringify({ id }));
   if (previous) {
@@ -132,7 +143,7 @@ function stagePath(installation: Installation, id: string) {
   return join(dirname(installation.database), `shadowbot-pi-${id}.db`);
 }
 
-async function stageSnapshot(home: string, installation: Installation, backend: Backend, schema: string): Promise<StagedSnapshot> {
+async function stageSnapshot(home: string, installation: Installation, backend: Backend): Promise<StagedSnapshot> {
   const snapshot = backendPaths(home, backend);
   const pointers = readJson<Pointers>(snapshot.pointers);
   for (const key of Object.keys(pointers)) checkedPointer(installation.users, key);
@@ -140,7 +151,7 @@ async function stageSnapshot(home: string, installation: Installation, backend: 
   const database = stagePath(installation, id);
   try {
     await copyDatabase(snapshot.database, database);
-    verifySchema(database, schema);
+    verifySchema(database);
     return { id, database, pointers };
   } catch (error) {
     rmSync(database, { force: true });
@@ -177,8 +188,8 @@ function applySnapshot(installation: Installation, stage: StagedSnapshot, checkS
   }
 }
 
-async function restoreSnapshot(home: string, installation: Installation, backend: Backend, schema: string, checkStopped: () => void) {
-  const stage = await stageSnapshot(home, installation, backend, schema);
+async function restoreSnapshot(home: string, installation: Installation, backend: Backend, checkStopped: () => void) {
+  const stage = await stageSnapshot(home, installation, backend);
   try {
     applySnapshot(installation, stage, checkStopped);
   } finally {
@@ -206,7 +217,7 @@ export async function switchBackend(home: string, installation: Installation, de
     if (staged && existsSync(staged)) {
       record('discarded', interrupted.previous, interrupted.destination);
     } else {
-      await restoreSnapshot(home, installation, interrupted.source, schema, checkStopped);
+      await restoreSnapshot(home, installation, interrupted.source, checkStopped);
       atomicWrite(join(home, 'backend.json'), JSON.stringify({ mode: interrupted.previous }));
       record('recovered', interrupted.previous, interrupted.destination);
     }
@@ -219,13 +230,13 @@ export async function switchBackend(home: string, installation: Installation, de
     atomicWrite(join(home, 'backend.json'), JSON.stringify({ mode: destination }));
     return;
   }
-  verifySchema(installation.database, schema);
+  verifySchema(installation.database);
   await saveSnapshot(home, source, installation.database, findPointers(installation.users), schema);
   if (!existsSync(join(home, 'backends', destination, 'snapshot.json'))) {
     if (registry.get(destination).kind === 'bundled') throw new Error('Original session snapshot is missing');
-    await saveSnapshot(home, destination, undefined, {}, schema);
+    await saveSnapshot(home, destination, undefined, {}, schema, installation.database);
   }
-  const stage = await stageSnapshot(home, installation, destination, schema);
+  const stage = await stageSnapshot(home, installation, destination);
   try {
     checkStopped();
     atomicWrite(pending, JSON.stringify({ previous, source, destination, stage: stage.id } satisfies Journal));
@@ -238,7 +249,7 @@ export async function switchBackend(home: string, installation: Installation, de
     if (existsSync(pending)) {
       if (existsSync(stage.database)) record('discarded', previous, destination);
       else {
-        await restoreSnapshot(home, installation, source, schema, checkStopped);
+        await restoreSnapshot(home, installation, source, checkStopped);
         atomicWrite(join(home, 'backend.json'), JSON.stringify({ mode: previous }));
         record('rolled-back', previous, destination);
       }

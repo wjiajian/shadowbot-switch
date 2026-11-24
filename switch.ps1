@@ -34,7 +34,9 @@ ShadowBot Switch — 在项目根目录管理影刀 Copilot
   .\switch.ps1 config export <文件>     导出配置
   .\switch.ps1 config import <文件>     导入配置，--replace 先备份再覆盖
   .\switch.ps1 apps list|select|clear   选择应用或恢复安装级默认范围
-  .\switch.ps1 update [harness]        更新指定或当前 harness，保持当前选择
+  .\switch.ps1 update [harness]        检查上游同主版本并更新指定或当前 harness，保持当前选择
+  .\switch.ps1 update [harness] --check   只检查版本（--all 检查全部）
+  更新选项：--local-only 仅本地重建；--version <版本> 指定版本；--pinned 恢复仓库锁定版本。
   .\switch.ps1 uninstall             恢复原版，清理工具链和运行时；--purge-data 删除历史，--yes 确认
   .\switch.ps1 repair                  修复项目搬迁定位及中断的操作
 
@@ -68,6 +70,17 @@ function Invoke-Selection([string]$Command, [string[]]$Tail, [string]$Target) {
     for ($i = 0; $i -lt $Tail.Count; $i++) {
         switch ($Tail[$i]) {
             '--json' { }
+            { $_ -in '--check','--all','--local-only','--pinned','--version' } {
+                if ($Command -ne 'update') { throw "不支持的选项：$_" }
+                if ($_ -eq '--version') {
+                    $i++
+                    if ($i -ge $Tail.Count -or !$Tail[$i] -or $Tail[$i].StartsWith('--')) { throw '--version 需要版本号。' }
+                    $parameters.HarnessVersion = $Tail[$i]
+                } else {
+                    $key = @{ '--check'='Check'; '--all'='All'; '--local-only'='LocalOnly'; '--pinned'='Pinned' }[$_]
+                    $parameters[$key] = $true
+                }
+            }
             '--wait' { $parameters.Wait = $true }
             { $_ -in '--mirror', '--offline-dir' } {
                 if ($Command -notin 'use', 'update', 'repair') { throw "不支持的选项：$_" }
@@ -111,8 +124,22 @@ function Invoke-Selection([string]$Command, [string[]]$Tail, [string]$Target) {
     }
     . (Join-Path $project 'scripts/harnesses.ps1')
     if ($Command -eq 'update') {
+        . (Join-Path $project 'scripts/runtime.ps1')
+        Assert-HarnessUpdateOptions $parameters $Target $null $true
+        if ($parameters.Check) {
+            . (Join-Path $project 'scripts/toolchain.ps1')
+            $specs = if ($parameters.All) { Get-HarnessRegistry $project } else {
+                if (!$Target) { $Target = Get-SelectedHarness $state $project }
+                Get-Harness $project $Target
+            }
+            $report = Get-HarnessUpdateReport $project $state $specs (Get-ToolchainSource $parameters.Mirror $parameters.OfflineToolchainDir)
+            Write-HarnessUpdateReport $report -Json:$jsonOutput
+            if (@($report.harnesses | Where-Object { $_.status -eq 'error' }).Count) { exit 1 }
+            return
+        }
         $target = if ($Target) { $Target } else { Get-SelectedHarness $state $project }
         $harness = (Get-Harness $project $target).id
+        Assert-HarnessUpdateOptions $parameters $null (Get-Harness $project $harness) $true
         & (Join-Path $project 'install.ps1') -Harness $harness -Update @parameters
         return
     }

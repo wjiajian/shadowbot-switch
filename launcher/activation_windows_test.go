@@ -166,3 +166,24 @@ fs.writeFileSync(require('node:path').join(process.env.SHADOWBOT_SWITCH_HOME, 'f
 		t.Fatal("uninstalled harness was accepted")
 	}
 }
+
+func TestVersionFor(t *testing.T) {
+	home := t.TempDir()
+	executable := filepath.Join(home, "opencode.exe")
+	if got := versionFor(executable); got != protocolVersion {
+		t.Fatalf("missing locator returned %q", got)
+	}
+	locator, err := json.Marshal(map[string]string{"home": home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executable+".shadowbot-pi.json", locator, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "install.json"), []byte(`{"bundled":{"version":"1.19.2"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := versionFor(executable); got != "1.19.2" {
+		t.Fatalf("installed host returned %q", got)
+	}
+}

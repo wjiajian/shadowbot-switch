@@ -96,7 +96,7 @@ function mcpFixture(name, { beforeInitialize, dropToolResponse = false, extraToo
     hold: () => { held = Promise.withResolvers(); return held.promise; } };
 }
 
-function tempFixture(runtimeRelease) {
+function tempFixture(runtimeRelease, bundled) {
   const root = mkdtempSync(join(tmpdir(), 'shadowbot-pi-bridge-'));
   const home = join(root, 'home');
   const runtime = runtimeRelease ? join(home, 'harnesses', 'pi', 'releases', runtimeRelease) : home;
@@ -109,7 +109,7 @@ function tempFixture(runtimeRelease) {
   db.exec(schema);
   db.close();
   writeFileSync(join(runtime, 'schema.sql'), schema);
-  writeFileSync(join(home, 'install.json'), JSON.stringify({ database, users, resources: root,
+  writeFileSync(join(home, 'install.json'), JSON.stringify({ database, users, resources: root, bundled,
     runtimeRelease, piVersion: runtimeRelease ? '1.5.2' : undefined }));
   writeFileSync(join(home, 'backend.json'), '{"mode":"pi"}');
   return { root, home, runtime, database, workspace, other };
@@ -176,7 +176,7 @@ async function get(response, expected = 200) {
 }
 
 test('Pi chat, MCP, skills, permission, question, restore and revert', { timeout: 60_000 }, async () => {
-  const fixture = tempFixture('a'.repeat(64));
+  const fixture = tempFixture('a'.repeat(64), { id: 'original', version: '1.19.2' });
   const model = modelFixture();
   const modelURL = await listen(model.server);
   const studio = mcpFixture('flow_blocks_list');
@@ -204,7 +204,7 @@ test('Pi chat, MCP, skills, permission, question, restore and revert', { timeout
     bridge = await start(fixture, config);
     const { api } = bridge;
     assert.equal((await fetch(`${bridge.url}/global/health`)).status, 401);
-    assert.deepEqual(await get(api('/global/health')), { healthy: true, version: '1.18.12' });
+    assert.deepEqual(await get(api('/global/health')), { healthy: true, version: '1.19.2' });
     const session = await get(api('/session', { method: 'POST', data: { title: 'Fixture session' } }));
     const path = `/session/${session.id}`;
     assert.deepEqual(await get(api('/session', { directory: fixture.other })), []);

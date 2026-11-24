@@ -8,7 +8,6 @@ import { createServer } from 'node:http';
 import { json } from 'node:stream/consumers';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { originalHash } from '../dist/service/installation.js';
 
 test('observe forwards HTTP and SSE and stores shapes only', {
   skip: process.env.SHADOWBOT_TEST_OBSERVE !== '1', timeout: 30_000,
@@ -24,7 +23,7 @@ test('observe forwards HTTP and SSE and stores shapes only', {
   copyFileSync(resolve('dist/opencode.exe'), launcher);
   copyFileSync(resolve('.shadowbot-switch/original/opencode.exe'), join(original, 'opencode.exe'));
   writeFileSync(`${launcher}.shadowbot-pi.json`, JSON.stringify({ home }));
-  writeFileSync(join(home, 'install.json'), JSON.stringify({ agentPath: launcher, originalHash }));
+  writeFileSync(join(home, 'install.json'), JSON.stringify({ agentPath: launcher }));
   writeFileSync(join(home, 'backend.json'), JSON.stringify({ mode: 'observe' }));
   const password = 'fixture-basic-secret';
   const title = 'fixture-message-content';

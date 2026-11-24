@@ -12,7 +12,8 @@ type runtimePointer struct {
 	Release string `json:"release"`
 }
 type bundledHarness struct {
-	ID string `json:"id"`
+	Version string `json:"version"`
+	ID      string `json:"id"`
 }
 
 func bundledID(install installation) (string, error) {

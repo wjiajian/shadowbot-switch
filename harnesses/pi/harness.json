@@ -5,6 +5,10 @@
   "aliases": [],
   "kind": "managed",
   "versionPackage": "@earendil-works/pi-coding-agent",
+  "upstream": {
+    "type": "npm-lockstep",
+    "packages": ["@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "@earendil-works/pi-mcp"]
+  },
   "adapter": "adapters/pi/index.js",
   "launch": { "executable": "node.exe", "args": ["{runtime}/service/main.js"] },
   "capabilities": { "skills": true, "mcp": true }

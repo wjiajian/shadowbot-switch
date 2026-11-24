@@ -1,12 +1,9 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -20,10 +17,8 @@ import (
 )
 
 const protocolVersion = "1.18.12"
-const originalHash = "de2e62ab0e3f27a3ea7ff9ef4c4fe7097f0d6df01118b2e7c5f57726256d6314"
 
 type installation struct {
-	OriginalHash   string                    `json:"originalHash"`
 	RuntimeRelease string                    `json:"runtimeRelease"`
 	PiVersion      string                    `json:"piVersion"` // Legacy manifests only.
 	Runtime        *runtimePointer           `json:"runtime"`
@@ -45,15 +40,15 @@ func readJSON(path string, value any) error {
 	return json.Unmarshal(data, value)
 }
 
-func hashFile(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
+var versionPrefix = regexp.MustCompile(`^\d+\.\d+\.\d+`)
+
+func versionFor(executable string) string {
+	home, err := stateDirectory(executable)
+	var install installation
+	if err == nil && readJSON(filepath.Join(home, "install.json"), &install) == nil && install.Bundled != nil && versionPrefix.MatchString(install.Bundled.Version) {
+		return install.Bundled.Version
 	}
-	defer file.Close()
-	hash := sha256.New()
-	_, err = io.Copy(hash, file)
-	return hex.EncodeToString(hash.Sum(nil)), err
+	return protocolVersion
 }
 
 func main() {
@@ -65,11 +60,11 @@ func main() {
 }
 
 func run(args []string) (int, error) {
+	executable, err := os.Executable()
 	if len(args) == 1 && (args[0] == "--version" || args[0] == "-v") {
-		fmt.Println(protocolVersion)
+		fmt.Println(versionFor(executable))
 		return 0, nil
 	}
-	executable, err := os.Executable()
 	if err != nil {
 		return 1, fmt.Errorf("locate launcher executable: %w", err)
 	}
@@ -173,9 +168,8 @@ func runAt(home string, args []string) (int, error) {
 		return 1, errors.New("observe is only available for legacy installations")
 	}
 	backup := filepath.Join(home, "original", "opencode.exe")
-	hash, err := hashFile(backup)
-	if err != nil || hash != originalHash || !strings.EqualFold(hash, install.OriginalHash) {
-		return 1, errors.New("original OpenCode checksum mismatch")
+	if _, err := os.Stat(backup); err != nil {
+		return 1, errors.New("original OpenCode backup is missing; run use original")
 	}
 	if state.Mode == bundled {
 		cmd := exec.Command(backup, args...)

@@ -19,6 +19,22 @@ try {
     New-Item -ItemType Directory -Path $state | Out-Null
     $script:Ui = @{ Project = $repository; State = $state; Token = (New-UiToken); Job = $null; JobCount = 0; Detected = @{ value = $null } }
 
+    Assert-Throws { ConvertTo-UiJobArguments @{ cmd='update'; harness='pi'; localOnly='false' } } '布尔值' 'Invalid localOnly accepted.'
+    Assert-Throws { ConvertTo-UiJobArguments @{ cmd='use'; harness='pi'; localOnly=$true } } '只能用于更新' 'localOnly accepted for use.'
+    if ('--local-only' -notin (ConvertTo-UiJobArguments @{ cmd='update'; harness='pi'; localOnly=$true })) { throw 'localOnly lost.' }
+    Assert-Throws { Invoke-UiApi '/api/updates/check' @{mirror='bad'} } '下载源' 'Invalid check mirror accepted.'
+    $script:Ui.Job = @{ Done = $false }
+    Assert-Throws { Invoke-UiApi '/api/updates/check' @{} } '任务运行中' 'Check during job accepted.'
+    $script:Ui.Job = $null
+    & {
+        function Get-ToolchainSource($Mirror) { if ($Mirror -ne 'direct') { throw 'Wrong check mirror.' }; @{ npm='https://registry.example'; offline=$null } }
+        function Invoke-UpstreamRequest($Uri) {
+            $name = $Uri.Split('/')[-1].Replace('%2f','/')
+            @{ name = $name; versions = @{ '1.6.3' = @{} } } | ConvertTo-Json -Depth 4
+        }
+        $cache = Invoke-UiApi '/api/updates/check' @{ mirror='direct' }
+        if ($cache.items.pi.candidate -ne '1.6.3' -or ((Get-UiState @{}).harnesses | Where-Object id -eq 'pi').upstream.candidate -ne '1.6.3') { throw 'UI lost cached upstream report.' }
+    }
     foreach ($job in 'repair', 'use', 'update') {
         if ((ConvertTo-UiJobArguments @{cmd = $job; harness = 'pi'}) -contains '--mirror') { throw 'Default source overrode environment.' }
         Assert-Throws { ConvertTo-UiJobArguments @{cmd = $job; harness = 'pi'; mirror = @( 'aliyun' )} } '下载源无效' 'Mirror array accepted.'
@@ -145,6 +161,20 @@ try {
     Set-Content -LiteralPath (Join-Path $comparisonProject 'src/fixture.ts') -Value 'changed adapter'
     $pi = (Get-UiState @{}).harnesses | Where-Object id -eq 'pi'
     if ($pi.updateStatus -cne 'different' -or $pi.version -cne $pi.availableVersion) { throw 'Adapter-only changes must be visible even at the same version.' }
+    $dir = Join-Path $comparisonProject 'harnesses/pi'
+    $hash = Get-HarnessDependencyHash $dir
+    $set = Get-HarnessDependencyPath $state $spec.id $hash
+    New-Item -ItemType Directory -Path $set -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $dir 'package.json'),(Join-Path $dir 'package-lock.json') -Destination $set
+    $deps = @{ source='upstream'; lockHash=$hash; explicit=$false; packages=@{} }
+    $comparisonInstall.harnesses.pi = @{ version='1.6.3'; dependencies=$deps; release=(Get-RuntimeReleaseId $comparisonProject $spec (Get-ToolchainNodeHash) '1.6.3' $deps) }
+    $comparisonInstall | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $state 'install.json')
+    $pi = (Get-UiState @{}).harnesses | Where-Object id -eq 'pi'
+    if ($pi.updateStatus -ne 'current' -or $pi.pinnedVersion -ne '1.5.2' -or $pi.availableVersion -ne '1.6.3') { throw 'UI suggested downgrading installed upstream runtime.' }
+    Add-Content (Join-Path $comparisonProject 'src/fixture.ts') 'source change'
+    if (((Get-UiState @{}).harnesses | Where-Object id -eq 'pi').updateStatus -ne 'different') { throw 'Upstream release ignored source change.' }
+    Remove-Item -LiteralPath $set -Recurse
+    if (((Get-UiState @{}).harnesses | Where-Object id -eq 'pi').updateStatus -ne 'unknown') { throw 'Missing upstream set was not detected.' }
     Remove-Item -LiteralPath (Join-Path $comparisonProject 'harnesses/pi/package.json')
     if (((Get-UiState @{}).harnesses | Where-Object id -eq 'pi').updateStatus -cne 'unknown') { throw 'Unreadable local metadata must report unknown.' }
     $script:Ui.Project = $repository
@@ -200,7 +230,9 @@ try {
             if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
         }
         foreach ($name in $Flags) { Set-Content -LiteralPath (Join-Path $jobProject $name) 'fixture' }
+        $script:Ui.Upstream = @{ items=@{} }
         [void](Start-UiJob @{ cmd = $Command; harness = 'original' })
+        if ($script:Ui.Upstream) { throw 'Job kept obsolete upstream check.' }
     }
     $script:Ui.Project = $jobProject
     # Encoded PowerShell commands must stream readable host/warning/error output,
@@ -256,7 +288,7 @@ try {
     $project = Join-Path $root 'project'
     New-Item -ItemType Directory -Path (Join-Path $project 'scripts') | Out-Null
     foreach ($name in @('ui.ps1', 'ui', 'harnesses')) { Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $project -Recurse }
-    foreach ($name in @('ui-server.ps1', 'harnesses.ps1', 'discovery.ps1', 'processes.ps1', 'runtime.ps1', 'toolchain.ps1')) { Copy-Item -LiteralPath (Join-Path $repository "scripts/$name") -Destination (Join-Path $project 'scripts') }
+    foreach ($name in @('ui-server.ps1', 'harnesses.ps1', 'discovery.ps1', 'processes.ps1', 'runtime.ps1', 'upstream.ps1', 'toolchain.ps1')) { Copy-Item -LiteralPath (Join-Path $repository "scripts/$name") -Destination (Join-Path $project 'scripts') }
     $log = Join-Path $root 'server.log'
     $server = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoProfile', '-File', (Join-Path $project 'ui.ps1'), '-NoBrowser') -RedirectStandardOutput $log -PassThru -NoNewWindow
     $url = $null

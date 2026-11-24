@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { UserError } from './errors.js';
@@ -7,13 +7,12 @@ import type { HarnessRelease } from './harnesses.js';
 import { legacyRuntimeDirectory, legacyRuntimeHarness, legacyVersion } from './legacy.js';
 
 export const protocolVersion = '1.18.12';
-export const originalHash = 'de2e62ab0e3f27a3ea7ff9ef4c4fe7097f0d6df01118b2e7c5f57726256d6314';
 export type Mode = string;
 export type Backend = string;
 export interface Installation {
   agentPath: string;
-  originalHash: string;
-  launcherHash: string;
+  originalHash?: string;
+  launcherHash?: string;
   runtimeRelease?: string;
   piVersion?: string;
   runtime?: { harness: string; release: string };
@@ -59,9 +58,14 @@ export function atomicWrite(path: string, data: string | Buffer) {
   renameSync(temporary, path);
 }
 
-export function sha256(path: string) {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
+export function ownsAgent(home: string, install: Installation) {
+  try {
+    const locator = readJson<{home?: string}>(install.agentPath + '.shadowbot-pi.json');
+    return typeof locator?.home === 'string' && !!locator.home.trim() && resolve(locator.home).toLowerCase() === resolve(home).toLowerCase();
+  } catch { return false; }
 }
+
+export const hostVersion = (install: Installation) => install.bundled?.version ?? protocolVersion;
 
 export function mode(home: string): Mode {
   const value = readJson<{mode: Mode}>(join(home, 'backend.json')).mode;

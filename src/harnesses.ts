@@ -8,11 +8,13 @@ import { UserError, registerErrors } from './errors.js';
 
 export type Capabilities = { skills: boolean; mcp: boolean };
 export type Launch = { executable: string; args: string[] };
+export const NPM_PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
 export type Harness = {
   id: string; name: string; aliases: string[]; kind: 'managed' | 'bundled';
+  upstream?: { type: 'npm-lockstep'; packages: string[] };
   version?: string; versionPackage?: string; adapter?: string; launch?: Launch; capabilities: Capabilities; menuOrder?: number;
 };
-export type HarnessRelease = { release: string; version: string; adapter: string; launch: Launch; capabilities: Capabilities; legacy?: boolean };
+export type HarnessRelease = { release: string; version: string; adapter: string; launch: Launch; capabilities: Capabilities; legacy?: boolean; dependencies?: { source: 'pinned' } | { source: 'upstream'; lockHash: string; packages: Record<string, string>; explicit?: boolean } };
 
 /** Installed releases retain their capabilities until rebuilt; older manifests use registration defaults. */
 export function harnessCapabilities(installation: Installation, spec: Harness): Capabilities {
@@ -41,6 +43,14 @@ export class HarnessRegistry {
       const spec = readJson<Harness>(join(directory, entry.name, 'harness.json'));
       if (harnessID(spec.id) !== entry.name || !['managed', 'bundled'].includes(spec.kind) || !spec.name ||
           !Array.isArray(spec.aliases) || typeof spec.capabilities?.skills !== 'boolean' || typeof spec.capabilities?.mcp !== 'boolean') throw new Error('Invalid harness registration');
+      if ('upstream' in spec) {
+        const packages = spec.upstream?.packages;
+        if (spec.kind !== 'managed' || spec.upstream?.type !== 'npm-lockstep' || !Array.isArray(packages) ||
+            !packages.length || packages.length > 16 || new Set(packages).size !== packages.length ||
+            !packages.includes(spec.versionPackage!) || packages.some(p => typeof p !== 'string' || p.length > 214 || !NPM_PACKAGE_NAME.test(p))) {
+          throw new Error('Invalid harness upstream registration');
+        }
+      }
       if (spec.kind === 'managed') {
         relativeFile(spec.adapter!); relativeFile(spec.launch?.executable!);
         if (!Array.isArray(spec.launch?.args) || !spec.launch.args.every(a => typeof a === 'string')) throw new Error('Invalid harness launch arguments');

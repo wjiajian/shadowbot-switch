@@ -16,12 +16,13 @@ try {
     Copy-Item -LiteralPath (Join-Path $repository 'switch.ps1') -Destination $project
     Copy-Item -LiteralPath (Join-Path $repository 'scripts/harnesses.ps1') -Destination (Join-Path $project 'scripts')
     Copy-Item -LiteralPath (Join-Path $repository 'scripts/toolchain.ps1') -Destination (Join-Path $project 'scripts')
+    foreach ($name in 'upstream.ps1','runtime.ps1') { Copy-Item (Join-Path $repository "scripts/$name") -Destination (Join-Path $project 'scripts') }
     foreach ($name in @('go.mod', 'go.sum', 'tsconfig.json', 'contract/schema.sql')) { Copy-Item -LiteralPath (Join-Path $repository $name) -Destination (Join-Path $project $name) }
     Write-AtomicJson (Join-Path $project 'package.json') @{ name = 'harness-test'; version = '1.0.0'; type = 'module' }
     Write-AtomicJson (Join-Path $project 'package-lock.json') @{ name = 'harness-test'; version = '1.0.0'; lockfileVersion = 3; packages = @{ '' = @{ name = 'harness-test'; version = '1.0.0' } } }
     @'
-param([string]$Harness, [switch]$Update, [switch]$Wait, [int]$WaitTimeoutSeconds, [string]$ShadowBotDirectory, [string]$Mirror, [string]$OfflineToolchainDir)
-@{ mirror = $Mirror; offline = $OfflineToolchainDir; harness = $Harness; update = [bool]$Update } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'selection.json')
+param([switch]$LocalOnly, [string]$HarnessVersion, [switch]$Pinned, [string]$Harness, [switch]$Update, [switch]$Wait, [int]$WaitTimeoutSeconds, [string]$ShadowBotDirectory, [string]$Mirror, [string]$OfflineToolchainDir)
+@{ localOnly = [bool]$LocalOnly; pinned = [bool]$Pinned; version = $HarnessVersion; mirror = $Mirror; offline = $OfflineToolchainDir; harness = $Harness; update = [bool]$Update } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'selection.json')
 '@ | Set-Content -LiteralPath (Join-Path $project 'install.ps1')
     $spec = Get-Harness $project 'test-engine'
     if ($spec.id -ne 'fixture') { throw 'Registry alias failed.' }
@@ -59,6 +60,31 @@ function Repair-ProjectLocation($Project, $Mirror, $OfflineToolchainDir) { "$Mir
     & (Join-Path $project 'switch.ps1') use test-engine
     if ((Get-Content -LiteralPath (Join-Path $project 'selection.json') -Raw | ConvertFrom-Json).harness -ne 'fixture') { throw 'use did not dispatch the registered harness.' }
 
+    foreach ($case in @(@('--local-only','localOnly',$true), @('--version','version','1.6.3'), @('--pinned','pinned',$true))) {
+        $flags = @($case[0])
+        if ($case[0] -eq '--version') { $flags += $case[2] }
+        & $cli update pi @flags
+        $selection = Get-Content -LiteralPath (Join-Path $project 'selection.json') -Raw | ConvertFrom-Json -AsHashtable
+        if ($selection[$case[1]] -ne $case[2]) { throw "Update lost $flags" }
+    }
+    foreach ($case in @(
+        @('update','--all'), @('update','--version','1.0.0','--pinned'), @('use','pi','--local-only'),
+        @('update','pi','--version','bad'), @('update','--version'), @('update','--version','--check'), @('update','--check','--wait')
+    )) {
+        $result = & (Get-Process -Id $PID).Path -NoProfile -File $cli @case --json | Out-String
+        if ($LASTEXITCODE -ne 1 -or !($result | ConvertFrom-Json).error) { throw "Invalid options accepted: $case" }
+    }
+    $report = & (Get-Process -Id $PID).Path -NoProfile -File $cli update --check --all --offline-dir $root --json | ConvertFrom-Json
+    if ($LASTEXITCODE -or !$report.offline -or $report.harnesses.Count -ne 3 -or ($report.harnesses | Where-Object id -eq 'pi').status -ne 'skipped') { throw 'Wrong offline check report.' }
+    $savedRegistry = $env:SHADOWBOT_SWITCH_NPM_REGISTRY
+    $savedOffline = $env:SHADOWBOT_SWITCH_OFFLINE_DIR
+    try {
+        $env:SHADOWBOT_SWITCH_NPM_REGISTRY = 'http://invalid.example'
+        $env:SHADOWBOT_SWITCH_OFFLINE_DIR = $null
+        $output = & (Get-Process -Id $PID).Path -NoProfile -File $cli update pi --check --json | Out-String
+        if ($LASTEXITCODE -ne 1 -or ($output | ConvertFrom-Json).harnesses[0].status -ne 'error') { throw 'Failed check must emit one JSON report.' }
+    } finally { $env:SHADOWBOT_SWITCH_NPM_REGISTRY = $savedRegistry; $env:SHADOWBOT_SWITCH_OFFLINE_DIR = $savedOffline }
+
     # Exercise the real immutable release packager and activation with offline build/npm providers.
     function Build-Bridge($Project, $Toolchain, [switch]$SkipTests) {
         New-Item -ItemType Directory -Force -Path (Join-Path $Project 'dist/service/adapters/fixture') | Out-Null
@@ -73,22 +99,22 @@ function Repair-ProjectLocation($Project, $Mirror, $OfflineToolchainDir) { "$Mir
     $toolchain = @{ node = $node; nodeHash = (Get-FileHash -LiteralPath $node).Hash }
     $agent = Join-Path $root 'opencode.exe'
     Set-Content -LiteralPath $agent -Value 'bundled fixture'
-    $originalHash = (Get-FileHash -LiteralPath $agent).Hash
-    $hostInstallation = @{ agentPath = $agent; originalHash = $originalHash; database = 'fixture.db'; users = 'users'; resources = 'resources' }
+
+    $hostInstallation = @{ agentPath = $agent; database = 'fixture.db'; users = 'users'; resources = 'resources' }
     $first = New-RuntimeRelease $project $state $toolchain $spec $null $hostInstallation
     if ($first.harnesses.fixture.version -ne '1.0.0' -or $first.piVersion) { throw 'Release metadata is not harness-neutral.' }
     $runtime = Get-InstallationRuntime $state $first 'fixture'
     if (!(Test-Path -LiteralPath (Join-Path $runtime 'service/adapters/fixture/index.js'))) { throw 'Nested adapter was not packaged.' }
-    Write-AtomicJson (Join-Path $state 'activation.pending.json') @{ previousHash = $originalHash; release = $first }
-    Complete-Activation $state $agent $originalHash {}
+    Write-AtomicJson (Join-Path $state 'activation.pending.json') @{ release = $first }
+    Complete-Activation $state {}
     if ((Get-Content -LiteralPath (Join-Path $state 'install.json') -Raw | ConvertFrom-Json).runtime.harness -ne 'fixture') { throw 'Generic activation failed.' }
     $first.harnesses['existing'] = @{ release = 'a' * 64; version = '9.0' }
     Set-Content -LiteralPath (Join-Path $project 'src/change.ts') -Value '// new source version'
     $second = New-RuntimeRelease $project $state $toolchain $spec $first $hostInstallation
     if ($second.runtime.release -eq $first.runtime.release -or !$second.harnesses.existing) { throw 'Update failed to retain other harness releases.' }
     if ((Get-Content -LiteralPath (Join-Path $state 'install.json') -Raw | ConvertFrom-Json).runtime.release -ne $first.runtime.release) { throw 'Preparation changed the committed runtime.' }
-    Write-AtomicJson (Join-Path $state 'activation.pending.json') @{ previousHash = $first.launcherHash; release = $second }
-    Complete-Activation $state $agent $originalHash {}
+    Write-AtomicJson (Join-Path $state 'activation.pending.json') @{ release = $second }
+    Complete-Activation $state {}
     if ((Get-SelectedHarness $state) -ne 'fixture') { throw 'Updating a runtime changed harness selection.' }
     $legacy = @{ runtimeRelease = 'd' * 64; piVersion = '1.5.2' }
     $migrated = New-RuntimeRelease $project $state $toolchain $spec $legacy $hostInstallation

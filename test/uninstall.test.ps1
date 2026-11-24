@@ -7,7 +7,7 @@ $state = Join-Path $project '.shadowbot-switch'
 $original = Join-Path $state 'original/opencode.exe'
 $agent = Join-Path $project 'shadowbot-6.3.39/opencode.exe'
 $locator = "$agent.shadowbot-pi.json"
-function Get-BundledExecutableHash { $originalHash }
+
 function Get-SwitchProcesses { }
 function Invoke-RuntimeControl($StateDirectory, $Install, [string[]]$Arguments) {
     if ($StateDirectory -ne $state -or ($Arguments -join ' ') -ne 'backend original') { throw 'Wrong backend switch.' }
@@ -29,13 +29,13 @@ try {
         New-Item -ItemType Directory -Force -Path $path | Out-Null
     }
     Copy-Item -LiteralPath (Join-Path $repository 'harnesses/original/harness.json') -Destination (Join-Path $project 'harnesses/original')
-    foreach ($path in '.tools', 'dist', 'node_modules', '.shadowbot-switch/backends', '.shadowbot-switch/skills', '.shadowbot-switch/agent', '.shadowbot-switch/harnesses/pi/agent', '.shadowbot-switch/harnesses/pi/releases') {
+    foreach ($path in '.tools', 'dist', 'node_modules', '.shadowbot-switch/backends', '.shadowbot-switch/skills', '.shadowbot-switch/agent', '.shadowbot-switch/harnesses/pi/agent', '.shadowbot-switch/harnesses/pi/releases', '.shadowbot-switch/harnesses/pi/dependencies') {
         New-Item -ItemType Directory -Path (Join-Path $project $path) | Out-Null
     }
     Set-Content -LiteralPath $original -Value 'fixture bundled'
     Set-Content -LiteralPath $agent -Value 'fixture launcher'
-    $originalHash = (Get-FileHash -LiteralPath $original).Hash
-    $install = @{ agentPath = $agent; originalHash = $originalHash; launcherHash = (Get-FileHash -LiteralPath $agent).Hash }
+
+    $install = @{ agentPath = $agent }
     $local = [Environment]::GetFolderPath('LocalApplicationData')
     $install.database = Join-Path $local 'ShadowBot/opencode/runtime/shared/xdg_data/opencode/opencode.db'
     $install.users = Join-Path $local 'ShadowBot/users'
@@ -63,15 +63,15 @@ try {
     Write-AtomicJson (Join-Path $state 'install.json') $install
     $failSwitch = $false
     $result = Uninstall-Project $project
-    if (!$switched -or $result.restored -ne $agent -or (Get-FileHash -LiteralPath $agent).Hash -ne $originalHash) { throw 'Bundled backend or executable was not restored.' }
+    if (!$switched -or $result.restored -ne $agent -or (Get-Content -LiteralPath $agent) -ne 'fixture bundled') { throw 'Bundled backend or executable was not restored.' }
     if (!(Test-Path -LiteralPath (Join-Path $commands.FullName 'skill-user.md'))) { throw 'User command was removed.' }
-    foreach ($path in (Join-Path $state 'harnesses/pi/releases'), $generated, $locator, $original, (Join-Path $state 'install.json'), (Join-Path $project '.tools'), (Join-Path $project 'dist'), (Join-Path $project 'node_modules'), (Join-Path $project 'harnesses/original/node_modules')) {
+    foreach ($path in (Join-Path $state 'harnesses/pi/releases'), (Join-Path $state 'harnesses/pi/dependencies'), $generated, $locator, $original, (Join-Path $state 'install.json'), (Join-Path $project '.tools'), (Join-Path $project 'dist'), (Join-Path $project 'node_modules'), (Join-Path $project 'harnesses/original/node_modules')) {
         if (Test-Path -LiteralPath $path) { throw "Left behind: $path" }
     }
     foreach ($name in 'backends', 'skills', 'agent', 'harnesses/pi/agent') {
         if (!(Test-Path -LiteralPath (Join-Path $state $name))) { throw "Lost history: $name" }
     }
-    New-Item -ItemType Directory -Path (Split-Path $original) | Out-Null
+    New-Item -Force -ItemType Directory -Path (Split-Path $original) | Out-Null
     Copy-Item -LiteralPath $agent -Destination $original
     Write-AtomicJson (Join-Path $state 'install.json') $install
     Write-AtomicJson $locator @{home = 'foreign-project'}
@@ -87,7 +87,7 @@ try {
     Set-Content -LiteralPath (Join-Path $runtime 'launcher.exe') 'fixture launcher'
     Remove-Item -LiteralPath $locator, $agent
     $pending = Join-Path $state 'activation.pending.json'
-    Write-AtomicJson $pending @{ release = $install; previousHash = $originalHash }
+    Write-AtomicJson $pending @{ release = $install }
     Assert-UninstallError { Uninstall-Project $project } '安装尚未完成'
     Copy-Item -LiteralPath $original -Destination $agent
     $result = Uninstall-Project $project
@@ -97,8 +97,8 @@ try {
     Copy-Item -LiteralPath $agent -Destination $original
     Write-AtomicJson (Join-Path $state 'install.json') $install
     Write-AtomicJson $locator @{ home = (Join-Path $local 'ShadowBotPi') }
-    Uninstall-Project $project | Out-Null
-    if (Test-Path -LiteralPath $locator) { throw 'Legacy locator survived.' }
+    Assert-UninstallError { Uninstall-Project $project } '不属于此项目'
+    Remove-Item -LiteralPath $locator
     New-Item -ItemType Directory -Force -Path (Split-Path $original) | Out-Null
     Copy-Item -LiteralPath $agent -Destination $original
     Remove-Item -LiteralPath $agent
@@ -115,8 +115,11 @@ try {
     if (!(Test-Path -LiteralPath $original) -or (Test-Path -LiteralPath (Join-Path $state 'install.json'))) { throw 'Missing host purge mishandled backup.' }
     Remove-Item -LiteralPath (Join-Path $state 'install.json') -ErrorAction SilentlyContinue
     Assert-UninstallError { Uninstall-Project $project -PurgeData -Yes } '请用 --shadowbot-dir'
-    Set-Content -LiteralPath $agent 'unknown'
+    Set-Content -LiteralPath (Join-Path $project 'ShadowBot.exe') 'fixture'
+    Set-Content -LiteralPath $agent 'managed'
+    Write-AtomicJson $locator @{ home = $state }
     Assert-UninstallError { Uninstall-Project $project -PurgeData -Yes -ShadowBotDirectory $project } '已保留原版备份'
+    Remove-Item -LiteralPath $locator
     Copy-Item -LiteralPath $original -Destination $agent -Force
     Copy-Item -LiteralPath (Join-Path $repository 'scripts') -Destination $project -Recurse
     $cli = Join-Path $project 'switch.ps1'
@@ -146,7 +149,7 @@ try {
     New-Item -ItemType Directory -Force -Path $state | Out-Null
     Write-AtomicJson (Join-Path $state 'install.json') $install
     Write-AtomicJson $locator @{ home = $state }
-    Assert-UninstallError { Uninstall-Project $project } '原程序备份缺失或校验失败'
+    Assert-UninstallError { Uninstall-Project $project } '原程序备份缺失'
     Remove-Item -LiteralPath (Join-Path $state 'install.json'), $locator -Force
 
     # Managed backend running with ShadowBot and project node.exe waits under --wait instead of failing immediately.
@@ -155,7 +158,6 @@ try {
         Set-Content -LiteralPath $original 'fixture bundled'
         Copy-Item -LiteralPath $original -Destination (Join-Path $runtime 'launcher.exe') -Force
         Set-Content -LiteralPath $agent 'fixture launcher'
-        $install.launcherHash = (Get-FileHash -LiteralPath $agent).Hash
         Write-AtomicJson (Join-Path $state 'install.json') $install
         Write-AtomicJson (Join-Path $state 'backend.json') @{ mode = 'pi' }
         Write-AtomicJson $locator @{ home = $state }

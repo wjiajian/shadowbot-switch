@@ -1,24 +1,27 @@
 ﻿. (Join-Path $PSScriptRoot 'activation.ps1')
 . (Join-Path $PSScriptRoot 'processes.ps1')
 . (Join-Path $PSScriptRoot 'runtime.ps1')
+. (Join-Path $PSScriptRoot 'discovery.ps1')
 
-function Repair-InstallationLocator($State, $ExpectedOriginalHash, [scriptblock]$CheckStopped) {
+function Repair-InstallationLocator($State, [scriptblock]$CheckStopped) {
     $manifest = Join-Path $State 'install.json'
     $installation = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json -AsHashtable
-    if ($installation.originalHash -ne $ExpectedOriginalHash -or (Get-FileHash -LiteralPath (Join-Path $State 'original/opencode.exe')).Hash -ne $ExpectedOriginalHash) { throw '原程序备份校验失败，不能修复。' }
+    if (!(Test-Path -LiteralPath (Join-Path $State 'original/opencode.exe') -PathType Leaf)) { throw '原程序备份缺失，不能修复。' }
     $locator = "$($installation.agentPath).shadowbot-pi.json"
     if (Test-Path -LiteralPath $locator) {
         $oldState = (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json -AsHashtable).home
         if ($oldState -ne $State -and (Test-Path -LiteralPath $oldState)) { throw "原项目仍存在：$oldState。请从原项目操作，避免接管另一套会话。" }
     }
     & $CheckStopped
-    Complete-Activation $State $installation.agentPath $ExpectedOriginalHash $CheckStopped
+    if ($oldState -and $oldState -ne $State -and (Test-Path -LiteralPath (Join-Path $State 'activation.pending.json'))) {
+        Write-AtomicJson $locator @{ home = $State }
+    }
+    Complete-Activation $State $CheckStopped
     $installation = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json -AsHashtable
     $runtime = Get-InstallationRuntime $State $installation
-    if ((Get-FileHash -LiteralPath (Join-Path $runtime 'launcher.exe')).Hash -ne $installation.launcherHash) { throw '运行时启动器校验失败，不能修复。' }
-    $active = (Get-FileHash -LiteralPath $installation.agentPath).Hash
-    if ($active -ne $ExpectedOriginalHash -and $active -ne $installation.launcherHash) { throw '活动程序不属于此项目，不能修复定位。' }
-    if ($active -ne $ExpectedOriginalHash) { Write-AtomicJson $locator @{ home = $State } }
+    if (!(Test-Path -LiteralPath (Join-Path $runtime 'launcher.exe') -PathType Leaf)) { throw '运行时启动器缺失，不能修复。' }
+    $locator = "$($installation.agentPath).shadowbot-pi.json"
+    if (Test-Path -LiteralPath $locator) { Write-AtomicJson $locator @{ home = $State } }
     Publish-Release $State $installation
 }
 
@@ -32,10 +35,10 @@ function Repair-ProjectLocation($Project, [string]$ShadowBotDirectory, [switch]$
     if ($ShadowBotDirectory -and [IO.Path]::TrimEndingDirectorySeparator((Split-Path (Split-Path $installation.agentPath))) -ne [IO.Path]::TrimEndingDirectorySeparator((Resolve-Path -LiteralPath $ShadowBotDirectory).Path)) {
         throw '搬迁修复只能用于原影刀安装；新设备请使用 config import。'
     }
-    $pinnedHash = Get-BundledExecutableHash
+
     Invoke-InstallationLock $installation.agentPath {
         Wait-SwitchProcesses -Wait:$Wait -TimeoutSeconds $WaitTimeoutSeconds
-        Repair-InstallationLocator $state $pinnedHash ${function:Assert-SwitchProcessesStopped}
+        Repair-InstallationLocator $state ${function:Assert-SwitchProcessesStopped}
     }
     $backend = (Get-Content -LiteralPath (Join-Path $state 'backend.json') -Raw | ConvertFrom-Json -AsHashtable).mode
     $harness = if ($backend -eq 'observe') { (Get-BundledHarness $Project).id } else { $backend }
@@ -45,7 +48,7 @@ function Repair-ProjectLocation($Project, [string]$ShadowBotDirectory, [switch]$
     Write-Host '修复完成。如果配置里写了绝对路径，运行 .\switch.ps1 config check 检查是否还有效。'
 }
 
-function Restore-UninstallHost($State, $AgentExe, $PinnedHash, [switch]$Wait, [int]$WaitTimeoutSeconds) {
+function Restore-UninstallHost($State, $AgentExe, [switch]$Wait, [int]$WaitTimeoutSeconds) {
     $pending = Test-Path -LiteralPath (Join-Path $State 'activation.pending.json')
     if (!(Test-Path -LiteralPath $AgentExe -PathType Leaf)) {
         if ($pending) { throw "安装尚未完成，找不到影刀程序：$AgentExe。请先恢复影刀安装。" }
@@ -67,31 +70,24 @@ function Restore-UninstallHost($State, $AgentExe, $PinnedHash, [switch]$Wait, [i
         }
         throw '活动程序不属于此项目，已停止卸载。如移动过项目，请先运行 .\switch.ps1 repair。'
     }
-    if (!(Test-Path -LiteralPath $original -PathType Leaf) -or (Get-FileHash -LiteralPath $original).Hash -ne $PinnedHash) {
-        throw '原程序备份缺失或校验失败，不能恢复原版。'
+    if (!(Test-Path -LiteralPath $original -PathType Leaf)) {
+        throw '原程序备份缺失，不能恢复原版。'
     }
     Wait-SwitchProcesses -Wait:$Wait -TimeoutSeconds $WaitTimeoutSeconds
-    Complete-Activation $State $AgentExe $PinnedHash ${function:Assert-SwitchProcessesStopped}
+    Complete-Activation $State ${function:Assert-SwitchProcessesStopped}
     $install = Get-Content -LiteralPath (Join-Path $State 'install.json') -Raw | ConvertFrom-Json -AsHashtable
-    if ($install.agentPath -ne $AgentExe -or $install.originalHash -ne $PinnedHash) { throw '安装记录校验失败。' }
+    if ($install.agentPath -ne $AgentExe) { throw '安装记录校验失败。' }
     $local = [Environment]::GetFolderPath('LocalApplicationData')
     if ($install.database -ne (Join-Path $local 'ShadowBot/opencode/runtime/shared/xdg_data/opencode/opencode.db') -or
         $install.users -ne (Join-Path $local 'ShadowBot/users') -or
         $install.resources -ne (Join-Path (Split-Path $AgentExe) 'Resources')) { throw '安装记录中的影刀数据路径不匹配。' }
     $owner = if (Test-Path -LiteralPath $locator) { (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json).home }
-    $active = (Get-FileHash -LiteralPath $AgentExe).Hash
     $managed = (Get-SelectedHarness $State $Project) -ne $bundled
-    if ($active -ne $PinnedHash -or $managed -or (Test-Path -LiteralPath (Join-Path $State 'switch.pending.json'))) {
-        if (($active -ne $PinnedHash -and $owner -ne $State) -or $active -notin $install.launcherHash, $PinnedHash) { throw '活动程序不属于此项目，已停止卸载。' }
-        if ($active -eq $PinnedHash) {
-            # Installed control versions require the verified launcher to switch sessions.
-            $runtime = Get-InstallationRuntime $State $install
-            Write-AtomicJson $locator @{ home = $State }
-            Set-CheckedExecutable (Join-Path $runtime 'launcher.exe') $AgentExe $install.launcherHash $PinnedHash ${function:Assert-SwitchProcessesStopped}
-        }
+    if ($owner -and $owner -ne $State) { throw '活动程序不属于此项目，已停止卸载。' }
+    if ($owner -eq $State -or $managed -or (Test-Path -LiteralPath (Join-Path $State 'switch.pending.json'))) {
         Write-Host '正在恢复原版会话与 Skill 菜单…'
         Invoke-RuntimeControl $State $install @('backend', $bundled) | Out-Null
-        Set-CheckedExecutable $original $AgentExe $PinnedHash $install.launcherHash ${function:Assert-SwitchProcessesStopped}
+        Copy-Executable $original $AgentExe -BeforeReplace ${function:Assert-SwitchProcessesStopped}
     }
     if ((Test-Path -LiteralPath $locator) -and (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json).home -in $State, $legacy) {
         Remove-Item -LiteralPath $locator -Force
@@ -106,13 +102,13 @@ function Get-ProjectSwitchProcesses([string]$Project) {
     })
 }
 
-function Test-ForeignSwitchOwner([string]$Owner, [string]$State, [string]$TargetExe, [string]$BundledHash) {
+function Test-ForeignSwitchOwner([string]$Owner, [string]$State, [string]$TargetExe) {
     if (!$Owner -or ![IO.Path]::IsPathFullyQualified($Owner)) { return $false }
     $normalizedOwner = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Owner))
     $normalizedState = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($State))
     if ($normalizedOwner -eq $normalizedState -or !(Test-Path -LiteralPath $normalizedOwner -PathType Container)) { return $false }
     $ownerOriginal = Join-Path $normalizedOwner 'original/opencode.exe'
-    if ((Test-Path -LiteralPath $ownerOriginal -PathType Leaf) -and (Get-FileHash -LiteralPath $ownerOriginal).Hash -eq $BundledHash) {
+    if (Test-Path -LiteralPath $ownerOriginal -PathType Leaf) {
         return $true
     }
     $ownerManifest = Join-Path $normalizedOwner 'install.json'
@@ -146,14 +142,14 @@ function Uninstall-Project($Project, [string]$ShadowBotDirectory, [switch]$Wait,
             elseif (Test-Path -LiteralPath $pending) { (Get-Content -LiteralPath $pending -Raw | ConvertFrom-Json).release.agentPath }
         $restored = $null
         $keepOriginal = $false
-        $bundledHash = Get-BundledExecutableHash
+
         if ((Test-Path -LiteralPath $manifest) -or (Test-Path -LiteralPath $pending)) {
             if (!$agent -or ![IO.Path]::IsPathFullyQualified($agent) -or (Split-Path -Leaf $agent) -ne 'opencode.exe') { throw '安装记录缺少有效的 opencode.exe 路径。' }
             if ($ShadowBotDirectory -and [IO.Path]::TrimEndingDirectorySeparator((Split-Path (Split-Path $agent))) -ne [IO.Path]::TrimEndingDirectorySeparator((Resolve-Path -LiteralPath $ShadowBotDirectory).Path)) {
                 throw '指定的影刀目录与安装记录不一致。'
             }
             $restored = Invoke-InstallationLock $agent {
-                Restore-UninstallHost $state $agent $bundledHash -Wait:$Wait -WaitTimeoutSeconds $WaitTimeoutSeconds
+                Restore-UninstallHost $state $agent -Wait:$Wait -WaitTimeoutSeconds $WaitTimeoutSeconds
             }
             if (!$restored -and $PurgeData -and !(Test-Path -LiteralPath $agent -PathType Leaf) -and
                 (Test-Path -LiteralPath (Join-Path $state 'original/opencode.exe') -PathType Leaf)) {
@@ -166,11 +162,11 @@ function Uninstall-Project($Project, [string]$ShadowBotDirectory, [switch]$Wait,
         }
         elseif ($PurgeData -and (Test-Path -LiteralPath (Join-Path $state 'original/opencode.exe') -PathType Leaf)) {
             if (!$ShadowBotDirectory) { throw '缺少安装记录，请用 --shadowbot-dir 指定影刀目录以核验原版备份可以安全删除。' }
-            $target = Join-Path (Resolve-Path -LiteralPath $ShadowBotDirectory).Path "shadowbot-$(Get-SupportedShadowBotVersion)/opencode.exe"
+            $target = (Resolve-ShadowBotAgent $ShadowBotDirectory).agentPath
             $locator = "$target.shadowbot-pi.json"
             $owner = if (Test-Path -LiteralPath $locator) { (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json).home }
-            $otherOwner = Test-ForeignSwitchOwner $owner $state $target $bundledHash
-            if (!$otherOwner -and (!(Test-Path -LiteralPath $target -PathType Leaf) -or (Get-FileHash -LiteralPath $target).Hash -ne $bundledHash)) {
+            $otherOwner = Test-ForeignSwitchOwner $owner $state $target
+            if (!$otherOwner -and (!(Test-Path -LiteralPath $target -PathType Leaf) -or (Test-Path -LiteralPath $locator))) {
                 throw '无法确认影刀已恢复原版，已保留原版备份。'
             }
         }
@@ -202,7 +198,10 @@ function Uninstall-Project($Project, [string]$ShadowBotDirectory, [switch]$Wait,
                 $runtimeHarnesses = Join-Path $state 'harnesses'
                 if (Test-Path -LiteralPath $runtimeHarnesses) {
                     foreach ($dir in Get-ChildItem -LiteralPath $runtimeHarnesses -Directory -Force) {
-                        if (!$dir.LinkType) { $paths += Join-Path $dir.FullName 'releases' }
+                        if (!$dir.LinkType) {
+                            $paths += Join-Path $dir.FullName 'releases'
+                            $paths += Join-Path $dir.FullName 'dependencies'
+                        }
                     }
                 }
                 if ($restored) { $paths += Join-Path $state 'original' }

@@ -102,7 +102,12 @@ $global:LASTEXITCODE = 0
     Build-Bridge $root $chain -SkipTests
     if ("off|none|$externalGo" -notin (Get-Content -LiteralPath (Join-Path $root 'proxy'))) { throw 'Offline Go settings lost.' }
     $logged = Get-Content -LiteralPath (Join-Path $root 'args') -Raw
-    if (!$logged.Contains("--cache|$externalNpm|") -or $logged -notmatch '--registry=https://registry.npmmirror.com' -or $logged -notmatch '--offline') { throw 'npm options were lost.' }
+    if (!$logged.Contains("--cache|$externalNpm|") -or !$logged.Contains("--registry=$($offline.registry)") -or $logged -notmatch '--offline') { throw 'npm options were lost.' }
+    Invoke-ProjectNpm $chain $root @('install','--package-lock-only','--ignore-scripts')
+    $arguments = (Get-Content -LiteralPath (Join-Path $root 'args') -Tail 1).Split('|')
+    foreach ($flag in '--ignore-scripts','--no-audit','--no-fund') {
+        if (@($arguments | Where-Object { $_ -eq $flag }).Count -ne 1) { throw "npm flag missing or repeated: $flag" }
+    }
     'Toolchain tests passed.'
 } finally {
     foreach ($name in $saved.Keys) {
