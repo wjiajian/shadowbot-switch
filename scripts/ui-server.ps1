@@ -130,6 +130,11 @@ function ConvertTo-UiJobArguments($Request) {
         }
         default { throw "不支持的任务：$command" }
     })
+    if ($Request.ContainsKey('localOnly')) {
+        if ($command -cne 'update') { throw 'localOnly 只能用于更新。' }
+        if ($Request.localOnly -isnot [bool]) { throw 'localOnly 需要布尔值。' }
+        if ($Request.localOnly) { $arguments += '--local-only' }
+    }
     if ($command -in 'use', 'update', 'repair' -and $Request.ContainsKey('mirror')) { $arguments += @('--mirror', (Assert-UiMirror $Request.mirror)) }
     if ($command -in 'use', 'update', 'repair' -and $Request.ContainsKey('offlineDir')) {
         $arguments += @('--offline-dir', (Assert-UiPath $Request.offlineDir))
@@ -226,15 +231,17 @@ function Get-UiState($Request) {
         $record = if ($installation -and $installation.harnesses) { $installation.harnesses.PSObject.Properties[$spec.id].Value } else { $null }
         $version = if ($record -and $record.version) { [string]$record.version }
             elseif ($spec.id -eq 'pi' -and $installation -and $installation.piVersion) { [string]$installation.piVersion }
-            elseif ($spec.kind -eq 'bundled') { [string]$spec.version }
+            elseif ($spec.kind -eq 'bundled') { $installation.bundled.version ?? $spec.version }
             else { $null }
-        $availableVersion = $null
+        $pinnedVersion = $availableVersion = $null
         $updateStatus = if ($spec.kind -eq 'bundled') { 'bundled' } elseif (!$version) { 'not-installed' } else { 'unknown' }
         if ($spec.kind -eq 'managed') {
             try {
-                $availableVersion = Get-RuntimeVersion $project $spec
-                if ($version -and $record.release -and !$record.legacy) {
-                    $localRelease = Get-RuntimeReleaseId $project $spec (Get-ToolchainNodeHash) $availableVersion
+                $pinnedVersion = Get-RuntimeVersion $project $spec
+                $plan = Get-HarnessDependencyPlan $project $state $spec $record
+                $availableVersion = $plan.version
+                if (!$plan.missing -and $version -and $record.release -and !$record.legacy) {
+                    $localRelease = Get-RuntimeReleaseId $project $spec (Get-ToolchainNodeHash) $availableVersion $plan
                     $updateStatus = if ($localRelease -eq $record.release) { 'current' } else { 'different' }
                 }
             } catch { $updateStatus = 'unknown' }
@@ -244,6 +251,10 @@ function Get-UiState($Request) {
             installed = $spec.kind -eq 'bundled' -or [bool]$version
             selected = $spec.id -eq $selected
             version = $version
+            pinnedVersion = $pinnedVersion
+            dependencySource = if ($version -and $spec.kind -eq 'managed') { if ($record.dependencies.source -eq 'upstream') { 'upstream' } else { 'pinned' } }
+            upstreamCapable = [bool]$spec.upstream
+            upstream = if ($script:Ui.Upstream) { $script:Ui.Upstream.items[$spec.id] }
             availableVersion = $availableVersion; updateStatus = $updateStatus
             skills = [bool]$spec.capabilities.skills; mcp = [bool]$spec.capabilities.mcp
         }
@@ -271,11 +282,12 @@ function Get-UiState($Request) {
         problem = $problem
         selected = $selected
         recoveryPending = @('activation.pending.json', 'switch.pending.json' | Where-Object { Test-Path -LiteralPath (Join-Path $state $_) }).Count -gt 0
+        upstreamCheckedAt = $script:Ui.Upstream.checkedAt
         harnesses = $harnesses
         shadowbot = [ordered]@{ directory = $directory; version = (Get-UiShadowBotVersion $directory) }
         home = $state
         app = $preference
-        job = if ($job -and !$job.Done) { [ordered]@{ id = $job.Id; cmd = $job.Cmd; harness = $job.Harness } } else { $null }
+        job = if ($job -and !$job.Done) { [ordered]@{ id = $job.Id; cmd = $job.Cmd; harness = $job.Harness; localOnly = $job.LocalOnly } } else { $null }
     }
 }
 
@@ -291,9 +303,10 @@ function Start-UiJob($Request) {
     try { $process = [Diagnostics.Process]::Start($info) }
     catch { Close-SwitchWaitControl $waitControl; throw }
     $process.StandardInput.Close()
+    $script:Ui.Upstream = $null
     $script:Ui.JobCount++
     $script:Ui.Job = @{
-        Id = $script:Ui.JobCount; Cmd = [string]$Request.cmd; Harness = [string]$Request.harness
+        LocalOnly = [bool]$Request.localOnly; Id = $script:Ui.JobCount; Cmd = [string]$Request.cmd; Harness = [string]$Request.harness
         Process = $process; WaitControl = $waitControl; Lines = [Collections.Generic.List[string]]::new()
         Out = $process.StandardOutput.ReadLineAsync(); Err = $process.StandardError.ReadLineAsync()
         Done = $false; ExitCode = $null; Stopped = $false; Started = [DateTime]::UtcNow; ExitedAt = $null
@@ -395,9 +408,29 @@ function Open-UiPath($Kind, $Path) {
     throw '不支持的打开方式。'
 }
 
+function Invoke-UiUpdateCheck($Request) {
+    if ($script:Ui.Job -and !$script:Ui.Job.Done) { throw '任务运行中，结束后再检查更新。' }
+    $mirror = if ($Request.ContainsKey('mirror')) { Assert-UiMirror $Request.mirror }
+    $specs = @(Get-HarnessRegistry $script:Ui.Project)
+    $report = Get-HarnessUpdateReport $script:Ui.Project $script:Ui.State $specs (Get-ToolchainSource $mirror)
+    $cache = @{ checkedAt = $report.checkedAt; items = @{} }
+    foreach ($item in $report.harnesses) {
+        $message = if ($item.status -eq 'error') { '更新检查失败，请检查下载源或仅按本地源码重建。' } else { $item.message }
+        $safe = @{ status = $item.status; message = $message }
+        foreach ($key in 'candidate','latest','majorAvailable') {
+            if ($item[$key]) { Assert-SemVer $item[$key] }
+            $safe[$key] = $item[$key]
+        }
+        $cache.items[$item.id] = $safe
+    }
+    $script:Ui.Upstream = $cache
+    $cache
+}
+
 function Invoke-UiApi([string]$Path, $Request) {
     switch -CaseSensitive ($Path) {
         '/api/ping' { return @{ ok = $true } }
+        '/api/updates/check' { return Invoke-UiUpdateCheck $Request }
         '/api/state' { return Get-UiState $Request }
         '/api/run' { return Invoke-UiControl (ConvertTo-UiCommand $Request) }
         '/api/jobs/start' { return @{ id = Start-UiJob $Request } }

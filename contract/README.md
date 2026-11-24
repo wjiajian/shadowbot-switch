@@ -1,6 +1,6 @@
 # OpenCode 1.18.12 兼容契约
 
-本机影刀版本为 `6.3.39`，随附原版 agent 的 `--version` 返回 `1.18.12`。原程序 SHA-256 为 `de2e62ab0e3f27a3ea7ff9ef4c4fe7097f0d6df01118b2e7c5f57726256d6314`。
+本机影刀版本为 `6.3.39`，随附原版 agent 的 `--version` 返回 `1.18.12`。
 
 - [schema.sql](schema.sql) 来自本机共享数据库的只读 `.schema` 查询。活动数据库位于 `%LOCALAPPDATA%\ShadowBot\opencode\runtime\shared\xdg_data\opencode\opencode.db`。
 - 会话指针位于 `users/{user}/apps/{app}/copilot/agent/sessions/current-session.json`。扩展应用另有 `xbot_extensions/{extension}/.dev/agent/sessions/current-session.json`。
@@ -18,7 +18,7 @@
 
 [opencode-fixture.jsonl](opencode-fixture.jsonl) 由本机原版 `opencode.exe` 和本地模拟模型生成。启动器转发 Basic Auth、`GET /global/health`、`POST /session`、`GET /event` 和 `POST /session/{id}/prompt_async`。`prompt_async` 返回 204。事件包括 `message.updated`、`message.part.updated`、`message.part.delta`、`session.status` 和 `session.idle`。样本保留已识别的结构，移除了时间戳和未识别的事件。
 
-类型基线来自锁定的 `@opencode-ai/sdk@1.18.12`。Pi 侧使用锁定的 `@earendil-works/pi-coding-agent@1.5.2` 和 `@earendil-works/pi-mcp@1.5.2`。Pi 实机已通过影刀本地转发完成平台模型交互。
+SDK 声明范围为 `^1.18.12`，Pi 为 `^1.5.2`。首次联网 `use` 和 `update` 在同主版本内选择最新兼容的 Pi 版本。基线依赖包含 `@earendil-works/pi-coding-agent@1.5.2` 和 `@earendil-works/pi-mcp@1.5.2`。Pi 实机已通过影刀本地转发完成平台模型交互。
 
 
 ## Harness 接入约定
@@ -29,9 +29,11 @@
 
 1. 添加 `harnesses/<id>/harness.json`，声明唯一小写 ID、名称、别名、`kind: "managed"`、版本、适配器入口、启动参数与 Skills/MCP 能力。
 2. 实现 `src/adapters/<id>/index.ts`，导出 `adapter: HarnessAdapter`；需要初始化环境时可改为导出 `async initialize(home): Promise<HarnessAdapter>`，在函数中设置环境后动态导入 SDK。`createConfig` 接收宿主模型与认证，`createRuns` 负责执行、取消、原生上下文及会话操作。可选的 `mcp` 实现承载宿主 MCP；`capabilities.mcp` 控制自定义 MCP 的加载，不关闭宿主服务。界面事件和历史通过传入的 `Store` 写入，授权/提问使用 `Interactions`。`start(session, prompt, run)` 的 `run.instructions` 是公共层每轮读取的 AGENTS.md 规则，已经过范围、大小和编码检查；适配器只需把它追加到模型的系统提示，不要自行加载 AGENTS.md，也不要并入 `prompt.system`（该字段会原样保存并回显给宿主）。适配器内部发起的子会话（如 Pi 的 Explorer）沿用同一轮的 `instructions`。TypeScript 允许实现方法少声明参数，类型检查拦不住旧的 `start(session, prompt)`，因此公共层创建 runs 时会检查 `start` 至少声明三个参数，不满足即拒绝启动。这项检查只能确认参数已声明，适配器是否真正用到 `run.instructions` 仍需在各自的测试中验证。
-3. 如需依赖，在 `harnesses/<id>/package.json` 与锁文件中声明；`versionPackage` 可指定用哪个依赖版本作为适配器版本，否则使用注册中的 `version`。编译测试需要的依赖放在根包的 `devDependencies`，生产 SDK 只安装到该适配器子目录。
+3. 如需依赖，在 `harnesses/<id>/package.json` 与锁文件中声明；`versionPackage` 可指定用哪个依赖版本作为适配器版本，否则使用注册中的 `version`。编译测试需要的依赖放在根包的 `devDependencies`，生产 SDK 只安装到该适配器子目录。托管 harness 可声明 `upstream: { type: "npm-lockstep", packages: [...] }`。列表包含 1–16 个唯一合法小写 npm 包名（最长 214 字符），必须包含 versionPackage，且每个包都是 adapter 的精确同版本直接依赖。
 4. `launch.executable` 相对于发布目录；参数中的 `{runtime}` 替换为该 harness 已提交的发布目录。使用公共兼容服务时设置 `args: ["{runtime}/service/main.js"]`。运行环境提供 `SHADOWBOT_SWITCH_HOME` 和 `SHADOWBOT_HARNESS`，SDK 专属环境变量由适配器设置。
 5. 在隔离测试中注册适配器并验证启动、会话隔离、更新、能力拒绝和恢复；不修改安装器、启动器或切换核心来识别新 ID。
+
+安装记录 `harnesses[id].dependencies` 的 source 为 pinned 或 upstream，旧记录按 pinned 处理。upstream 记录另存 lockHash、packages 版本表和 explicit 标记。
 
 安装记录 `format: 2` 使用 `runtime: { harness, release }` 指向管理运行时，`harnesses[id]` 分别记录各引擎的版本、发布 ID、适配器入口、启动方式与能力；`bundled` 记录宿主自带引擎的 ID 和版本。启动器从当前选择对应的记录启动，更新其他 harness 不改变选择。原版属于唯一的 `bundled` 类型，由影刀维护二进制和版本。注册项可通过 `menuOrder` 固定菜单顺序，输入名称和别名不区分大小写。保留旧 Pi 运行时期间仍写入它读取 schema 所需的 `runtimeRelease/piVersion`，迁移该运行时后移除。
 

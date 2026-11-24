@@ -22,7 +22,17 @@ const ICONS = {
 
 const PAGES = ['harness', 'skills', 'mcp', 'doctor'];
 const TOKEN_KEY = 'shadowbot-switch-token';
-const SUPPORTED_SHADOWBOT = '6.3.39';
+const MIN_SHADOWBOT = '6.3.39';
+function belowMinimum(version) {
+  if (!/^\d+(?:\.\d+)+$/.test(version)) return false;
+  const parts = version.split('.').map(Number);
+  const minimum = MIN_SHADOWBOT.split('.').map(Number);
+  for (let i = 0; i < minimum.length; i++) {
+    const value = parts[i] ?? 0;
+    if (value !== minimum[i]) return value < minimum[i];
+  }
+  return false;
+}
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MCP_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const SOURCES = { installation: '安装级', app: '应用级', official: '影刀内置', legacy: '旧目录' };
@@ -374,11 +384,12 @@ async function saveShadowBotDir(value) {
 
 // ---------------------------------------------------------------- long tasks
 
-function jobSteps(cmd, target) {
+function jobSteps(cmd, target, options = {}) {
   if (cmd === 'repair' || !target) return [];
   const managed = target.kind === 'managed';
   const steps = [];
-  if (managed && (cmd === 'update' || !target.installed)) steps.push({ label: '构建运行时', match: /准备构建工具|构建运行时|正在(安装|更新)/ });
+  if (cmd === 'update' && target.upstreamCapable && !options.localOnly) steps.push({ label: '检查上游版本', match: /检查上游版本/ });
+  if (managed && (cmd === 'update' || !target.installed)) steps.push({ label: '构建运行时', match: /准备构建工具|解析依赖版本|构建运行时|正在(安装|更新)/ });
   steps.push({ label: '等待影刀退出', match: /需要先退出影刀|正在等待影刀退出/ });
   if (managed) steps.push({ label: '检查安装', match: /检查安装/ });
   steps.push({ label: cmd === 'update' ? '启用新版本' : '切换后端', match: /切换后端|启用新版本/ });
@@ -399,20 +410,21 @@ function jobVerb(cmd, target) {
   return target.installed ? '切换中' : '安装中';
 }
 
-function newJob(id, cmd, harnessId) {
+function newJob(id, cmd, harnessId, options = {}) {
   const target = state.base.harnesses.find(item => item.id === harnessId) || null;
   return {
-    id, cmd, harness: harnessId || '', title: jobTitle(cmd, target), verb: jobVerb(cmd, target), steps: jobSteps(cmd, target),
+    id, cmd, harness: harnessId || '', title: jobTitle(cmd, target), verb: jobVerb(cmd, target), steps: jobSteps(cmd, target, options),
     lines: [], cursor: 0, reached: -1, done: false, exitCode: null, stopped: false,
     startedAt: Date.now(), waiting: false, waitStartedAt: 0, waitSeconds: 0, collapsed: false, pollError: null,
   };
 }
 
-async function startJob(cmd, harnessId, purgeData = false) {
+async function startJob(cmd, harnessId, options = {}) {
   if (jobRunning()) return;
   const body = { cmd };
   if (state.mirror && ['use', 'update', 'repair'].includes(cmd)) body.mirror = state.mirror;
-  if (cmd === 'uninstall') body.purgeData = purgeData;
+  if (cmd === 'uninstall') body.purgeData = Boolean(options.purgeData);
+  if (cmd === 'update' && options.localOnly) body.localOnly = true;
   if (harnessId) body.harness = harnessId;
   // Before installing, pass the directory shown on the page. With several ShadowBot copies the
   // background task cannot ask which one, so it must never guess on its own.
@@ -422,7 +434,7 @@ async function startJob(cmd, harnessId, purgeData = false) {
   }
   try {
     const { id } = await api('/api/jobs/start', body);
-    state.job = newJob(id, cmd, harnessId);
+    state.job = newJob(id, cmd, harnessId, options);
     state.editingDir = false;
     setPage('harness');
     pollJob();
@@ -607,13 +619,20 @@ function harnessColumn(spec) {
     actions.push(button(spec.installed ? '切换到此' : '安装并切换', 'btn-primary', () => startJob('use', spec.id),
       { disabled: Boolean(job) || Boolean(state.base.problem) || needsHost, title: needsHost ? '先在下方填写影刀安装目录' : null }));
   }
+  const upstream = spec.upstream;
+  const candidate = upstream?.candidate;
   if (spec.installed && spec.kind === 'managed') {
-    actions.push(button(spec.updateStatus === 'current' ? '重新应用本地版本' : '应用本地更新', 'btn-secondary', () => startJob('update', spec.id),
-      { disabled: Boolean(job) || Boolean(state.base.problem) || !spec.availableVersion }));
+    const disabled = Boolean(job) || Boolean(state.base.problem) || !spec.availableVersion;
+    if (candidate || spec.updateStatus !== 'current' || (spec.upstreamCapable && upstream?.status !== 'up-to-date')) {
+      const label = candidate ? `更新到 ${candidate}` : (spec.updateStatus === 'different' || !spec.upstreamCapable) ? '应用本地更新' : '检查并更新';
+      actions.push(button(label, 'btn-secondary', () => startJob('update', spec.id), { disabled }));
+    }
+    if (upstream?.status === 'error') actions.push(button('仅本地重建', 'btn-text', () => startJob('update', spec.id, { localOnly: true }), { disabled }));
   }
-  const status = {
-    current: ['与本地一致，无需更新', 'ok'],
-    different: ['本地内容有变化，可应用更新', 'accent'],
+  const status = candidate ? [`上游有新版本 ${candidate}，可更新`, 'accent']
+    : upstream?.status === 'error' && spec.updateStatus !== 'different' ? [upstream.message, 'warn'] : {
+    current: [upstream?.status === 'up-to-date' ? '已是最新' : '与本地构建一致', 'ok'],
+    different: ['本地源码有变化，可应用更新', 'accent'],
     unknown: ['无法判断是否需要更新', 'warn'],
     'not-installed': ['安装后即可使用', 'muted'],
     bundled: ['随影刀更新，无需单独更新', 'muted'],
@@ -623,11 +642,14 @@ function harnessColumn(spec) {
       h('h2', null, spec.name),
       badge),
     h('div', { class: 'harness-versions' },
-      h('div', null, h('span', { class: 'muted' }, spec.kind === 'bundled' ? '随影刀提供' : '已安装'), h('span', null, spec.version || '未安装')),
-      spec.kind === 'managed' ? h('div', null, h('span', { class: 'muted' }, '本地可用'), h('span', null, spec.availableVersion || '无法读取')) : null),
+      h('div', null, h('span', { class: 'muted' }, spec.kind === 'bundled' ? '随影刀提供' : '已安装'), h('span', null, (spec.version || '未安装') + (spec.dependencySource === 'upstream' ? ' · 上游版本' : ''))),
+      spec.kind === 'managed' ? h('div', null, h('span', { class: 'muted' }, '仓库锁定'), h('span', null, spec.pinnedVersion || '无法读取')) : null,
+      spec.upstreamCapable ? h('div', null, h('span', { class: 'muted' }, '上游'), h('span', null,
+        candidate || ({ 'up-to-date': '已是最新', error: '检查失败', skipped: '离线跳过' }[upstream?.status] || '未检查'))) : null),
     h('div', { class: `caps${spec.skills || spec.mcp ? '' : ' muted'}` }, capability('Skill', spec.skills), capability('MCP', spec.mcp)),
     h('div', { class: 'harness-footer' },
       h('p', { class: status[1] }, status[0]),
+      upstream?.majorAvailable ? h('p', { class: 'harness-note' }, `另有新主版本 ${upstream.majorAvailable}，需手动指定版本`) : null,
       actions.length ? h('div', { class: 'actions' }, actions) : null));
 }
 
@@ -686,7 +708,7 @@ function shadowbotSection() {
   }
   let version;
   if (info.version) {
-    version = [h('span', null, info.version), info.version !== SUPPORTED_SHADOWBOT ? h('span', { class: 'warn' }, `目前只支持 ${SUPPORTED_SHADOWBOT}`) : null];
+    version = [h('span', null, info.version), belowMinimum(info.version) ? h('span', { class: 'warn' }, `低于 ${MIN_SHADOWBOT}，可能不兼容`) : null];
   } else version = h('span', { class: 'muted' }, info.directory ? '这个目录里没有 ShadowBot.exe' : '—');
   return h('section', { class: 'facts', 'aria-labelledby': 'host-title' },
     h('h2', { id: 'host-title' }, '影刀'),
@@ -707,7 +729,18 @@ function confirmUninstall() {
       h('label', null, purge, ' 同时删除历史会话与配置（.shadowbot-switch）')),
     h('div', { class: 'dialog-foot' }, button('取消', 'btn-secondary', () => dialog.close()),
       confirm),
-    () => { dialog.close(); startJob('uninstall', null, purge.checked); });
+    () => { dialog.close(); startJob('uninstall', null, { purgeData: purge.checked }); });
+}
+
+async function checkUpdates() {
+  await withBusy('check-updates', async () => {
+    try {
+      const report = await api('/api/updates/check', state.mirror ? { mirror: state.mirror } : {});
+      await refreshBase();
+      const failed = Object.values(report.items).some(item => item.status === 'error');
+      toast(failed ? '部分 harness 检查失败，详情见卡片。' : '检查完成。', failed ? 'error' : 'ok');
+    } catch (error) { toast(error.message, 'error'); }
+  });
 }
 
 function harnessPage() {
@@ -728,6 +761,9 @@ function harnessPage() {
       state.mirror = value;
       try { localStorage.setItem('shadowbot-switch-mirror', value); } catch { /* kept in memory only */ }
     }, jobRunning()),
+    button(isBusy('check-updates') ? '检查中…' : '检查更新', 'btn-secondary', checkUpdates,
+      { disabled: jobRunning() || isBusy('check-updates') || !base.harnesses.some(spec => spec.installed && spec.upstreamCapable) }),
+    base.upstreamCheckedAt && h('span', { class: 'harness-note' }, '上次检查 ' + new Date(base.upstreamCheckedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
     base.canUninstall && button('卸载 ShadowBot Switch', 'btn-secondary', confirmUninstall, { disabled: jobRunning() })));
   return parts;
 }
@@ -1176,7 +1212,7 @@ async function boot() {
   heartbeat();
   state.scope = state.base.app || '';
   if (state.base.job) {
-    state.job = newJob(state.base.job.id, state.base.job.cmd, state.base.job.harness);
+    state.job = newJob(state.base.job.id, state.base.job.cmd, state.base.job.harness, state.base.job);
     pollJob();
   }
   setPage(pageFromHash() || (ready() ? 'skills' : 'harness'));

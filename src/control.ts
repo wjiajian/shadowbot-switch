@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { HarnessRegistry, harnessCapabilities, loadAdapter } from './harnesses.js';
-import { installationHome, mode, originalHash, protocolVersion, readJson, installedVersion, runtimeHarness, runtimeDirectory, sha256 } from './installation.js';
+import { installationHome, mode, protocolVersion, readJson, installedVersion, runtimeHarness, runtimeDirectory } from './installation.js';
 import type { Installation } from './installation.js';
 import { HostConfig } from './config.js';
 import { skillSources } from './host-skills.js';
@@ -23,18 +23,17 @@ async function main([command, arg]: string[]) {
     return manage(home, install, args);
   }
   const runtime = runtimeDirectory(home, install);
-  const schema = readFileSync(join(runtime, 'schema.sql'), 'utf8');
   const agentDir = join(home, 'agent');
   const backup = join(home, 'original', 'opencode.exe');
   if (command === 'verify-install') {
     const spec = registry.get(arg ?? runtimeHarness(install));
     const adapter = await loadAdapter(home, install, spec);
     await adapter.verify(installedVersion(install, spec.id));
-    verifySchema(install.database, schema);
-    if (install.originalHash.toLowerCase() !== originalHash || sha256(backup) !== originalHash) throw new Error('Original OpenCode checksum mismatch');
+    verifySchema(install.database);
+    if (!existsSync(backup)) throw new Error('Original OpenCode backup is missing');
     if (process.version !== 'v24.22.3') throw new Error('Expected the bundled Node 24.22.3 runtime');
-    if ((install.runtime || install.runtimeRelease) && sha256(join(runtime, 'launcher.exe')) !== install.launcherHash.toLowerCase()) {
-      throw new Error('Staged launcher checksum mismatch');
+    if ((install.runtime || install.runtimeRelease) && !existsSync(join(runtime, 'launcher.exe'))) {
+      throw new Error('Staged launcher is missing');
     }
     const current = existsSync(join(home, 'backend.json')) ? mode(home) : registry.bundled().id;
     console.log(JSON.stringify({ harness: current, protocol: protocolVersion,
@@ -47,8 +46,8 @@ async function main([command, arg]: string[]) {
     const harness = registry.get(arg);
     if (harness.kind === 'managed' && install.runtime && !install.harnesses?.[harness.id]) throw new Error('Target harness is not installed');
     assertHostStopped();
-    if (install.originalHash.toLowerCase() !== originalHash || sha256(backup) !== originalHash) throw new Error('Original OpenCode checksum mismatch');
-    if (sha256(install.agentPath) !== install.launcherHash.toLowerCase()) throw new Error('Active launcher checksum mismatch');
+    if (!existsSync(backup)) throw new Error('Original OpenCode backup is missing');
+    const schema = readFileSync(join(runtime, 'schema.sql'), 'utf8');
     await switchBackend(home, install, harness.id, schema);
     const config = new HostConfig().value;
     syncSkillCommands(install.resources, harnessCapabilities(install, harness).skills ? skillInventory(agentDir, undefined, skillSources(home, install, harness.id), config)

@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
@@ -13,7 +13,7 @@ import type { Agent, Auth, McpLocalConfig, McpRemoteConfig, Session, SessionCrea
 import { commandTemplate, copilot, explorer, HostConfig, modelSelection, object } from './config.js';
 import { skillSources } from './host-skills.js';
 import type { SkillSources } from './host-skills.js';
-import { installationHome, mode, protocolVersion, readJson, installedVersion, runtimeDirectory } from './installation.js';
+import { installationHome, mode, protocolVersion, readJson, installedVersion, hostVersion } from './installation.js';
 import type { Installation } from './installation.js';
 import { permissionRules } from './interactions.js';
 import { customMcp } from './mcp-config.js';
@@ -228,7 +228,7 @@ class Bridge {
       res.writeHead(401, { 'www-authenticate': 'Basic realm="opencode"' }).end();
       return;
     }
-    if (path === '/global/health' && method === 'GET') return json(res, { healthy: true, version: protocolVersion });
+    if (path === '/global/health' && method === 'GET') return json(res, { healthy: true, version: hostVersion(this.installation) });
     if (path === '/config' || path === '/global/config') {
       if (method === 'GET') return json(res, this.config.publicConfig());
       if (method === 'PATCH') {
@@ -438,7 +438,7 @@ async function main() {
   const registered = new HarnessRegistry().get(mode(home));
   const harness = { ...registered, capabilities: harnessCapabilities(installation, registered) };
   if (harness.kind !== 'managed' || existsSync(join(home, 'switch.pending.json')) || existsSync(join(home, 'activation.pending.json'))) throw new Error('Harness is not ready');
-  verifySchema(installation.database, readFileSync(join(runtimeDirectory(home, installation, harness.id), 'schema.sql'), 'utf8'));
+  verifySchema(installation.database);
   const adapter = await loadAdapter(home, installation, harness);
   await adapter.verify(installedVersion(installation, harness.id));
   const bridge = new Bridge(home, installation, options.cors, harness, adapter);

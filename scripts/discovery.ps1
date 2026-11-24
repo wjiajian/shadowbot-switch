@@ -71,3 +71,25 @@ function Find-ShadowBotDirectory([string]$ManifestPath) {
     }
     $directories | Select-Object -First 1
 }
+
+$script:MinShadowBotVersion = '6.3.39'
+
+function Resolve-ShadowBotAgent([string]$ShadowBotDirectory) {
+    $hostVersion = (Get-Item -LiteralPath (Join-Path $ShadowBotDirectory 'ShadowBot.exe')).VersionInfo.ProductVersion
+    $version = $hostVersion -as [version]
+    if ($version -and $version -lt [version]$script:MinShadowBotVersion) {
+        Write-Warning "影刀版本 $hostVersion 低于 $script:MinShadowBotVersion，可能不兼容。"
+    }
+    $candidates = foreach ($dir in (Get-ChildItem -LiteralPath $ShadowBotDirectory -Filter 'shadowbot-*' -Directory)) {
+        $path = Join-Path $dir.FullName 'opencode.exe'
+        if (!(Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        $suffix = $dir.Name.Substring('shadowbot-'.Length)
+        $rank = if ($suffix -eq $hostVersion) { 2 }
+            elseif ($hostVersion -and $suffix -and ($suffix.StartsWith($hostVersion) -or $hostVersion.StartsWith($suffix))) { 1 }
+            else { 0 }
+        [pscustomobject]@{ path = $path; rank = $rank; version = $suffix -as [version] }
+    }
+    $agent = $candidates | Sort-Object rank,version,path -Descending | Select-Object -First 1
+    if (!$agent) { throw "在 $ShadowBotDirectory 中没有找到 shadowbot-*/opencode.exe" }
+    @{ hostVersion = $hostVersion; agentPath = $agent.path; resources = Join-Path (Split-Path $agent.path) 'Resources' }
+}

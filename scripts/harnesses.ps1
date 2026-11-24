@@ -1,3 +1,8 @@
+$script:NpmPackagePattern = '^(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*$'
+function Assert-NpmPackageName($Name) {
+    if ($Name -isnot [string] -or $Name.Length -gt 214 -or $Name.Contains("`n") -or $Name -cnotmatch $script:NpmPackagePattern) { throw 'npm 包名无效。' }
+}
+
 function Get-HarnessRegistry([string]$Project) {
     $names = @{}
     @(Get-ChildItem -LiteralPath (Join-Path $Project 'harnesses') -Directory | ForEach-Object {
@@ -7,6 +12,17 @@ function Get-HarnessRegistry([string]$Project) {
         foreach ($name in @($spec.id) + @($spec.aliases)) {
             if ($name -cnotmatch '^[a-z][a-z0-9-]{0,63}$' -or $names.ContainsKey($name)) { throw 'Invalid or duplicate harness name.' }
             $names[$name] = $true
+        }
+        if ($spec.PSObject.Properties['upstream']) {
+            $packages = $spec.upstream.packages
+            if ($spec.kind -cne 'managed' -or $spec.upstream.type -cne 'npm-lockstep' -or $packages -isnot [array] -or
+                $packages.Count -notin (1..16) -or $packages -cnotcontains $spec.versionPackage) { throw 'Invalid harness upstream registration.' }
+            $seen = @{}
+            foreach ($package in $packages) {
+                Assert-NpmPackageName $package
+                if ($seen.ContainsKey($package)) { throw 'Duplicate upstream package.' }
+                $seen[$package] = $true
+            }
         }
         if ($spec.kind -eq 'managed') {
             foreach ($path in @($spec.adapter, $spec.launch.executable)) {

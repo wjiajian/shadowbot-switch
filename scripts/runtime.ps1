@@ -1,3 +1,5 @@
+. (Join-Path $PSScriptRoot 'upstream.ps1')
+
 function Invoke-RuntimeControl($StateDirectory, $Install, [string[]]$Arguments) {
     $runtime = if ($Install.runtime -or $Install.runtimeRelease) { Get-InstallationRuntime $StateDirectory $Install } else { $StateDirectory }
     $previousHome = $env:SHADOWBOT_PI_HOME
@@ -25,29 +27,37 @@ function Remove-ProjectStage($State, $Path) {
 
 function Get-RuntimeVersion($Project, $Spec) {
     $adapterPackage = Join-Path $project "harnesses/$($Spec.id)/package.json"
-    $adapterVersion = if ($Spec.versionPackage) { (Get-Content -LiteralPath $adapterPackage -Raw | ConvertFrom-Json -AsHashtable).dependencies[$Spec.versionPackage] } else { $Spec.version }
+    $adapterVersion = if ($Spec.versionPackage) { Get-LockedHarnessVersion (Split-Path $adapterPackage) $Spec.versionPackage } else { $Spec.version }
     if (!$adapterVersion) { throw 'Harness version is missing.' }
     $adapterVersion
 }
 
 # Shared by installation and the read-only UI comparison. Never downloads or builds.
-function Get-RuntimeReleaseId($Project, $Spec, $NodeHash, $AdapterVersion) {
+function Get-RuntimeReleaseId($Project, $Spec, $NodeHash, $AdapterVersion, $Dependencies = $null) {
     $skillSources = Join-Path $project 'skills'
     $inputs = @((Get-ChildItem -File -Recurse -LiteralPath @(
         (Join-Path $project 'launcher'), (Join-Path $project 'src'), (Join-Path $project 'harnesses'), (Join-Path $project 'scripts'), $skillSources
     ) | Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' }).FullName)
     $inputs += @('package.json', 'package-lock.json', 'go.mod', 'go.sum', 'tsconfig.json', 'contract/schema.sql', 'scripts/toolchain.ps1', 'install.ps1' | ForEach-Object { Join-Path $project $_ })
-    $fingerprint = @($NodeHash, $Spec.id, $AdapterVersion) + @(foreach ($path in ($inputs | Sort-Object)) {
-        "$([IO.Path]::GetRelativePath($project, $path)) $((Get-FileHash -LiteralPath $path).Hash)"
+    $fingerprint = @($NodeHash, $Spec.id, $AdapterVersion)
+    $upstream = $Dependencies.source -eq 'upstream'
+    if ($upstream) { $fingerprint += "dependencies upstream $($Dependencies.lockHash)" }
+    $fingerprint += @(foreach ($path in ($inputs | Sort-Object)) {
+        $relative = [IO.Path]::GetRelativePath($project, $path)
+        if ($upstream -and $relative.Replace('\','/') -in "harnesses/$($Spec.id)/package.json","harnesses/$($Spec.id)/package-lock.json") { continue }
+        "$relative $((Get-FileHash -LiteralPath $path).Hash)"
     })
     [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($fingerprint -join "`n")))).ToLowerInvariant()
 }
 
-function New-RuntimeRelease($Project, $State, $Toolchain, $Spec, $Installed, $HostInstallation) {
-    $adapterPackage = Join-Path $project "harnesses/$($Spec.id)/package.json"
-    $adapterVersion = Get-RuntimeVersion $Project $Spec
+function New-RuntimeRelease($Project, $State, $Toolchain, $Spec, $Installed, $HostInstallation, $Dependencies = $null) {
+    if (!$Dependencies) { $Dependencies = Get-HarnessDependencyPlan $Project $State $Spec $null -Pinned }
+    $adapterPackage = Join-Path $Dependencies.packageDir 'package.json'
+    $adapterVersion = $Dependencies.version
+    $upstream = $Dependencies.source -eq 'upstream'
+    if ($upstream -and !(Test-HarnessDependencySet $Dependencies.packageDir $Dependencies.lockHash)) { throw '升级依赖锁校验失败。' }
     $skillSources = Join-Path $project 'skills'
-    $id = Get-RuntimeReleaseId $Project $Spec $Toolchain.nodeHash $adapterVersion
+    $id = Get-RuntimeReleaseId $Project $Spec $Toolchain.nodeHash $adapterVersion $Dependencies
     $release = Get-ReleasePath $state $id '' $Spec.id
     if (!(Test-Path -LiteralPath $release)) {
         Build-Bridge $project $Toolchain -SkipTests
@@ -66,11 +76,15 @@ function New-RuntimeRelease($Project, $State, $Toolchain, $Spec, $Installed, $Ho
                 New-Item -ItemType Directory -Force -Path $registryTarget | Out-Null
                 Copy-Item -LiteralPath (Join-Path $project "harnesses/$($registration.id)/harness.json") -Destination $registryTarget
             }
-            if (Test-Path -LiteralPath $adapterPackage) {
+            if ($upstream -or (Test-Path -LiteralPath $adapterPackage)) {
                 $adapterDirectory = Join-Path $service (Split-Path $Spec.adapter)
                 New-Item -ItemType Directory -Force -Path $adapterDirectory | Out-Null
                 Copy-Item -LiteralPath $adapterPackage, (Join-Path (Split-Path $adapterPackage) 'package-lock.json') -Destination $adapterDirectory
-                Invoke-ProjectNpm $Toolchain $adapterDirectory @('ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund')
+                if ($upstream -and !(Test-HarnessDependencySet $adapterDirectory $Dependencies.lockHash)) { throw '复制依赖锁校验失败。' }
+                try { Invoke-ProjectNpm $Toolchain $adapterDirectory @('ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund') } catch {
+                    if ($upstream -and $Toolchain.source.offline) { throw "$($_.Exception.Message) 可补充离线缓存，或使用 --pinned。" }
+                    throw
+                }
             }
             Get-ChildItem -LiteralPath $skillSources -Directory | Copy-Item -Destination (Join-Path $stage 'skills') -Recurse
             $resolvedStage = (Resolve-Path -LiteralPath $stage).Path
@@ -87,11 +101,14 @@ function New-RuntimeRelease($Project, $State, $Toolchain, $Spec, $Installed, $Ho
     $previous = ConvertTo-HarnessInstallation $Installed
     if ($previous.harnesses) { foreach ($key in $previous.harnesses.Keys) { $records[$key] = $previous.harnesses[$key] } }
     $records[$Spec.id] = @{ release = $id; version = $adapterVersion; adapter = $Spec.adapter; launch = $Spec.launch; capabilities = $Spec.capabilities }
+    $records[$Spec.id].dependencies = if ($upstream) {
+        @{ source = 'upstream'; lockHash = $Dependencies.lockHash; packages = $Dependencies.packages; explicit = $Dependencies.explicit }
+    } else { @{ source = 'pinned' } }
     $bundled = Get-BundledHarness $Project
     Add-LegacyManifestFields @{
-        format = 2; agentPath = $HostInstallation.agentPath; originalHash = $HostInstallation.originalHash; launcherHash = (Get-FileHash -LiteralPath (Join-Path $release 'launcher.exe')).Hash
+        format = 2; agentPath = $HostInstallation.agentPath
         runtime = @{ harness = $Spec.id; release = $id }; harnesses = $records
-        bundled = @{ id = $bundled.id; version = $bundled.version }
+        bundled = @{ id = $bundled.id; version = $HostInstallation.bundledVersion ?? $bundled.version }
         database = $HostInstallation.database; users = $HostInstallation.users; resources = $HostInstallation.resources; hostSkills = $HostInstallation.hostSkills
     }
 }

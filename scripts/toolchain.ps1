@@ -123,8 +123,11 @@ function Initialize-Toolchain($Project, $Mirror, $OfflineToolchainDir) {
 }
 
 function Invoke-ProjectNpm($Toolchain, $Prefix, [string[]]$Arguments) {
+    foreach ($flag in '--ignore-scripts', '--no-audit', '--no-fund') {
+        if ($Arguments -notcontains $flag) { $Arguments += $flag }
+    }
     $tools = $Toolchain.tools
-    if ($Toolchain.source.registry) { $Arguments += "--registry=$($Toolchain.source.registry)" }
+    if ($Toolchain.source.npm) { $Arguments += "--registry=$($Toolchain.source.npm)" }
     if ($Toolchain.source.offline) { $Arguments += '--offline' }
     # Keep successful installs quiet: warnings are hidden and the stdout summary
     # ("added N packages") is shown only when npm fails. Errors still reach stderr.
@@ -186,6 +189,7 @@ function Build-Bridge($Project, $Toolchain, [switch]$SkipTests) {
             & ./test/experience.test.ps1
             & ./test/harnesses.test.ps1
             & ./test/toolchain.test.ps1
+            & ./test/upstream.test.ps1
             & ./test/uninstall.test.ps1
             & ./test/ui.test.ps1
         }

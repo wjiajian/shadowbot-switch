@@ -106,3 +106,45 @@ test('page checks names with the same rules as the CLI', () => {
   assert.equal(mcp, `/${/\$script:UiMcpPattern = '([^']+)'/.exec(server)[1]}/`);
   assert.ok(read('src/management.ts').includes(skill), 'skill rule drifted from management.ts');
 });
+
+test('npm name validation matches PowerShell registration', async () => {
+  const { NPM_PACKAGE_NAME } = await import('../dist/service/harnesses.js');
+  const [, pattern] = /\$script:NpmPackagePattern = '([^']+)'/.exec(read('scripts/harnesses.ps1'));
+  assert.equal(NPM_PACKAGE_NAME.source, new RegExp(pattern).source);
+});
+
+test('checks, local rebuilds and uninstall send their requested options', async () => {
+  const functions = ['startJob', 'checkUpdates', 'jobSteps', 'harnessColumn'].map(name =>
+    new RegExp('(?:async )?function ' + name + '\\([^)]*\\) \\{[\\s\\S]+?\\n}').exec(script)[0]).join('\n');
+  const calls = [];
+  const spec = { kind: 'managed', installed: true, selected: true, upstreamCapable: true, version: '1.6.0',
+    pinnedVersion: '1.5.2', availableVersion: '1.6.0', dependencySource: 'upstream', updateStatus: 'current' };
+  const context = vm.createContext({ spec, state: { base: { installed: true } }, jobRunning: () => false,
+    withBusy: (_, fn) => fn(), refreshBase() {}, toast() {}, newJob() {}, setPage() {}, pollJob() {},
+    h: (_, props, ...children) => children.flat(Infinity).filter(Boolean).join(' '), capability() {}, button: label => label,
+    api: async (path, body) => { calls.push([path, JSON.parse(JSON.stringify(body))]); return { id: 1, items: {} }; } });
+  vm.runInContext(functions, context);
+  const run = code => vm.runInContext(code, context);
+  await run('checkUpdates()');
+  await run("state.mirror = 'aliyun'; checkUpdates()");
+  await run("startJob('update','fixture',{localOnly:true})");
+  await run("startJob('uninstall',null,{purgeData:true})");
+  assert.deepEqual(calls, [
+    ['/api/updates/check', {}], ['/api/updates/check', { mirror: 'aliyun' }],
+    ['/api/jobs/start', { cmd: 'update', mirror: 'aliyun', harness: 'fixture', localOnly: true }],
+    ['/api/jobs/start', { cmd: 'uninstall', purgeData: true }],
+  ]);
+  assert.equal(run("jobSteps('update',spec)[0].label"), '检查上游版本');
+  assert.equal(run("jobSteps('update',spec,{localOnly:true})[0].label"), '构建运行时');
+  assert.equal(run("jobSteps('update',{...spec,upstreamCapable:false})[0].label"), '构建运行时');
+  assert.match(run('harnessColumn(spec)'), /1.6.0 · 上游版本.*仓库锁定 1.5.2.*与本地构建一致/);
+  assert.match(run("harnessColumn({...spec,upstream:{candidate:'1.6.3'}})"), /更新到 1.6.3/);
+  assert.match(run("harnessColumn({...spec,upstream:{status:'error'}})"), /仅本地重建/);
+});
+
+test('only versions below the minimum trigger the host version warning', () => {
+  const comparison = /const MIN_SHADOWBOT = [\s\S]+?\n}/.exec(script)[0];
+  for (const [version, expected] of [['6.4.0', false], ['6.3.39', false], ['6.3.0', true]]) {
+    assert.equal(vm.runInNewContext(comparison + '\nbelowMinimum(version)', { version }), expected);
+  }
+});

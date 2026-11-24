@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { switchBackend } from '../dist/service/switch.js';
+import { switchBackend, verifySchema } from '../dist/service/switch.js';
 
 const schema = readFileSync('contract/schema.sql', 'utf8');
 const insert = "INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) VALUES (?, '.', 1, 1, '[]')";
@@ -29,6 +29,8 @@ test('backend snapshots preserve WAL, isolate pointers, and recover an interrupt
   writeFileSync(pointer, '{"sessionId":"original"}');
   const db = new DatabaseSync(database);
   db.exec(schema);
+  db.exec('CREATE TABLE host_extension(id INTEGER); INSERT INTO host_extension VALUES(1); ALTER TABLE project ADD COLUMN future TEXT');
+  verifySchema(database);
   db.close();
   const writer = spawn(process.execPath, ['--input-type=module', '-e', `
     import { DatabaseSync } from 'node:sqlite';
@@ -53,6 +55,7 @@ test('backend snapshots preserve WAL, isolate pointers, and recover an interrupt
     assert.deepEqual(read(), []);
     assert.equal(existsSync(pointer), false);
     const pi = new DatabaseSync(database);
+    assert.equal(pi.prepare('SELECT count(*) AS n FROM host_extension').get().n, 0);
     pi.prepare(insert).run('pi-only');
     pi.close();
     writeFileSync(pointer, '{"sessionId":"pi"}');
@@ -117,4 +120,15 @@ test('busy and interrupted pre-replacement switches preserve the active history'
     original.close();
     rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
+});
+
+test('schema verification identifies the missing required column', t => {
+  const root = mkdtempSync(join(tmpdir(), 'switch-schema-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = join(root, 'host.db');
+  const db = new DatabaseSync(file);
+  db.exec(schema);
+  db.exec('ALTER TABLE part DROP COLUMN data');
+  db.close();
+  assert.throws(() => verifySchema(file), /missing part\.data/);
 });

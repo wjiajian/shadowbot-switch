@@ -16,20 +16,20 @@ try {
     $original = Join-Path $state 'original/opencode.exe'
     New-Item -ItemType Directory -Path (Split-Path $original) | Out-Null
     Set-Content -LiteralPath $original -Value 'fixture original'
-    $hash = (Get-FileHash -LiteralPath $original).Hash
+
     $agent = Join-Path $root 'opencode.exe'
     Copy-Item -LiteralPath $launcher -Destination $agent
-    $installation = @{ agentPath = $agent; originalHash = $hash; launcherHash = (Get-FileHash -LiteralPath $launcher).Hash; runtimeRelease = $id; piVersion = 'fixture' }
+    $installation = @{ agentPath = $agent; runtimeRelease = $id; piVersion = 'fixture' }
     Write-AtomicJson (Join-Path $state 'install.json') $installation
     Write-AtomicJson "$agent.shadowbot-pi.json" @{ home = (Join-Path $root 'old-missing-state') }
-    Repair-InstallationLocator $state $hash {}
+    Repair-InstallationLocator $state {}
     if ((Get-Content -LiteralPath "$agent.shadowbot-pi.json" -Raw | ConvertFrom-Json).home -ne $state) { throw 'Moved project locator was not repaired.' }
-    if ((Get-FileHash -LiteralPath (Join-Path $state 'shadowbot-pi.exe')).Hash -ne $installation.launcherHash) { throw 'Management launcher was not restored.' }
+    if ((Get-Content -LiteralPath (Join-Path $state 'shadowbot-pi.exe')) -ne 'fixture launcher') { throw 'Management launcher was not restored.' }
     $other = Join-Path $root 'other-existing-project'
     New-Item -ItemType Directory -Path $other | Out-Null
     Write-AtomicJson "$agent.shadowbot-pi.json" @{ home = $other }
     $rejected = $false
-    try { Repair-InstallationLocator $state $hash {} } catch { $rejected = $true }
+    try { Repair-InstallationLocator $state {} } catch { $rejected = $true }
     if (!$rejected) { throw 'An existing project was taken over.' }
 
     Write-AtomicJson "$agent.shadowbot-pi.json" @{ home = $state }
@@ -38,7 +38,7 @@ try {
 param($Harness, $Mirror, $OfflineToolchainDir, [switch]$Json, [switch]$Wait, $WaitTimeoutSeconds)
 if ($Harness -ne 'pi' -or $Mirror -ne 'aliyun' -or $OfflineToolchainDir -ne $PSScriptRoot -or !$Json) { throw 'Repair did not forward build settings.' }
 '@ | Set-Content -LiteralPath (Join-Path $root 'install.ps1')
-    function Get-BundledExecutableHash { $hash }
+
     function Get-SwitchProcesses { }
     Repair-ProjectLocation $root -Mirror aliyun -OfflineToolchainDir $root -Json
 

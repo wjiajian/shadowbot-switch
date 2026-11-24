@@ -1,10 +1,10 @@
 ﻿. (Join-Path $PSScriptRoot 'harnesses.ps1')
-function Get-BundledExecutableHash {
-    'DE2E62AB0E3F27A3EA7FF9EF4C4FE7097F0D6DF01118B2E7C5F57726256D6314'
-}
-
-function Get-SupportedShadowBotVersion {
-    '6.3.39'
+function Get-OpenCodeVersion($Path, $Fallback) {
+    try {
+        $version = (& $Path --version 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $version -match '^\d+\.\d+\.\d+') { return $version }
+    } catch {}
+    $Fallback
 }
 
 function Write-AtomicJson($Path, $Data) {
@@ -21,14 +21,10 @@ function Write-AtomicJson($Path, $Data) {
     }
 }
 
-function Set-CheckedExecutable($Source, $Destination, $SourceHash, $PreviousHash, [scriptblock]$BeforeReplace) {
+function Copy-Executable($Source, $Destination, [scriptblock]$BeforeReplace) {
     $temp = "$Destination.$PID.tmp"
     try {
         Copy-Item -LiteralPath $Source -Destination $temp -Force
-        if ((Get-FileHash -LiteralPath $temp).Hash -ne $SourceHash) { throw 'Staged executable checksum mismatch.' }
-        if ($PreviousHash -and (Get-FileHash -LiteralPath $Destination).Hash -ne $PreviousHash) {
-            throw 'Active executable changed during installation.'
-        }
         if ($BeforeReplace) { & $BeforeReplace }
         if (Test-Path -LiteralPath $Destination) { [IO.File]::Replace($temp, $Destination, [NullString]::Value) }
         else { [IO.File]::Move($temp, $Destination) }
@@ -62,40 +58,40 @@ function Get-ReleasePath($State, $Id, $PiVersion, $Harness) {
 
 function Publish-Release($State, $Release) {
     $launcher = Join-Path (Get-InstallationRuntime $State $Release) 'launcher.exe'
-    Set-CheckedExecutable $launcher (Join-Path $State 'shadowbot-pi.exe') $Release.launcherHash
+    Copy-Executable $launcher (Join-Path $State 'shadowbot-pi.exe')
     Write-AtomicJson (Join-Path $State 'install.json') $Release
 }
 
-function Complete-Activation($State, $AgentPath, $OriginalHash, [scriptblock]$CheckStopped) {
+function Complete-Activation($State, [scriptblock]$CheckStopped) {
     $path = Join-Path $State 'activation.pending.json'
     if (!(Test-Path -LiteralPath $path)) { return }
     & $CheckStopped
-    $pending = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-    $release = $pending.release | ConvertTo-Json -Depth 16 | ConvertFrom-Json -AsHashtable
-    if ($release.agentPath -ne $AgentPath -or $release.originalHash -ne $OriginalHash -or
-        $release.launcherHash -notmatch '^[0-9a-f]{64}$' -or $pending.previousHash -notmatch '^[0-9a-f]{64}$') {
-        throw 'Activation journal does not match this installation.'
+    $pending = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
+    $release = $pending.release
+    $agentPath = $release.agentPath
+    if (![IO.Path]::IsPathFullyQualified($agentPath) -or (Split-Path -Leaf $agentPath) -ne 'opencode.exe') { throw 'Invalid activation target.' }
+    if (!(Test-Path -LiteralPath $agentPath -PathType Leaf)) {
+        Write-Warning "影刀程序已移除，丢弃旧激活记录：$agentPath"
+        Remove-Item -LiteralPath $path
+        return
     }
     $launcher = Join-Path (Get-InstallationRuntime $State $release) 'launcher.exe'
-    if ((Get-FileHash -LiteralPath $launcher).Hash -ne $release.launcherHash) { throw 'Staged launcher checksum mismatch.' }
     $bundled = $pending.bundledMode
     if ($bundled -and $bundled -cnotmatch '^[a-z][a-z0-9-]{0,63}$') { throw 'Invalid bundled harness in activation journal.' }
-    $desiredHash = if ($bundled) { $OriginalHash } else { $release.launcherHash }
     $source = if ($bundled) { Join-Path $State 'original/opencode.exe' } else { $launcher }
-    if ((Get-FileHash -LiteralPath $source).Hash -ne $desiredHash) { throw 'Activation source checksum mismatch.' }
-    $active = (Get-FileHash -LiteralPath $AgentPath).Hash
-    if ($active -ne $desiredHash -and $active -ne $pending.previousHash) {
-        throw 'Active launcher checksum does not match the activation journal.'
+    if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "缺少激活文件：$source" }
+    $locator = "$agentPath.shadowbot-pi.json"
+    if (Test-Path -LiteralPath $locator) {
+        $owner = (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json).home
+        $legacy = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'ShadowBotPi'
+        if ($owner -notin $State,$legacy) { throw '活动程序不属于此项目，请运行 repair。' }
     }
-    if (!$bundled) { Write-AtomicJson "$AgentPath.shadowbot-pi.json" @{ home = $State } }
-    if ($active -ne $desiredHash) {
-        Set-CheckedExecutable $source $AgentPath $desiredHash $pending.previousHash $CheckStopped
-    }
+    if (!$bundled) { Write-AtomicJson $locator @{ home = $State } }
+    Copy-Executable $source $agentPath -BeforeReplace $CheckStopped
     Publish-Release $State $release
     if ($bundled) {
         Write-AtomicJson (Join-Path $State 'backend.json') @{ mode = $bundled }
-        $locator = "$AgentPath.shadowbot-pi.json"
-        if ((Test-Path -LiteralPath $locator) -and (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json).home -eq $State) { Remove-Item -LiteralPath $locator -Force }
+        if ((Test-Path -LiteralPath $locator) -and (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json).home -in $State,$legacy) { Remove-Item -LiteralPath $locator -Force }
     }
     Remove-Item -LiteralPath $path -Force
 }

@@ -6,7 +6,7 @@
 
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D4?style=flat-square)](#环境要求)
 [![PowerShell](https://img.shields.io/badge/PowerShell-7%2B-5391FE?style=flat-square)](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)
-[![ShadowBot](https://img.shields.io/badge/ShadowBot-6.3.39-E8483B?style=flat-square)](#环境要求)
+[![ShadowBot](https://img.shields.io/badge/ShadowBot-6.3.39%2B-E8483B?style=flat-square)](#环境要求)
 [![Pi](https://img.shields.io/badge/Pi-1.5.2-333333?style=flat-square)](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 [![License](https://img.shields.io/github/license/wjiajian/shadowbot-switch?style=flat-square)](LICENSE)
 
@@ -29,7 +29,7 @@ ShadowBot Switch 接管影刀 Copilot 背后的 agent 进程，让你在不同 h
 - 兼容 OpenCode 的 HTTP/SSE 接口，影刀的面板、授权弹窗、工具卡片照常使用。
 - Skills 分安装级和应用级两层目录，同名时应用级优先，安装级 Skill 自动同步到原生 `/` 菜单。
 - 自定义 MCP 支持 stdio 和 Streamable HTTP，保存配置后在下一次空闲请求时自动生效。
-- 首次运行自动下载并校验 Node、npm、Go，无需自己安装开发工具，所有依赖锁定版本。
+- 首次运行自动下载并校验 Node、npm、Go，无需自己安装开发工具。
 - 每次更新生成独立运行时；切换中断后重跑原命令或 `repair` 即可恢复，`doctor` 给出修复提示。
 - 新增 harness 只需注册信息和适配器，不改安装器、启动器或切换核心。
 
@@ -53,7 +53,7 @@ flowchart LR
 
 - Windows x64
 - [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)
-- 影刀 **6.3.39**
+- 影刀 **6.3.39 及以上**（更低版本会警告）
 - 首次安装需要联网
 
 > [!IMPORTANT]
@@ -224,7 +224,15 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 .\switch.ps1 config import 'D:\backup\shadowbot-config.json' --global
 ```
 
-**更新本项目**：重新下载源码，覆盖到原项目目录，保留 `.shadowbot-switch/`（配置和聊天数据）与 `.tools/`（工具缓存），再对要用的托管 harness 运行 `update <harness> --wait`。用 Git 获取的项目先 `git pull` 再执行同一命令。`update` 只从本地源码和锁定依赖构建，不会自动拉取 GitHub 或追踪 npm latest。原版 OpenCode 随影刀更新，`update original` 只会给出说明；当前使用原版时，不带参数的 `update` 也一样，要重建托管 harness 请写明 ID，例如 `update pi`。
+**更新本项目**：重新下载源码，覆盖到原项目目录，保留 `.shadowbot-switch/`（配置和聊天数据）与 `.tools/`（工具缓存），再对要用的托管 harness 运行 `update <harness> --wait`。用 Git 获取的项目先 `git pull` 再执行同一命令。托管 harness 声明上游后，`update` 会在各包共同发布的稳定版本中选择同主版本的最高版本（0.x 还要求次版本相同），跳过已弃用版本。原版 OpenCode 随影刀更新，`update original` 只会给出说明；当前使用原版时，不带参数的 `update` 也一样，要重建托管 harness 请写明 ID，例如 `update pi`。
+
+首次 `use` 联网时安装最新兼容版，查询或生成依赖锁失败时回退到仓库锁定版本，离线时直接使用仓库锁。影刀升级后重新运行 `use <harness>` 即可刷新原版备份并切换，`repair` 保留已装版本。用 `update pi --check` 只查版本，或用 `update --check --all --json` 输出全部结果。检查时无需退出影刀。
+
+- `update pi --version 1.6.3` 指定精确版本，可跨主版本、试用预发布或回滚。下次普通更新仍会向兼容的新版本前进。
+- `update pi --local-only` 跳过查询，按当前依赖计划应用本地源码。仓库基线追平已装的自动升级版本时，改用仓库锁文件。
+- `update pi --pinned` 恢复仓库锁定版本。离线模式跳过上游查询，npm-cache 需包含所选锁文件对应的全部包。
+
+升级锁文件位于 `.shadowbot-switch/harnesses/<id>/dependencies/`，不会改写 Git 跟踪的依赖文件。普通卸载会清理这些锁文件并保留 agent 数据。TypeScript 使用项目根目录 devDependencies 的类型编译，发布后适配器从自己的 node_modules 加载 SDK，激活前由 `verify-install` 校验实际加载的适配器和版本。
 
 **搬迁目录**：移动整个项目目录（包括 `.shadowbot-switch/`）后运行 `repair`。旧目录仍存在时会拒绝接管，避免两套会话混用。
 
@@ -244,7 +252,7 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 
 `install.ps1` 和 `scripts/build.ps1` 对应参数为 `-Mirror` 和 `-OfflineToolchainDir`。也可设置环境变量 `SHADOWBOT_SWITCH_MIRROR` 和 `SHADOWBOT_SWITCH_OFFLINE_DIR`。显式参数优先。未指定镜像参数时，可用 `SHADOWBOT_SWITCH_NODE_BASE_URL`、`SHADOWBOT_SWITCH_NPM_REGISTRY`、`SHADOWBOT_SWITCH_GO_BASE_URL`、`SHADOWBOT_SWITCH_GOPROXY` 分别覆盖下载地址。交互安装需要构建且没有配置下载源或离线目录时，会提示选择源，回车使用官方源。传入 `--json` 时跳过下载源提示。图形界面在 Harness 页记住当前浏览器的下载源选择。
 
-WebUI 的下载源默认为「默认（跟随环境）」。安装、更新和修复都可以显式选择官方源或阿里云镜像。
+WebUI 的「检查更新」可查看上游候选版本、另有的新主版本和上次检查时间。WebUI 的下载源默认为「默认（跟随环境）」。安装、更新和修复都可以显式选择官方源或阿里云镜像。
 
 使用 `--offline-dir <目录>` 时，优先复用项目 `.tools/` 中的工具。Node 按 SHA256 校验，已解压的 npm、Go 按固定版本的文件清单逐项核对相对路径和大小。工具缺失或清单不符时，先查找项目内已缓存的压缩包，再从离线目录读取以下文件，并校验固定哈希：
 

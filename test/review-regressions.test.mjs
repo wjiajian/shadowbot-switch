@@ -127,3 +127,21 @@ test('offline checks and imports reject ambiguous transport and unsupported OAut
     assert.equal(ok('config', 'check').valid, true);
   }
 });
+
+test('managed doctor requires an executable and a valid project locator', t => {
+  const { root, home, run } = setup(t);
+  const agent = join(root, 'missing.exe');
+  const locator = agent + '.shadowbot-pi.json';
+  const active = () => JSON.parse(run('doctor').stdout).data.find(row => row.check === '活动程序').status;
+  put(join(home, 'backend.json'), { mode: 'pi' });
+  put(locator, { home });
+  assert.equal(active(), '失败');
+  put(agent, 'launcher');
+  assert.equal(active(), '通过');
+  for (const invalid of ['{', { home: '' }, { home: 1 }, { home: root }]) {
+    put(locator, invalid);
+    assert.equal(active(), '失败');
+  }
+  rmSync(locator);
+  assert.equal(active(), '失败');
+});
