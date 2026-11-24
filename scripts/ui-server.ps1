@@ -111,7 +111,11 @@ function ConvertTo-UiCommand($Request) {
     throw "不支持的操作：$command"
 }
 
-# Long tasks go through switch.ps1, because use/update/repair live in PowerShell.
+function Assert-UiMirror($Value) {
+    if ($Value -isnot [string] -or $Value -cnotin 'direct', 'aliyun') { throw '下载源无效。' }
+    $Value
+}
+
 function ConvertTo-UiJobArguments($Request) {
     $command = [string]$Request.cmd
     # @() keeps a one-item result as an array, so += appends instead of joining strings.
@@ -119,8 +123,17 @@ function ConvertTo-UiJobArguments($Request) {
         'use' { 'use'; Assert-UiHarness $Request.harness }
         'update' { 'update'; Assert-UiHarness $Request.harness }
         'repair' { 'repair' }
+        'uninstall' {
+            'uninstall'; '--yes'
+            if ($null -ne $Request.purgeData -and $Request.purgeData -isnot [bool]) { throw 'purgeData 需要布尔值。' }
+            if ($Request.purgeData) { '--purge-data' }
+        }
         default { throw "不支持的任务：$command" }
     })
+    if ($command -in 'use', 'update', 'repair' -and $Request.ContainsKey('mirror')) { $arguments += @('--mirror', (Assert-UiMirror $Request.mirror)) }
+    if ($command -in 'use', 'update', 'repair' -and $Request.ContainsKey('offlineDir')) {
+        $arguments += @('--offline-dir', (Assert-UiPath $Request.offlineDir))
+    }
     $arguments += @('--wait', '--timeout', [string]$script:UiWaitSeconds)
     if ($command -cne 'repair' -and $Request.shadowbotDir) { $arguments += @('--shadowbot-dir', (Assert-UiPath $Request.shadowbotDir)) }
     $arguments
@@ -253,6 +266,7 @@ function Get-UiState($Request) {
     $job = $script:Ui.Job
     [ordered]@{
         installed = $installed
+        canUninstall = (Test-Path -LiteralPath $state) -or (Test-Path -LiteralPath (Join-Path $project '.tools')) -or (Test-Path -LiteralPath (Join-Path $project 'dist')) -or (Test-Path -LiteralPath (Join-Path $project 'node_modules'))
         ready = $installed -and (Test-Path -LiteralPath (Join-Path $state 'shadowbot-pi.exe') -PathType Leaf)
         problem = $problem
         selected = $selected
@@ -477,7 +491,11 @@ function Start-UiServer([string]$Project, [switch]$NoBrowser) {
     }
     $listener = $null
     for ($attempt = 0; $attempt -lt 5 -and !$listener; $attempt++) {
-        $port = Get-UiFreePort
+        # localStorage belongs to the origin. Prefer a repeatable port for this project.
+        $port = if ($attempt -eq 0) {
+            $digest = [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Project.ToLowerInvariant()))
+            49152 + ([BitConverter]::ToUInt16($digest, 0) % 16384)
+        } else { Get-UiFreePort }
         $candidate = [Net.HttpListener]::new()
         # http.sys only accepts Host: localhost here, which also blocks DNS rebinding.
         $candidate.Prefixes.Add("http://localhost:$port/")

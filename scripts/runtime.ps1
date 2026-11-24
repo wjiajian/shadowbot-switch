@@ -1,7 +1,23 @@
+function Invoke-RuntimeControl($StateDirectory, $Install, [string[]]$Arguments) {
+    $runtime = if ($Install.runtime -or $Install.runtimeRelease) { Get-InstallationRuntime $StateDirectory $Install } else { $StateDirectory }
+    $previousHome = $env:SHADOWBOT_PI_HOME
+    $previousSwitch = $env:SHADOWBOT_SWITCH_HOME
+    try {
+        $env:SHADOWBOT_PI_HOME = $StateDirectory
+        $env:SHADOWBOT_SWITCH_HOME = $StateDirectory
+        & (Join-Path $runtime 'node.exe') (Join-Path $runtime 'service/control.js') @Arguments
+        if ($LASTEXITCODE -ne 0) { throw "运行时操作失败（$($Arguments -join ' ')），原因见上方输出。" }
+    } finally {
+        $env:SHADOWBOT_PI_HOME = $previousHome
+        $env:SHADOWBOT_SWITCH_HOME = $previousSwitch
+    }
+}
+
 function Remove-ProjectStage($State, $Path) {
     if (!(Test-Path -LiteralPath $Path)) { return }
     $target = (Resolve-Path -LiteralPath $Path).Path
-    if ($target -ne $Path -or !$target.StartsWith("$state\", [StringComparison]::OrdinalIgnoreCase)) {
+    $prefix = [IO.Path]::TrimEndingDirectorySeparator($State) + [IO.Path]::DirectorySeparatorChar
+    if ($target -ne $Path -or !$target.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Unexpected installation staging directory.'
     }
     Remove-Item -LiteralPath $target -Recurse -Force
@@ -59,7 +75,7 @@ function New-RuntimeRelease($Project, $State, $Toolchain, $Spec, $Installed, $Ho
             Get-ChildItem -LiteralPath $skillSources -Directory | Copy-Item -Destination (Join-Path $stage 'skills') -Recurse
             $resolvedStage = (Resolve-Path -LiteralPath $stage).Path
             $resolvedRelease = [IO.Path]::GetFullPath($release)
-            $statePrefix = [IO.Path]::GetFullPath($State).TrimEnd('\') + '\'
+            $statePrefix = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($State)) + [IO.Path]::DirectorySeparatorChar
             if (!$resolvedStage.StartsWith($statePrefix, [StringComparison]::OrdinalIgnoreCase) -or !$resolvedRelease.StartsWith($statePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Runtime publication escaped the installation directory.' }
             [IO.Directory]::Move($stage, $release)
         } finally {

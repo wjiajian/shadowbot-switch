@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $repository = Split-Path $PSScriptRoot
 . (Join-Path $repository 'scripts/activation.ps1')
 . (Join-Path $repository 'scripts/runtime.ps1')
-$base = (Resolve-Path -LiteralPath ([IO.Path]::GetTempPath())).Path.TrimEnd('\')
+$base = (Resolve-Path -LiteralPath ([IO.Path]::GetTempPath())).Path.TrimEnd([IO.Path]::DirectorySeparatorChar)
 $root = Join-Path $base "shadowbot-harness-$([Guid]::NewGuid())"
 New-Item -ItemType Directory -Path $root | Out-Null
 try {
@@ -20,17 +20,33 @@ try {
     Write-AtomicJson (Join-Path $project 'package.json') @{ name = 'harness-test'; version = '1.0.0'; type = 'module' }
     Write-AtomicJson (Join-Path $project 'package-lock.json') @{ name = 'harness-test'; version = '1.0.0'; lockfileVersion = 3; packages = @{ '' = @{ name = 'harness-test'; version = '1.0.0' } } }
     @'
-param([string]$Harness, [switch]$Update, [switch]$Wait, [int]$WaitTimeoutSeconds, [string]$ShadowBotDirectory)
-@{ harness = $Harness; update = [bool]$Update } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'selection.json')
+param([string]$Harness, [switch]$Update, [switch]$Wait, [int]$WaitTimeoutSeconds, [string]$ShadowBotDirectory, [string]$Mirror, [string]$OfflineToolchainDir)
+@{ mirror = $Mirror; offline = $OfflineToolchainDir; harness = $Harness; update = [bool]$Update } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'selection.json')
 '@ | Set-Content -LiteralPath (Join-Path $project 'install.ps1')
     $spec = Get-Harness $project 'test-engine'
     if ($spec.id -ne 'fixture') { throw 'Registry alias failed.' }
     if ((Get-Harness $project 'Pi').id -ne 'pi' -or (Get-Harness $project 'TEST-ENGINE').id -ne 'fixture') { throw 'Harness lookup must remain case insensitive.' }
     if (@(Get-HarnessRegistry $project)[0].id -ne 'pi') { throw 'Menu choice 1 must remain Pi.' }
     foreach ($reserved in @('repair', 'update')) {
-        $output = & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $project 'switch.ps1') use $reserved --json | Out-String
+        $output = & (Get-Process -Id $PID).Path -NoProfile -File (Join-Path $project 'switch.ps1') use $reserved --json | Out-String
         if ($LASTEXITCODE -ne 1 -or $output -notmatch '未知 harness') { throw "use dispatched a management command instead of validating the harness. Exit: $LASTEXITCODE Output: $output" }
     }
+    $cli = Join-Path $project 'switch.ps1'
+    foreach ($case in @(
+        @('use','pi','--mirror','bogus'), @('repair','--mirror'), @('repair','--mirror','unknown'),
+        @('update','--offline-dir','--wait'), @('use','pi','--yes'), @('repair','--purge-data'), @('uninstall','--mirror','direct')
+    )) {
+        $output = & (Get-Process -Id $PID).Path -NoProfile -File $cli @case --json | Out-String
+        if ($LASTEXITCODE -ne 1 -or ($output | ConvertFrom-Json).error -notmatch '下载源无效|需要参数|不支持的选项') { throw "Unexpected result for $case : $output" }
+    }
+    @'
+function Invoke-InstallationLock($Project, $Action) { & $Action }
+function Repair-ProjectLocation($Project, $Mirror, $OfflineToolchainDir) { "$Mirror|$OfflineToolchainDir" }
+'@ | Set-Content -LiteralPath (Join-Path $project 'scripts/maintenance.ps1')
+    if ((& $cli repair --mirror direct --offline-dir $root) -ne "direct|$root") { throw 'Repair lost source options.' }
+    & $cli use Pi --mirror aliyun --offline-dir $root
+    $options = Get-Content -LiteralPath (Join-Path $project 'selection.json') -Raw | ConvertFrom-Json
+    if ($options.mirror -ne 'aliyun' -or $options.offline -ne $root) { throw 'Install lost source options.' }
     & (Join-Path $project 'switch.ps1') use Pi
     if ((Get-Content -LiteralPath (Join-Path $project 'selection.json') -Raw | ConvertFrom-Json).harness -ne 'pi') { throw 'use Pi did not canonicalize the harness name.' }
     Write-AtomicJson (Join-Path $state 'backend.json') @{ mode = 'fixture' }
@@ -52,7 +68,8 @@ param([string]$Harness, [switch]$Update, [switch]$Wait, [int]$WaitTimeoutSeconds
     function Invoke-ProjectNpm($Toolchain, $Prefix, [string[]]$Arguments) {
         if ($Arguments[0] -ne 'ci' -or $Arguments -notcontains '--omit=dev') { throw 'Runtime dependencies must use the lockfile without dev dependencies.' }
     }
-    $node = Join-Path $repository '.tools/node/node.exe'
+    $node = Join-Path $root 'node.exe'
+    Set-Content -LiteralPath $node -Value 'fixture Node executable'
     $toolchain = @{ node = $node; nodeHash = (Get-FileHash -LiteralPath $node).Hash }
     $agent = Join-Path $root 'opencode.exe'
     Set-Content -LiteralPath $agent -Value 'bundled fixture'

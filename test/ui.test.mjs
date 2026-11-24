@@ -9,6 +9,26 @@ const styles = read('ui/app.css');
 const page = read('ui/index.html');
 const server = read('scripts/ui-server.ps1');
 
+test('job requests follow the environment until the user selects a download source', async () => {
+  const readMirror = /function readMirror\(\) \{[\s\S]+?\n}/.exec(script)[0];
+  const startJob = /async function startJob\([^)]*\) \{[\s\S]+?\n}/.exec(script)[0];
+  for (const saved of [null, '', 'invalid', 'direct', 'aliyun']) {
+    const requests = [];
+    const context = vm.createContext({
+      localStorage: { getItem: () => saved }, state: { base: { installed: true } },
+      jobRunning: () => false, api: async (_, body) => { requests.push(body); return { id: 1 }; },
+      newJob() {}, setPage() {}, pollJob() {},
+    });
+    vm.runInContext(`${readMirror}\n${startJob}\nstate.mirror = readMirror()`, context);
+    for (const cmd of ['use', 'update', 'repair']) {
+      await vm.runInContext(`startJob('${cmd}')`, context);
+      const body = requests.pop();
+      if (saved === 'direct' || saved === 'aliyun') assert.equal(body.mirror, saved);
+      else assert.ok(!Object.hasOwn(body, 'mirror'));
+    }
+  }
+});
+
 test('completed tasks keep logs in the task panel and show only a short success notice', async () => {
   const finish = /async function finishJob\(job\) \{[\s\S]+?\n}/.exec(script)[0];
   const section = /function taskSection\(\) \{[\s\S]+?\n}/.exec(script)[0];

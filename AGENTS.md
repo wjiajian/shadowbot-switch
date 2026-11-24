@@ -2,7 +2,6 @@
 
 1. For every agent working in this repository.
 2. Reply me with simple chinese.
-3. commit add Co-Authored-By.
 
 
 ## PR instructions

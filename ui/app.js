@@ -35,6 +35,7 @@ const RULES_LINE = /^(.+AGENTS\.md)：/i;
 
 const state = {
   token: takeToken(),
+  mirror: readMirror(),
   fatal: null,
   offline: null,
   page: null,
@@ -53,6 +54,13 @@ const state = {
 };
 
 // ---------------------------------------------------------------- helpers
+
+function readMirror() {
+  try {
+    const saved = localStorage.getItem('shadowbot-switch-mirror');
+    return ['direct', 'aliyun'].includes(saved) ? saved : '';
+  } catch { return ''; }
+}
 
 function takeToken() {
   const hash = location.hash.slice(1);
@@ -378,12 +386,14 @@ function jobSteps(cmd, target) {
 }
 
 function jobTitle(cmd, target) {
+  if (cmd === 'uninstall') return '卸载 ShadowBot Switch';
   if (cmd === 'repair' || !target) return '修复安装';
   if (cmd === 'update') return `更新 ${target.name}`;
   return target.installed ? `切换到 ${target.name}` : `安装并切换到 ${target.name}`;
 }
 
 function jobVerb(cmd, target) {
+  if (cmd === 'uninstall') return '卸载中';
   if (cmd === 'repair' || !target) return '修复中';
   if (cmd === 'update') return '更新中';
   return target.installed ? '切换中' : '安装中';
@@ -398,9 +408,11 @@ function newJob(id, cmd, harnessId) {
   };
 }
 
-async function startJob(cmd, harnessId) {
+async function startJob(cmd, harnessId, purgeData = false) {
   if (jobRunning()) return;
   const body = { cmd };
+  if (state.mirror && ['use', 'update', 'repair'].includes(cmd)) body.mirror = state.mirror;
+  if (cmd === 'uninstall') body.purgeData = purgeData;
   if (harnessId) body.harness = harnessId;
   // Before installing, pass the directory shown on the page. With several ShadowBot copies the
   // background task cannot ask which one, so it must never guess on its own.
@@ -683,6 +695,21 @@ function shadowbotSection() {
       h('div', { class: 'fact' }, h('span', { class: 'fact-label' }, '版本'), version)));
 }
 
+function confirmUninstall() {
+  const purge = h('input', { type: 'checkbox' });
+  const confirm = h('button', { type: 'submit', class: 'btn btn-primary' }, '确认卸载');
+  purge.addEventListener('change', () => {
+    confirm.className = purge.checked ? 'btn btn-danger' : 'btn btn-primary';
+    confirm.textContent = purge.checked ? '确认卸载并永久删除历史会话与配置' : '确认卸载';
+  });
+  const dialog = openDialog('卸载 ShadowBot Switch？', 'uninstall-title',
+    h('div', { class: 'form-row' }, h('p', null, '恢复影刀原版，删除运行时、工具链和构建产物。'),
+      h('label', null, purge, ' 同时删除历史会话与配置（.shadowbot-switch）')),
+    h('div', { class: 'dialog-foot' }, button('取消', 'btn-secondary', () => dialog.close()),
+      confirm),
+    () => { dialog.close(); startJob('uninstall', null, purge.checked); });
+}
+
 function harnessPage() {
   const base = state.base;
   const parts = [h('h1', null, 'Harness')];
@@ -696,6 +723,12 @@ function harnessPage() {
   parts.push(h('div', { class: 'harness-cols' }, base.harnesses.map(harnessColumn)));
   if (state.job) parts.push(taskSection());
   parts.push(shadowbotSection());
+  parts.push(h('div', { class: 'install-settings' },
+    segmented('mirror-label', '安装下载源', [['', '默认（跟随环境）'], ['direct', '直连官方'], ['aliyun', '阿里云镜像']], state.mirror, value => {
+      state.mirror = value;
+      try { localStorage.setItem('shadowbot-switch-mirror', value); } catch { /* kept in memory only */ }
+    }, jobRunning()),
+    base.canUninstall && button('卸载 ShadowBot Switch', 'btn-secondary', confirmUninstall, { disabled: jobRunning() })));
   return parts;
 }
 
@@ -963,9 +996,9 @@ function openSkillDialog() {
   input.focus();
 }
 
-function segmented(id, label, options, selected, onchange) {
+function segmented(id, label, options, selected, onchange, disabled = false) {
   const group = h('div', { class: 'seg', role: 'group', 'aria-labelledby': id });
-  const buttons = options.map(([value, text]) => h('button', { type: 'button', 'aria-pressed': String(value === selected) }, text));
+  const buttons = options.map(([value, text]) => h('button', { type: 'button', disabled, 'aria-pressed': String(value === selected) }, text));
   buttons.forEach((item, index) => item.addEventListener('click', () => {
     buttons.forEach(other => other.setAttribute('aria-pressed', String(other === item)));
     onchange(options[index][0]);

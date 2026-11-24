@@ -1,11 +1,12 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 [CmdletBinding()]
 param(
     [string]$ShadowBotDirectory,
     [string]$Harness,
     [switch]$Update,
     [switch]$Wait,
-    [ValidateRange(1, 86400)][int]$WaitTimeoutSeconds = 300
+    [ValidateRange(1, 86400)][int]$WaitTimeoutSeconds = 300,
+    [ValidateSet('direct', 'aliyun')][string]$Mirror, [string]$OfflineToolchainDir, [switch]$Json
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,8 +23,8 @@ $legacy = Join-Path $local 'ShadowBotPi'
 $manifest = Join-Path $state 'install.json'
 $mode = Join-Path $state 'backend.json'
 $original = Join-Path $state 'original/opencode.exe'
-$supportedVersion = '6.3.39'
-$pinnedHash = 'DE2E62AB0E3F27A3EA7FF9EF4C4FE7097F0D6DF01118B2E7C5F57726256D6314'
+$supportedVersion = Get-SupportedShadowBotVersion
+$pinnedHash = Get-BundledExecutableHash
 
 if (!$Harness) {
     $registered = @(Get-HarnessRegistry $project)
@@ -75,21 +76,6 @@ function Read-Installation($StateDirectory) {
     $existing
 }
 
-function Invoke-RuntimeControl($StateDirectory, $Install, [string[]]$Arguments) {
-    $runtime = if ($Install.runtime -or $Install.runtimeRelease) { Get-InstallationRuntime $StateDirectory $Install } else { $StateDirectory }
-    $previousHome = $env:SHADOWBOT_PI_HOME
-    $previousSwitch = $env:SHADOWBOT_SWITCH_HOME
-    try {
-        $env:SHADOWBOT_PI_HOME = $StateDirectory
-        $env:SHADOWBOT_SWITCH_HOME = $StateDirectory
-        & (Join-Path $runtime 'node.exe') (Join-Path $runtime 'service/control.js') @Arguments
-        if ($LASTEXITCODE -ne 0) { throw "运行时操作失败（$($Arguments -join ' ')），原因见上方输出。" }
-    } finally {
-        $env:SHADOWBOT_PI_HOME = $previousHome
-        $env:SHADOWBOT_SWITCH_HOME = $previousSwitch
-    }
-}
-
 function Copy-LegacyState {
     Assert-HostStopped
     $legacyOriginal = Join-Path $legacy 'original/opencode.exe'
@@ -121,7 +107,7 @@ if ($hostVersion -ne $supportedVersion) {
     throw "影刀版本是 $hostVersion，目前只支持 $supportedVersion。"
 }
 
-Invoke-InstallationLock $agentExe {
+function Install-SelectedHarness {
     if (Test-Path -LiteralPath (Join-Path $state 'activation.pending.json')) {
         Wait-SwitchProcesses -Wait:$Wait -TimeoutSeconds $WaitTimeoutSeconds
         Complete-Activation $state $agentExe $pinnedHash ${function:Assert-HostStopped}
@@ -135,7 +121,15 @@ Invoke-InstallationLock $agentExe {
         } else {
             Write-Host "正在$(if ($Update) { '更新' } else { '安装' }) $($spec.name)，期间可以继续使用影刀…"
             Write-Step '准备构建工具'
-            $toolchain = Initialize-Toolchain $project
+            $customSource = $env:SHADOWBOT_SWITCH_NODE_BASE_URL -or $env:SHADOWBOT_SWITCH_NPM_REGISTRY -or $env:SHADOWBOT_SWITCH_GO_BASE_URL -or $env:SHADOWBOT_SWITCH_GOPROXY
+            if (!$Json -and !$customSource -and !$Mirror -and !$env:SHADOWBOT_SWITCH_MIRROR -and !$OfflineToolchainDir -and !$env:SHADOWBOT_SWITCH_OFFLINE_DIR -and ![Console]::IsInputRedirected) {
+                do {
+                    $choice = Read-Host '下载源 [1] 直连官方（默认） [2] 阿里云镜像'
+                    if ($choice -notin '', '1', '2') { Write-Host '请选择 1 或 2。' }
+                } until ($choice -in '', '1', '2')
+                if ($choice -eq '2') { $Mirror = 'aliyun' }
+            }
+            $toolchain = Initialize-Toolchain $project $Mirror $OfflineToolchainDir
             Write-Step '构建运行时'
             $release = New-RuntimeRelease $project $state $toolchain $spec $projectInstall @{ agentPath = $agentExe; originalHash = $pinnedHash; database = $database; users = $users; resources = $resources; hostSkills = $hostSkills }
         }
@@ -228,3 +222,4 @@ Invoke-InstallationLock $agentExe {
     Invoke-RuntimeControl $state $release @('backend', $Harness) | Out-Host
     Write-Output "已切换到 $($spec.name) $($release.harnesses[$Harness].version)。"
 }
+Invoke-InstallationLock $project { Invoke-InstallationLock $agentExe ${function:Install-SelectedHarness} }

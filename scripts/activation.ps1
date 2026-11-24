@@ -1,4 +1,12 @@
-. (Join-Path $PSScriptRoot 'harnesses.ps1')
+﻿. (Join-Path $PSScriptRoot 'harnesses.ps1')
+function Get-BundledExecutableHash {
+    'DE2E62AB0E3F27A3EA7FF9EF4C4FE7097F0D6DF01118B2E7C5F57726256D6314'
+}
+
+function Get-SupportedShadowBotVersion {
+    '6.3.39'
+}
+
 function Write-AtomicJson($Path, $Data) {
     $temp = "$Path.$PID.tmp"
     try {
