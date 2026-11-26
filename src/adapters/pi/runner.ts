@@ -4,10 +4,12 @@ import { pathToFileURL } from 'node:url';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import type { AgentSession, AgentSessionEvent, ExtensionFactory, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { AssistantMessage as PiAssistant, ImageContent } from '@earendil-works/pi-ai';
-import type { AssistantMessage, Part, Session, SessionPromptAsyncData, ToolPart, UserMessage } from '@opencode-ai/sdk/v2';
+import type { AssistantMessage, Part, Session, SessionPromptAsyncData, UserMessage } from '@opencode-ai/sdk/v2';
 import { copilot, emptyTokens, HostConfig, object } from './config.js';
 import { contextSettings, limitToolText, projectToolContext, runtimeContextEntry, withRuntimeContext } from './context.js';
 import { authorizeToolCall, hostToolNames, questionTool, skillTool, taskTool, turnToolPolicy, visibleMcpTools, type HostToolSpec } from '../../host/tools.js';
+import { SessionHistory } from '../../host/history.js';
+import { TurnRecorder } from '../../host/recorder.js';
 import { runExplorerTask } from '../../host/explorer.js';
 import type { ToolDescriptor, ToolReference, InteractionTarget } from '../../host/types.js';
 import type { SkillSources } from '../../host-skills.js';
@@ -42,15 +44,10 @@ const filesystemDescriptors: Record<string, ToolDescriptor> = {
   grep: { kind: 'grep', permission: 'grep' }, find: { kind: 'glob', permission: 'glob' },
 };
 
-function alive(pid: number) {
-  if (pid <= 0) return false;
-  try { process.kill(pid, 0); return true; }
-  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
-}
-
 export class Runs {
   readonly active = new Map<string, Active>();
   readonly interactions: Interactions;
+  private readonly history: SessionHistory;
   private readonly sessionsDir: string;
   private readonly agentDir: string;
   private readonly nativeAgentDir: string;
@@ -61,30 +58,23 @@ export class Runs {
     this.nativeAgentDir = join(home, 'harnesses', 'pi', 'agent');
     mkdirSync(this.sessionsDir, { recursive: true });
     this.interactions = new Interactions((sessionID, event, fields) => store.event(sessionID, event, fields));
+    this.history = new SessionHistory({ store, interactions: this.interactions, root, displayName: 'Pi', logPrefix: 'ShadowBotPi',
+      isActive: id => this.active.has(id), native: {
+        repairInterrupted: (meta, detail) => this.recoverContext(meta, detail),
+        prepareDelete: meta => {
+          const file = this.transcriptPath(meta);
+          return () => { if (file) rmSync(file, { force: true }); };
+        },
+        parentOf: (meta, entryID) => {
+          const entry = this.manager(meta).getEntry(entryID);
+          if (entry?.type !== 'message') throw new RequestError(409, 'The native Pi entry is unavailable');
+          return entry.parentId;
+        },
+      } });
     this.running();
   }
 
-  running() {
-    for (const meta of this.store.running(this.root)) {
-      this.recover(meta);
-    }
-    return this.store.running(this.root);
-  }
-
-  private recover(meta: Meta) {
-    if (this.active.has(meta.id) || (meta.owner_pid !== process.pid && alive(meta.owner_pid)) || !this.store.takeOver(meta)) return false;
-    const detail = 'Pi was interrupted before the run completed. Review any external tool operations before retrying.';
-    try { this.recoverContext(meta, detail); }
-    catch (error) {
-      if (databaseBusy(error)) throw error;
-      console.error('ShadowBotPi could not repair an interrupted native transcript');
-    }
-    this.store.finishInterrupted(meta, detail);
-    this.store.event(meta.id, 'session.error', { sessionID: meta.id, error: failure(detail, true) });
-    this.store.event(meta.id, 'session.status', { sessionID: meta.id, status: { type: 'idle' } });
-    this.store.event(meta.id, 'session.idle', { sessionID: meta.id });
-    return true;
-  }
+  running() { return this.history.running(); }
 
   private transcriptPath(meta: Meta) {
     if (!meta.native_file) return undefined;
@@ -128,14 +118,9 @@ export class Runs {
     this.store.native(meta.id, manager.getSessionFile(), manager.getLeafId());
   }
 
-  private assertIdle(session: Session) {
-    const meta = this.store.meta(session.id);
-    if (this.active.has(session.id) || (meta?.running && !this.recover(meta))) throw new RequestError(409, 'The session is busy');
-  }
-
   start(session: Session, prompt: Prompt, run: RunInput, interaction?: InteractionTarget) {
     const thinking = thinkingArgument(prompt);
-    if (thinking === undefined) this.assertIdle(session);
+    if (thinking === undefined) this.history.assertIdle(session);
     const { messageID, parts } = admitParts(this.store, session, prompt);
     const hasRuntime = typeof this.context.hasRuntimeContext === 'boolean' ? this.context.hasRuntimeContext :
       Boolean(process.env.SHADOWBOT_OPENCODE_RUNTIME_CONTEXT_URL);
@@ -230,23 +215,6 @@ export class Runs {
     return { info: response, parts: [replyPart] };
   }
 
-  patchPart(session: Session, messageID: string, partID: string, input: Record<string, unknown>) {
-    this.assertIdle(session);
-    const part = this.store.message(session.id, messageID)?.parts.find(part => part.id === partID);
-    if (!part) throw new RequestError(404, 'Message part not found');
-    if (input.id !== partID || input.messageID !== messageID || input.sessionID !== session.id || input.type !== part.type) {
-      throw new RequestError(400, 'Message part identity does not match the request path');
-    }
-    if (part.type !== 'text' || input.text !== part.text || (input.ignored !== undefined && input.ignored !== part.ignored) ||
-        (input.synthetic !== undefined && input.synthetic !== part.synthetic)) {
-      throw new RequestError(501, 'This operation would edit the native Pi transcript');
-    }
-    if (input.metadata !== undefined && !object(input.metadata)) throw new RequestError(400, 'Invalid message part metadata');
-    const updated = { ...part, metadata: input.metadata };
-    this.store.putPart(updated);
-    return updated;
-  }
-
   private async execute(session: Session, prompt: Prompt, parts: Part[], text: string, images: ImageContent[], messageID: string, agent: string, active: Active, manager: SessionManager) {
     const signal = active.abort.signal;
     const config = this.config.value;
@@ -283,7 +251,7 @@ export class Runs {
       const settings = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: true } });
       projection = new Projection(this.store, session, user, manager, selection, this.root, active);
       const interactionSession = active.interaction?.sessionID ?? session.id;
-      const interactionTool = (callID: string) => active.interaction?.tool ?? projection!.reference(callID);
+      const interactionTool = (callID: string) => active.interaction?.tool ?? projection!.recorder.reference(callID);
       const connectedTools = this.mcp.tools(name => {
         active.uncertainTool = name;
         active.abort.abort();
@@ -298,7 +266,7 @@ export class Runs {
         register(skillTool(loadedSkills));
         register(questionTool({ interactions: this.interactions, interactionSession, reference: interactionTool, signal }));
         if (agent === copilot) register(taskTool({ run: (callID, args) => runExplorerTask({
-          store: this.store, context: this.context, root: this.root, parent: session, tool: projection!.reference(callID),
+          store: this.store, context: this.context, root: this.root, parent: session, tool: projection!.recorder.reference(callID),
           args, signal, instructions: active.instructions, logPrefix: 'ShadowBotPi',
           startChild: this.start.bind(this), abortChild: this.abort.bind(this),
         }) }));
@@ -346,7 +314,7 @@ export class Runs {
       await pi.prompt(text, { images, expandPromptTemplates: false, source: 'rpc' });
       if (projection.error) throw projection.error;
       signal.throwIfAborted();
-      error = projection.last?.error ? new UserError('message' in projection.last.error.data ? String(projection.last.error.data.message) : '模型请求失败。') : undefined;
+      error = projection.recorder.last?.error ? new UserError('message' in projection.recorder.last.error.data ? String(projection.recorder.last.error.data.message) : '模型请求失败。') : undefined;
     } catch (caught) { error = caught; }
     finally {
       unsubscribe?.();
@@ -359,7 +327,7 @@ export class Runs {
           : databaseBusy(error) ? 'The ShadowBot session database became busy. Refresh session status and review any external tool operations before retrying.'
           : userMessage(error, 'Pi 请求失败。检查影刀中的模型设置，运行 .\\switch.ps1 doctor 和 mcp status 查看诊断。');
         projection ??= new Projection(this.store, session, user, manager, selection, this.root, active);
-        projection.finishError(detail, active.cancelled === true);
+        projection.recorder.finishError(detail, active.cancelled === true);
         this.store.event(session.id, 'session.error', { sessionID: session.id, error: failure(detail, active.cancelled === true) });
         this.store.finishInterrupted(this.store.meta(session.id)!, detail);
       }
@@ -371,7 +339,7 @@ export class Runs {
       this.store.event(session.id, 'session.status', { sessionID: session.id, status: { type: 'idle' } });
       this.store.event(session.id, 'session.idle', { sessionID: session.id });
     }
-    return projection?.last ? this.store.message(session.id, projection.last.id) : undefined;
+    return projection?.recorder.last ? this.store.message(session.id, projection.recorder.last.id) : undefined;
   }
 
   async abort(sessionID: string) {
@@ -387,99 +355,22 @@ export class Runs {
     return true;
   }
 
-  rename(session: Session, title: string) {
-    this.assertIdle(session);
-    return this.store.update({ ...session, title, time: { ...session.time, updated: Date.now() } });
-  }
-
-  delete(session: Session) {
-    const children = this.store.list(this.root).filter(child => child.parentID === session.id);
-    for (const child of children) this.assertIdle(child);
-    this.assertIdle(session);
-    for (const child of children) this.delete(child);
-    const file = this.transcriptPath(this.store.meta(session.id)!);
-    this.store.delete(session);
-    this.interactions.clearGrants(session.id);
-    if (file) rmSync(file, { force: true });
-    return true;
-  }
-
-  revert(session: Session, messageID: string) {
-    this.assertIdle(session);
-    const item = this.store.message(session.id, messageID);
-    if (!item) throw new RequestError(404, 'Message not found');
-    const anchor = item.info.role === 'assistant' ? this.store.message(session.id, item.info.parentID) : item;
-    if (anchor?.info.role !== 'user') throw new RequestError(409, 'The turn has no user message');
-    const meta = this.store.meta(session.id)!;
-    const leaf = this.branchBefore(meta, anchor.info.id);
-    const reverted = { ...session, revert: { messageID: anchor.info.id }, time: { ...session.time, updated: Date.now() } };
-    return this.store.setRevert(reverted, leaf, meta.cutoff ? meta.revert_leaf : meta.native_leaf);
-  }
-
-  deleteMessage(session: Session, messageID: string) {
-    this.assertIdle(session);
-    const item = this.store.message(session.id, messageID);
-    if (!item) {
-      if (this.store.wasMessageRemoved(session.id, messageID)) return true;
-      throw new RequestError(404, 'Message not found');
-    }
-    const meta = this.store.meta(session.id)!;
-    if (meta.cutoff && !this.store.messages(session.id).some(message => message.info.id === messageID)) {
-      this.store.commitRevert(session.id);
-      return true;
-    }
-    // A bridge-side error can create a projected assistant message without a Pi entry.
-    const local = this.store.localCommand(session.id, messageID);
-    const cutoff = local ? local.user_id : item.info.role === 'assistant' && item.info.error && !this.store.mapped(session.id, messageID)
-      ? item.info.parentID : messageID;
-    const leaf = this.branchBefore(meta, cutoff);
-    this.store.removeMessages(session, cutoff, leaf);
-    return true;
-  }
-
-  private branchBefore(meta: Meta, messageID: string) {
-    const local = this.store.localCommand(meta.id, messageID);
-    if (local) return local.native_leaf;
-    const piID = this.store.mapped(meta.id, messageID);
-    if (!piID) throw new RequestError(409, 'The message has no native Pi entry');
-    const entry = this.manager(meta).getEntry(piID);
-    if (entry?.type !== 'message') throw new RequestError(409, 'The native Pi entry is unavailable');
-    return entry.parentId;
-  }
-
-  unrevert(session: Session) {
-    this.assertIdle(session);
-    const meta = this.store.meta(session.id)!;
-    if (!meta.cutoff) return session;
-    const restored = { ...session };
-    delete restored.revert;
-    return this.store.setRevert(restored, meta.revert_leaf, null);
+  rename(session: Session, title: string) { return this.history.rename(session, title); }
+  delete(session: Session) { return this.history.delete(session); }
+  revert(session: Session, messageID: string) { return this.history.revert(session, messageID); }
+  deleteMessage(session: Session, messageID: string) { return this.history.deleteMessage(session, messageID); }
+  unrevert(session: Session) { return this.history.unrevert(session); }
+  patchPart(session: Session, messageID: string, partID: string, input: Record<string, unknown>) {
+    return this.history.patchPart(session, messageID, partID, input);
   }
 }
 
 class Projection {
-  last?: AssistantMessage;
   error?: unknown;
-  private segments = new Map<number, Extract<Part, { type: 'text' | 'reasoning' }>>();
-  private toolParts = new Map<string, ToolPart>();
-
+  readonly recorder: TurnRecorder;
   constructor(private store: Store, private session: Session, private user: UserMessage, private manager: SessionManager,
-    private model: UserMessage['model'], private root: string, private active: Active) {}
-
-  private begin(created = Date.now()) {
-    const { session, user, model } = this;
-    this.last = { id: id('msg'), sessionID: session.id, parentID: user.id, role: 'assistant', agent: user.agent,
-      mode: user.agent, modelID: model.modelID, providerID: model.providerID, path: { cwd: this.root, root: this.root },
-      time: { created }, cost: 0, tokens: emptyTokens() };
-    this.segments.clear();
-    this.store.putMessage(this.last);
-    this.store.putPart({ ...this.partRef(), type: 'step-start' });
-  }
-
-  private partRef() { return { id: id('prt'), sessionID: this.session.id, messageID: this.last!.id }; }
-
-  reference(callID: string) {
-    return { messageID: this.toolParts.get(callID)?.messageID ?? this.last?.id ?? this.user.id, callID };
+    model: UserMessage['model'], root: string, private active: Active) {
+    this.recorder = new TurnRecorder(store, session, user, model, root);
   }
 
   handle(event: AgentSessionEvent) {
@@ -495,24 +386,20 @@ class Projection {
   private project(event: AgentSessionEvent) {
     switch (event.type) {
       case 'message_start':
-        if (event.message.role === 'assistant') this.begin(event.message.timestamp);
+        if (event.message.role === 'assistant') this.recorder.begin(event.message.timestamp);
         break;
       case 'message_update': {
-        if (!this.last) break;
+        if (!this.recorder.last) break;
         const delta = event.assistantMessageEvent;
         if (delta.type === 'text_delta' || delta.type === 'thinking_delta') {
-          const record = this.segment(delta.contentIndex, delta.type === 'text_delta' ? 'text' : 'reasoning');
-          record.text += delta.delta;
-          this.store.putPart(record, false);
-          this.store.event(this.session.id, 'message.part.delta', { sessionID: this.session.id, messageID: record.messageID,
-            partID: record.id, field: 'text', delta: delta.delta });
+          this.recorder.delta(delta.contentIndex, delta.type === 'text_delta' ? 'text' : 'reasoning', delta.delta);
         }
         break;
       }
       case 'message_end': {
         const native = event.message;
         if (native.role === 'assistant') this.finish(native);
-        const projected = native.role === 'assistant' ? this.last?.id : native.role === 'user' ? this.user.id : undefined;
+        const projected = native.role === 'assistant' ? this.recorder.last?.id : native.role === 'user' ? this.user.id : undefined;
         queueMicrotask(() => {
           if (this.error) return;
           try {
@@ -527,74 +414,31 @@ class Projection {
         break;
       }
       case 'tool_execution_start':
-        this.runningTool(event.toolCallId, event.toolName, event.args);
+        this.recorder.toolRunning(event.toolCallId, event.toolName, event.args);
         break;
       case 'tool_execution_end': {
-        const record = this.toolParts.get(event.toolCallId);
-        if (!record) break;
-        const state = record.state;
-        const time = { start: state.status === 'pending' ? Date.now() : state.time.start, end: Date.now() };
         const output = Array.isArray(event.result?.content) ? event.result.content.map((block: unknown) => object(block) && block.type === 'text' ? string(block.text) : '').filter(Boolean).join('\n') : '';
         const metadata = object(event.result?.details) ? event.result.details : {};
-        record.state = event.isError ? { status: 'error', input: state.input, error: output || 'Tool execution failed', time, metadata }
-          : { status: 'completed', input: state.input, output, title: record.tool, time, metadata };
-        this.store.putPart(record);
+        this.recorder.toolEnd(event.toolCallId, { isError: event.isError, output, metadata });
         break;
       }
       case 'compaction_end':
-        if (event.result) this.store.event(this.session.id, 'session.compacted', { sessionID: this.session.id });
+        if (event.result) this.recorder.compacted();
         break;
     }
   }
 
-  private segment(index: number, type: 'text' | 'reasoning'): Extract<Part, { type: 'text' | 'reasoning' }> {
-    const existing = this.segments.get(index);
-    if (existing) return existing;
-    const base = { ...this.partRef(), text: '', time: { start: Date.now() } };
-    const record = type === 'text' ? { ...base, type: 'text' as const } : { ...base, type: 'reasoning' as const };
-    this.segments.set(index, record);
-    this.store.putPart(record);
-    return record;
-  }
-
-  private runningTool(callID: string, name: string, args: unknown) {
-    if (!this.last) this.begin();
-    let record = this.toolParts.get(callID);
-    const input = object(args) ? args : {};
-    if (!record) {
-      record = { ...this.partRef(), type: 'tool', tool: name, callID, state: { status: 'pending', input, raw: JSON.stringify(input) } };
-      this.toolParts.set(callID, record);
-      this.store.mapTool(this.session.id, callID, record.id);
-    }
-    record.state = { status: 'running', input, time: { start: Date.now() } };
-    this.store.putPart(record);
-  }
-
   private finish(native: PiAssistant) {
-    if (!this.last) this.begin(native.timestamp);
-    const info = this.last!;
+    const segments: { index: number; kind: 'text' | 'reasoning'; text: string }[] = [];
     for (const [index, item] of native.content.entries()) {
-      if (item.type !== 'text' && item.type !== 'thinking') continue;
-      const record = this.segment(index, item.type === 'text' ? 'text' : 'reasoning');
-      record.text = item.type === 'text' ? item.text : item.thinking;
-      record.time = { start: record.time?.start ?? info.time.created, end: Date.now() };
-      this.store.putPart(record);
+      if (item.type === 'text') segments.push({ index, kind: 'text', text: item.text });
+      if (item.type === 'thinking') segments.push({ index, kind: 'reasoning', text: item.thinking });
     }
-    info.time.completed = Date.now();
-    info.cost = native.usage.cost.total;
-    info.tokens = { total: native.usage.totalTokens, input: native.usage.input, output: native.usage.output,
-      reasoning: native.usage.reasoning ?? 0, cache: { read: native.usage.cacheRead, write: native.usage.cacheWrite } };
-    info.finish = native.stopReason === 'toolUse' ? 'tool-calls' : native.stopReason;
-    if (native.stopReason === 'error' || native.stopReason === 'aborted') info.error = failure(modelError(native.errorMessage), native.stopReason === 'aborted');
-    this.store.putPart({ ...this.partRef(), type: 'step-finish', reason: info.finish, cost: info.cost, tokens: info.tokens });
-    this.store.putMessage(info);
-  }
-
-  finishError(detail: string, aborted: boolean) {
-    if (!this.last) this.begin();
-    this.last!.time.completed = Date.now();
-    this.last!.finish = 'error';
-    this.last!.error = failure(detail, aborted);
-    this.store.putMessage(this.last!);
+    this.recorder.finishStep({ created: native.timestamp, segments, cost: native.usage.cost.total,
+      tokens: { total: native.usage.totalTokens, input: native.usage.input, output: native.usage.output,
+        reasoning: native.usage.reasoning ?? 0, cache: { read: native.usage.cacheRead, write: native.usage.cacheWrite } },
+      finish: native.stopReason === 'toolUse' ? 'tool-calls' : native.stopReason,
+      error: native.stopReason === 'error' || native.stopReason === 'aborted'
+        ? { message: modelError(native.errorMessage), aborted: native.stopReason === 'aborted' } : undefined });
   }
 }
