@@ -6,7 +6,7 @@ import type { Installation } from './installation.js';
 import type { HarnessAdapter } from './adapter.js';
 import { UserError, registerErrors } from './errors.js';
 
-export type Capabilities = { skills: boolean; mcp: boolean };
+export type Capabilities = { skills: boolean; mcp: boolean; thinking?: boolean };
 export type Launch = { executable: string; args: string[] };
 export const NPM_PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
 export type Harness = {
@@ -42,7 +42,8 @@ export class HarnessRegistry {
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
       const spec = readJson<Harness>(join(directory, entry.name, 'harness.json'));
       if (harnessID(spec.id) !== entry.name || !['managed', 'bundled'].includes(spec.kind) || !spec.name ||
-          !Array.isArray(spec.aliases) || typeof spec.capabilities?.skills !== 'boolean' || typeof spec.capabilities?.mcp !== 'boolean') throw new Error('Invalid harness registration');
+          !Array.isArray(spec.aliases) || typeof spec.capabilities?.skills !== 'boolean' || typeof spec.capabilities?.mcp !== 'boolean' ||
+          (spec.capabilities.thinking !== undefined && typeof spec.capabilities.thinking !== 'boolean')) throw new Error('Invalid harness registration');
       if ('upstream' in spec) {
         const packages = spec.upstream?.packages;
         if (spec.kind !== 'managed' || spec.upstream?.type !== 'npm-lockstep' || !Array.isArray(packages) ||

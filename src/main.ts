@@ -157,7 +157,7 @@ class Bridge {
     try {
       const global = this.harness.capabilities.skills ? skillInventory(this.agentDir, undefined, this.skillSources, this.config.value)
         .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined;
-      const menu = syncSkillCommands(this.installation.resources, global, thinkingEnabled(this.harness.id, this.config.value));
+      const menu = syncSkillCommands(this.installation.resources, global, thinkingEnabled(this.harness.id, this.config.value, this.harness.capabilities));
       if (menu.added + menu.updated + menu.removed) local.menuReconnect = true;
     } catch (error) { local.configurationError = userMessage(error, 'Skill 菜单同步失败。检查影刀 Resources/Copilot/commands 目录权限。'); }
     this.publish(root, local);
@@ -273,7 +273,7 @@ class Bridge {
     }));
     const commands = { ...this.config.value.command };
     let thinkingMenuError: unknown;
-    if ((path === '/command' || action === 'command') && thinkingEnabled(this.harness.id, this.config.value)) {
+    if ((path === '/command' || action === 'command') && thinkingEnabled(this.harness.id, this.config.value, this.harness.capabilities)) {
       try { commands.thinking = thinkingMenuCommand(this.installation.resources); }
       catch (error) { thinkingMenuError = error; }
     }

@@ -144,7 +144,7 @@ function menuSync(home: string, install: Installation) {
   try { harness = registry.selected(mode(home)); }
   catch { return { added: 0, updated: 0, removed: 0 }; }
   return syncSkillCommands(install.resources, harnessCapabilities(install, harness).skills
-    ? skillRows(home, install).filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, thinkingEnabled(harness.id, new HostConfig().value));
+    ? skillRows(home, install).filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, thinkingEnabled(harness.id, new HostConfig().value, harnessCapabilities(install, harness)));
 }
 // One readable line instead of the full counter table; conflicts are already warned on stderr.
 function menuSummary(menu: { added: number; updated: number; removed: number }) {
