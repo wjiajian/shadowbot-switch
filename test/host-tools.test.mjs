@@ -76,20 +76,53 @@ test('aborted decisions block and pending asks reject', async t => {
   assert.deepEqual(await check({}), denied('Run cancelled'));
 });
 
-test('realpath target is rechecked after the permission reply', async t => {
+const changed = denied('The filesystem path changed before the tool could run');
+// Directory junctions need no privilege on Windows; directory symlinks work elsewhere.
+const directoryLink = process.platform === 'win32' ? 'junction' : 'dir';
+
+test('realpath target is rechecked after the permission reply: target deleted', async t => {
   const { check, root } = setup(t);
-  const other = join(root, 'other');
+  const path = join(root, 'deleted');
+  writeFileSync(path, '');
+  const answer = await check({ name: 'read', args: { path }, interactions: { permission: async () => {
+    rmSync(path);
+    return true;
+  } } });
+  assert.deepEqual(answer, changed);
+});
+
+test('realpath target is rechecked after the permission reply: directory replaced by a link', async t => {
+  const { check, root } = setup(t);
+  const other = join(root, 'other-directory');
+  const path = join(root, 'replaced-directory');
+  mkdirSync(other);
+  mkdirSync(path);
+  const answer = await check({ name: 'read', args: { path }, interactions: { permission: async () => {
+    rmSync(path, { recursive: true });
+    symlinkSync(other, path, directoryLink);
+    return true;
+  } } });
+  assert.deepEqual(answer, changed);
+});
+
+test('realpath target is rechecked after the permission reply: file replaced by a symlink', async t => {
+  const { check, root } = setup(t);
+  const other = join(root, 'other-file');
   writeFileSync(other, '');
-  for (const swap of [false, true]) {
-    const path = join(root, String(swap));
-    writeFileSync(path, '');
-    const answer = await check({ name: 'read', args: { path }, interactions: { permission: async () => {
-      rmSync(path);
-      if (swap) symlinkSync(other, path);
-      return true;
-    } } });
-    assert.deepEqual(answer, denied('The filesystem path changed before the tool could run'));
+  try { symlinkSync(other, join(root, 'symlink-probe'), 'file'); }
+  catch (error) {
+    if (error.code !== 'EPERM') throw error;
+    t.skip('file symlinks need Developer Mode or administrator rights on this Windows account');
+    return;
   }
+  const path = join(root, 'replaced-file');
+  writeFileSync(path, '');
+  const answer = await check({ name: 'read', args: { path }, interactions: { permission: async () => {
+    rmSync(path);
+    symlinkSync(other, path, 'file');
+    return true;
+  } } });
+  assert.deepEqual(answer, changed);
 });
 
 test('MCP visibility follows role, permissions and tool switches', t => {
