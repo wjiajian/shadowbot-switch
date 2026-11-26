@@ -2,19 +2,12 @@ import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { InMemoryCredentialStore } from '@earendil-works/pi-ai';
 import type { Api, Model as PiModel } from '@earendil-works/pi-ai';
 import type { Model, Provider, ProviderConfig } from '@opencode-ai/sdk/v2';
-import { HostConfig as BaseHostConfig, copilot, modelSelection, object } from '../../config.js';
+import { HostConfig as BaseHostConfig, copilot, modelSelection } from '../../config.js';
+import { configuredHeaders, defaultModels, hasExplicitAuth, isLoopbackRelay, resolveBaseUrl, resolveCredential,
+  selectModel, visibleModelIDs } from '../../host/model-config.js';
 import { UserError } from '../../errors.js';
 export { copilot, explorer, emptyTokens, object } from '../../config.js';
 type ConfiguredModel = NonNullable<ProviderConfig['models']>[string];
-function envValue(value: string) {
-  return value.replace(/\{env:([A-Z_][A-Z0-9_]*)\}/gi, (_, name: string) => process.env[name] ?? '');
-}
-
-function headers(value: unknown) {
-  if (!object(value)) return {};
-  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
-    .map(([key, value]) => [key, envValue(value)]));
-}
 
 const modules = new Map<string, Api>([
   ['@ai-sdk/openai-compatible', 'openai-completions'],
@@ -66,24 +59,20 @@ export class HostConfig extends BaseHostConfig {
     const providers = Object.entries(config.provider ?? {}).map(([id, provider]): Provider => {
       const declared = Object.keys(provider.models ?? {});
       const candidates = declared.length ? declared : runtime.getModels(id).map(model => model.id);
-      const visible = candidates.filter(modelID => (!provider.whitelist || provider.whitelist.includes(modelID)) && !provider.blacklist?.includes(modelID));
+      const visible = visibleModelIDs(provider, candidates);
       const models = Object.fromEntries(visible.map(key => {
         const model = provider.models?.[key] ?? {};
         return [key, modelMetadata(id, key, provider, model, runtime.getModel(id, model.id ?? key))];
       }));
       return { id, name: provider.name ?? id, env: provider.env ?? [], source: 'config', options: provider.options ?? {}, models };
     });
-    const defaults = Object.fromEntries(providers.flatMap(provider => {
-      const model = selected?.providerID === provider.id && provider.models[selected.modelID] ? selected.modelID : Object.keys(provider.models)[0];
-      return model ? [[provider.id, model]] : [];
-    }));
+    const defaults = defaultModels(providers, selected);
     return { providers, default: defaults, connected: providers.filter(provider => Object.keys(provider.models).length > 0).map(provider => provider.id) };
   }
 
   async model(request?: { providerID: string; modelID: string }, agent = copilot) {
     const config = this.value;
-    const selection = request ?? modelSelection(config.agent?.[agent]?.model ?? config.model);
-    if (!selection) throw new UserError('尚未选择模型。请在影刀 Copilot 的模型设置中选择一个模型。');
+    const selection = selectModel(config, request, agent);
     const { providerID, modelID } = selection;
     const provider = config.provider?.[providerID] ?? {};
     const configuredModel = provider.models?.[modelID];
@@ -101,19 +90,13 @@ export class HostConfig extends BaseHostConfig {
       ? catalog.thinkingLevelMap : undefined;
     const configuredBase = model.provider?.api ?? provider.options?.baseURL ?? provider.api;
     const base = configuredBase ?? catalog?.baseUrl;
-    if (typeof base !== 'string') throw new UserError(`模型 ${providerID}/${modelID} 未配置 API 地址。请检查影刀模型设置。`);
-    let url: URL;
-    try { url = new URL(envValue(base)); } catch { throw new UserError('模型 API 地址无效。请填写完整的 http 或 https 地址。'); }
-    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw new UserError('模型 API 地址必须使用 http 或 https，凭据请放入认证设置。');
-    const saved = this.auth.get(providerID);
-    const options = provider.options ?? {};
-    const key = (saved?.type === 'api' && saved.key) || (typeof options.apiKey === 'string' && envValue(options.apiKey)) ||
-      provider.env?.map(variable => process.env[variable]).find(Boolean);
-    const configuredHeaders = { ...headers(options.headers), ...headers(model.headers) };
-    const explicitAuth = Object.keys(configuredHeaders).some(name => /^(authorization|x-api-key|api-key|x-goog-api-key)$/i.test(name));
-    if (!catalog || configuredModel || configuredBase || catalog.api !== api || Object.keys(configuredHeaders).length) {
+    const url = resolveBaseUrl(base, providerID, modelID);
+    const key = resolveCredential(this.auth, providerID, provider);
+    const headers = { ...configuredHeaders(provider.options?.headers), ...configuredHeaders(model.headers) };
+    const explicitAuth = hasExplicitAuth(headers);
+    if (!catalog || configuredModel || configuredBase || catalog.api !== api || Object.keys(headers).length) {
       runtime.registerProvider(providerID, {
-        name: provider.name ?? providerID, api, baseUrl: url.href.replace(/\/$/, ''), headers: configuredHeaders,
+        name: provider.name ?? providerID, api, baseUrl: url.href.replace(/\/$/, ''), headers,
         models: [{
           id: actualID, name: model.name ?? catalog?.name ?? modelID, reasoning: model.reasoning ?? catalog?.reasoning ?? false,
           input: model.modalities?.input || model.attachment !== undefined
@@ -128,7 +111,7 @@ export class HostConfig extends BaseHostConfig {
         }],
       });
     }
-    const noKeyRelay = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+    const noKeyRelay = isLoopbackRelay(url);
     if (!key && !explicitAuth && !noKeyRelay) throw new UserError(`模型 ${providerID}/${modelID} 缺少 API 凭据。请在影刀模型设置中填写凭据或配置对应环境变量。`);
     await runtime.setRuntimeApiKey(providerID, key || 'shadowbot-local-relay');
     const resolved = runtime.getModel(providerID, actualID);
