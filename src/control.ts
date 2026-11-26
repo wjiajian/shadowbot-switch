@@ -51,7 +51,7 @@ async function main([command, arg]: string[]) {
     await switchBackend(home, install, harness.id, schema);
     const config = new HostConfig().value;
     syncSkillCommands(install.resources, harnessCapabilities(install, harness).skills ? skillInventory(agentDir, undefined, skillSources(home, install, harness.id), config)
-      .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, thinkingEnabled(harness.id, config));
+      .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, thinkingEnabled(harness.id, config, harnessCapabilities(install, harness)));
     return;
   }
   throw new Error('Expected doctor, skills list, mcp list, or reload. Use install.ps1 to switch harnesses.');

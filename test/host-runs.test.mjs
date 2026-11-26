@@ -121,3 +121,12 @@ test('Explorer shares the parent task reference and rules while the child asks f
   assert.equal(runs.interactions.permissionReply(frame.properties.id, 'always', () => true), true);
   assert.equal((await reply).info.finish, 'stop');
 });
+
+test('thinking command registration honors installed capabilities and legacy Pi manifests', async () => {
+  const { thinkingEnabled } = await import('../dist/service/thinking-command.js');
+  const caps = { skills: true, mcp: true };
+  assert.equal(thinkingEnabled('pi', {}, caps), true);
+  assert.equal(thinkingEnabled('mock', {}, caps), false);
+  assert.equal(thinkingEnabled('mock', {}, { ...caps, thinking: true }), true);
+  assert.equal(thinkingEnabled('mock', { command: { thinking: {} } }, { ...caps, thinking: true }), false);
+});
