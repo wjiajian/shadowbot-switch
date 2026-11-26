@@ -1,22 +1,23 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { basename, dirname, join, relative, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import type { AgentSession, AgentSessionEvent, ExtensionFactory, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { AssistantMessage as PiAssistant, ImageContent } from '@earendil-works/pi-ai';
-import type { AssistantMessage, Part, QuestionInfo, Session, SessionPromptAsyncData, ToolPart, UserMessage } from '@opencode-ai/sdk/v2';
-import { copilot, emptyTokens, explorer, HostConfig, object } from './config.js';
+import type { AssistantMessage, Part, Session, SessionPromptAsyncData, ToolPart, UserMessage } from '@opencode-ai/sdk/v2';
+import { copilot, emptyTokens, HostConfig, object } from './config.js';
 import { contextSettings, limitToolText, projectToolContext, runtimeContextEntry, withRuntimeContext } from './context.js';
+import { authorizeToolCall, hostToolNames, questionTool, skillTool, taskTool, turnToolPolicy, visibleMcpTools, type HostToolSpec } from '../../host/tools.js';
+import { runExplorerTask } from '../../host/explorer.js';
+import type { ToolDescriptor, ToolReference, InteractionTarget } from '../../host/types.js';
 import type { SkillSources } from '../../host-skills.js';
-import { decision, Interactions, permissionMayAllow } from '../../interactions.js';
+import { Interactions } from '../../interactions.js';
 import { atomicWrite } from '../../installation.js';
 import { McpHub } from './mcp.js';
-import { ShadowBotContext, skills, userSettings } from '../../shadowbot.js';
+import { ShadowBotContext, skills } from '../../shadowbot.js';
 import { admitParts, buildInstructions, parsePromptContent, promptAgent } from '../../host/prompt.js';
 import { refreshFailureIsFatal, refreshRuntimeContext, turnRuntimeContext } from '../../host/runtime-context.js';
 import type { RunInput } from '../../adapter.js';
-import { outsideWorkspace } from '../../config-paths.js';
 import { databaseBusy, failure, id, Store } from '../../store.js';
 import type { Meta } from '../../store.js';
 import { thinkingArgument } from '../../thinking-command.js';
@@ -27,8 +28,6 @@ import { modelError, UserError, userMessage } from '../../errors.js';
 
 export type Prompt = NonNullable<SessionPromptAsyncData['body']>;
 type Reply = ReturnType<Store['message']>;
-type ToolReference = { messageID: string; callID: string };
-type InteractionTarget = { sessionID: string; tool: ToolReference };
 type Active = {
   abort: AbortController; done: Promise<Reply>; instructions: string; interaction?: InteractionTarget; pi?: AgentSession;
   cancelled?: boolean; uncertainTool?: string; contextRefreshFailed?: boolean;
@@ -38,21 +37,10 @@ export { RequestError } from '../../errors.js';
 import { RequestError } from '../../errors.js';
 
 function string(value: unknown) { return typeof value === 'string' ? value : ''; }
-function schema(properties: Record<string, unknown>, required: string[]) {
-  return { type: 'object', properties, required, additionalProperties: false } as ToolDefinition['parameters'];
-}
-const textSchema = { type: 'string', minLength: 1 };
-const filesystemPermissions = new Map([['read', 'read'], ['ls', 'read'], ['grep', 'grep'], ['find', 'glob']]);
-
-function filesystemPath(root: string, input: string) {
-  let path = input.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, ' ').replace(/^@/, '');
-  if (process.platform === 'win32') {
-    path = path.replace(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i, (_, drive, tail) => `${drive}:/${tail ?? ''}`);
-  }
-  if (path === '~' || /^~[/\\]/.test(path)) path = join(homedir(), path.slice(2));
-  if (path.startsWith('file://')) path = fileURLToPath(path);
-  return realpathSync.native(resolve(root, path));
-}
+const filesystemDescriptors: Record<string, ToolDescriptor> = {
+  read: { kind: 'read', permission: 'read' }, ls: { kind: 'list', permission: 'read' },
+  grep: { kind: 'grep', permission: 'grep' }, find: { kind: 'glob', permission: 'glob' },
+};
 
 function alive(pid: number) {
   if (pid <= 0) return false;
@@ -301,90 +289,26 @@ export class Runs {
         active.abort.abort();
         void active.pi?.abort().catch(() => undefined);
       });
-      const role = config.agent?.[agent];
-      const policies = [config.permission, role?.permission, session.permission];
-      const customPolicy = userSettings(this.agentDir, this.root).mcpPermission;
-      const enabled = (name: string) => prompt.tools?.[name] !== false && role?.tools?.[name] !== false;
-      const mcp = new Map([...connectedTools].filter(([name, tool]) => {
-        if (!enabled(name) || !permissionMayAllow(name, ...(tool.builtin ? policies : [customPolicy]))) return false;
-        if (agent === explorer) return !tool.builtin || tool.server === 'xbot-copilot' || tool.server === 'browser-use-mcp';
-        return tool.server !== 'browser-use-mcp';
-      }));
-      const toolNames = [...mcp.keys(), 'skill', 'question', 'read'];
-      if (agent === copilot) toolNames.push('task', 'grep', 'find', 'ls');
+      const policy = turnToolPolicy(config, agent, session, prompt, this.agentDir, this.root);
+      const mcp = visibleMcpTools(connectedTools, agent, policy);
+      const toolNames = [...mcp.keys(), ...hostToolNames(agent)];
       const extension: ExtensionFactory = pi => {
         for (const tool of mcp.values()) pi.registerTool(tool.definition);
-        pi.registerTool({ name: 'skill', label: 'Skill', description: 'Read the instructions of an enabled skill.',
-          parameters: schema({ name: textSchema }, ['name']), execute: async (_callID, args) => {
-            const skill = object(args) ? loadedSkills.find(skill => skill.name === args.name) : undefined;
-            if (!skill) throw new Error('The requested skill is unavailable');
-            const text = [readFileSync(skill.filePath, 'utf8').trim(), `Base directory for this skill: ${skill.baseDir}`,
-              'Resolve the relative paths in this skill from that directory.'].join('\n\n');
-            return { content: [{ type: 'text', text }], details: { name: skill.name, dir: skill.baseDir } };
-          } });
-        pi.registerTool({ name: 'question', label: '提问', description: 'Ask the user to choose an option before continuing.',
-          parameters: schema({ questions: { type: 'array', minItems: 1, items: schema({ question: textSchema, header: textSchema,
-            multiple: { type: 'boolean' }, custom: { type: 'boolean' }, options: { type: 'array', minItems: 1,
-              items: schema({ label: textSchema, description: { type: 'string' } }, ['label', 'description']) },
-          }, ['question', 'header', 'options']) } }, ['questions']), execute: async (callID, args) => {
-            if (!object(args) || !Array.isArray(args.questions) || !args.questions.length || args.questions.length > 10) throw new Error('Invalid questions');
-            const answers = await this.interactions.question(interactionSession, args.questions as QuestionInfo[], interactionTool(callID), signal);
-            return { content: [{ type: 'text', text: JSON.stringify(answers) }], details: { answers } };
-          } });
-        if (agent === copilot) pi.registerTool({ name: 'task', label: 'Explorer', description: 'Delegate a web exploration task to shadowbot-explorer.',
-          parameters: schema({ description: textSchema, prompt: textSchema, subagent_type: textSchema, task_id: { type: 'string' } }, ['description', 'prompt', 'subagent_type']),
-          execute: (callID, args) => this.explore(session, projection!.reference(callID), object(args) ? args : {}, signal, active.instructions),
-        });
+        const register = (tool: HostToolSpec) => pi.registerTool({ ...tool, parameters: tool.parameters as ToolDefinition['parameters'] });
+        register(skillTool(loadedSkills));
+        register(questionTool({ interactions: this.interactions, interactionSession, reference: interactionTool, signal }));
+        if (agent === copilot) register(taskTool({ run: (callID, args) => runExplorerTask({
+          store: this.store, context: this.context, root: this.root, parent: session, tool: projection!.reference(callID),
+          args, signal, instructions: active.instructions, logPrefix: 'ShadowBotPi',
+          startChild: this.start.bind(this), abortChild: this.abort.bind(this),
+        }) }));
         pi.on('tool_call', async event => {
-          const name = event.toolName;
-          if (!enabled(name)) return { block: true, reason: 'Tool disabled for this turn' };
-          const custom = mcp.get(name);
-          const input = event.input as Record<string, unknown>;
-          const skill = name === 'skill' ? loadedSkills.find(candidate => candidate.name === input.name) : undefined;
-          if (name === 'skill' && !skill) return { block: true, reason: 'The requested skill is unavailable' };
-          const subagent = string(input.subagent_type);
-          let target = skill?.name ?? (name === 'task' ? (subagent === 'explore' ? explorer : subagent) :
-            string(input.filePath ?? input.path ?? input.command) || name);
-          const filesystemPermission = filesystemPermissions.get(name);
-          const permission = filesystemPermission ?? name;
-          let external: { path: string; directory: string; pattern: string } | undefined;
-          let checkedPath: string | undefined;
-          if (filesystemPermission) {
-            try {
-              const path = filesystemPath(this.root, string(input.path));
-              const fromRoot = relative(this.root, path);
-              if (outsideWorkspace(fromRoot)) {
-                const directory = statSync(path).isDirectory() ? path : dirname(path);
-                external = { path, directory, pattern: join(directory, '*') };
-              }
-              target = filesystemPermission === 'read' ? fromRoot : string(input.pattern);
-              checkedPath = path;
-              input.path = pathToFileURL(path).href;
-            } catch { return { block: true, reason: 'The filesystem path is unavailable' }; }
-          }
-          const rule = skill?.source === 'custom' ? 'allow' : custom && !custom.builtin
-            ? decision(name, target, 'ask', customPolicy)
-            : decision(permission, target, name === 'question' || skill ? 'allow' : 'ask', ...policies);
-          if (rule === 'deny') return { block: true, reason: 'Tool denied by the workspace permission policy' };
-          const reference = interactionTool(event.toolCallId);
-          if (external) {
-            const { pattern, path, directory } = external;
-            const access = decision('external_directory', pattern, 'ask', ...policies);
-            if (access === 'deny') return { block: true, reason: 'Access outside the workspace is denied' };
-            if (access === 'ask' && !await this.interactions.permission(session.id, 'external_directory', reference, signal, {
-              patterns: [pattern], always: [pattern], metadata: { filepath: path, parentDir: directory },
-            }, interactionSession)) return { block: true, reason: 'Access outside the workspace was declined' };
-          }
-          const skillScope = skill ? { patterns: [skill.name], always: [skill.name], metadata: {} } : undefined;
-          if (rule === 'ask' && !await this.interactions.permission(session.id, permission, reference, signal, skillScope, interactionSession)) {
-            return { block: true, reason: 'Permission denied by the user' };
-          }
-          if (signal.aborted) return { block: true, reason: 'Run cancelled' };
-          if (checkedPath) {
-            try { if (realpathSync.native(checkedPath) === checkedPath) return; }
-            catch { /* the approved path no longer exists */ }
-            return { block: true, reason: 'The filesystem path changed before the tool could run' };
-          }
+          const args = event.input as Record<string, unknown>;
+          const auth = await authorizeToolCall({ name: event.toolName, args, root: this.root, policy, skills: loadedSkills,
+            mcp: name => mcp.get(name), descriptors: filesystemDescriptors, interactions: this.interactions, sessionID: session.id,
+            interactionSession, reference: () => interactionTool(event.toolCallId), signal });
+          if (!auth.allow) return { block: true, reason: auth.reason };
+          if (auth.checkedPath) args.path = pathToFileURL(auth.checkedPath).href;
         });
         pi.on('tool_result', event => {
           const content = limitToolText(event.toolName, event.content);
@@ -414,7 +338,7 @@ export class Runs {
       });
       await resourceLoader.reload();
       const { session: pi } = await createAgentSession({ cwd: this.root, agentDir: this.nativeAgentDir, settingsManager: settings,
-        resourceLoader, sessionManager: manager, modelRuntime: runtime, model: resolved, thinkingLevel: savedThinking, tools: toolNames.filter(enabled) });
+        resourceLoader, sessionManager: manager, modelRuntime: runtime, model: resolved, thinkingLevel: savedThinking, tools: toolNames.filter(policy.enabled) });
       active.pi = pi;
       unsubscribe = pi.subscribe(event => projection!.handle(event));
       await pi.bindExtensions({ mode: 'rpc' });
@@ -448,38 +372,6 @@ export class Runs {
       this.store.event(session.id, 'session.idle', { sessionID: session.id });
     }
     return projection?.last ? this.store.message(session.id, projection.last.id) : undefined;
-  }
-
-  // The Explorer child runs inside the parent's turn, so it reuses that turn's rules snapshot.
-  private async explore(parent: Session, tool: ToolReference, args: Record<string, unknown>, signal: AbortSignal, instructions: string) {
-    if (!['explore', explorer].includes(string(args.subagent_type)) || !string(args.prompt)) throw new Error('Invalid Explorer task');
-    const prior = string(args.task_id);
-    const child = prior ? this.store.get(prior) : this.store.create(this.root, parent.directory, { parentID: parent.id, title: string(args.description) });
-    if (!child || child.parentID !== parent.id) throw new Error('Explorer session does not belong to this Copilot session');
-    signal.throwIfAborted();
-    const cancel = () => { void this.abort(child.id).catch(() => console.error('ShadowBotPi Explorer cancellation failed')); };
-    signal.addEventListener('abort', cancel, { once: true });
-    let reply: Reply;
-    let recycled = false;
-    try {
-      await this.context.overlay('start', parent.id, tool.callID).catch(() => console.error('ShadowBotPi Explorer overlay start failed'));
-      signal.throwIfAborted();
-      reply = await this.start(child, { agent: explorer, parts: [{ type: 'text', text: string(args.prompt) }] }, { instructions }, { sessionID: parent.id, tool });
-      if (reply?.info.role !== 'assistant' || reply.info.error) throw new Error('Explorer task failed');
-    } finally {
-      signal.removeEventListener('abort', cancel);
-      const cleanup = await this.context.overlay('end', parent.id, tool.callID).catch(() => {
-        console.error('ShadowBotPi Explorer overlay cleanup failed');
-        return undefined;
-      });
-      recycled = cleanup?.recycled ?? false;
-    }
-    const text = reply.parts.filter(part => part.type === 'text').map(part => part.text).join('\n');
-    const evidence = await this.context.finalizedEvidence().catch(() => undefined);
-    const evidenceText = evidence ? `[SHADOWBOT_EXPLORATION_EVIDENCE]\n${JSON.stringify(evidence.snapshot).slice(0, 24_000)}` : '';
-    const notice = recycled ? '任务已结束，runtime已被回收，下次执行将会启动一个全新的runtime' : '';
-    return { content: [{ type: 'text' as const, text: [text, evidenceText, notice].filter(Boolean).join('\n\n') }],
-      details: { parentSessionId: parent.id, sessionId: child.id, shadowbot_exploration_evidence_snapshot_id: evidence?.id } };
   }
 
   async abort(sessionID: string) {
