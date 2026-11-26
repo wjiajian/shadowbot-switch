@@ -1,5 +1,8 @@
 #requires -Version 7.0
 $ErrorActionPreference = 'Stop'
+# Output read by another process (for example `status --json`) must be UTF-8. Windows otherwise
+# encodes redirected output with the OEM code page, such as GBK on Chinese systems.
+if ([Console]::IsOutputRedirected) { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) }
 $global:LASTEXITCODE = 0
 $arguments = @($args | ForEach-Object { [string]$_ })
 $project = $PSScriptRoot
