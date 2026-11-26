@@ -8,6 +8,8 @@ node_modules/
 /.claude/
 /.copilot/
 /.pi/
+/.agents/
+/.gemini/
 /.shadowbot-switch/
 .env
 .env.*
