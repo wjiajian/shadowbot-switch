@@ -1,3 +1,4 @@
+import type { HostTool } from './mcp/hub.js';
 import type { McpLocalConfig, McpRemoteConfig, McpStatus, Part, Session, SessionPromptAsyncData } from '@opencode-ai/sdk/v2';
 import type { HostConfig } from './config.js';
 import type { Store } from './store.js';
@@ -16,6 +17,7 @@ export type RunInput = {
   instructions: string;
 };
 export interface McpConnection {
+  hostTools?(onUncertain?: (name: string) => void): Map<string, HostTool>;
   addBuiltin(name: string, config: McpLocalConfig | McpRemoteConfig): Promise<void>;
   reloadCustom(entries: Map<string, unknown>): Promise<unknown>;
   status(): Record<string, McpStatus>;
