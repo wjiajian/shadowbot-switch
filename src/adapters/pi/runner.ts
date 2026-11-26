@@ -12,7 +12,9 @@ import type { SkillSources } from '../../host-skills.js';
 import { decision, Interactions, permissionMayAllow } from '../../interactions.js';
 import { atomicWrite } from '../../installation.js';
 import { McpHub } from './mcp.js';
-import { agentPrompt, ShadowBotContext, skills, userSettings } from '../../shadowbot.js';
+import { ShadowBotContext, skills, userSettings } from '../../shadowbot.js';
+import { admitParts, buildInstructions, parsePromptContent, promptAgent } from '../../host/prompt.js';
+import { refreshFailureIsFatal, refreshRuntimeContext, turnRuntimeContext } from '../../host/runtime-context.js';
 import type { RunInput } from '../../adapter.js';
 import { outsideWorkspace } from '../../config-paths.js';
 import { databaseBusy, failure, id, Store } from '../../store.js';
@@ -146,26 +148,11 @@ export class Runs {
   start(session: Session, prompt: Prompt, run: RunInput, interaction?: InteractionTarget) {
     const thinking = thinkingArgument(prompt);
     if (thinking === undefined) this.assertIdle(session);
-    if (!Array.isArray(prompt.parts) || !prompt.parts.length) throw new RequestError(400, 'The prompt requires parts');
-    if (prompt.messageID && !/^msg_[a-zA-Z0-9]{6,64}$/.test(prompt.messageID)) throw new RequestError(400, 'Invalid message ID');
-    const messageID = prompt.messageID ?? id('msg');
-    if (this.store.db.prepare('SELECT 1 FROM main.message WHERE id=?').get(messageID)) {
-      throw new RequestError(409, 'The prompt message was already admitted');
-    }
-    const provided = new Set<string>();
-    const parts = prompt.parts.map(input => {
-      if (!object(input)) throw new RequestError(400, 'Invalid prompt part');
-      const partID = input.id ?? id('prt');
-      if (typeof partID !== 'string' || !/^prt_[a-zA-Z0-9]{6,64}$/.test(partID) || provided.has(partID)) {
-        throw new RequestError(400, 'Invalid or duplicate prompt part ID');
-      }
-      if (this.store.db.prepare('SELECT 1 FROM main.part WHERE id=?').get(partID)) throw new RequestError(409, 'The prompt part was already admitted');
-      provided.add(partID);
-      return { ...input, id: partID, sessionID: session.id, messageID } as Part;
-    });
-    const { text, images } = this.promptContent(prompt);
-    const agent = prompt.agent || (session.parentID ? explorer : copilot);
-    if (agent !== (session.parentID ? explorer : copilot)) throw new RequestError(400, 'This session cannot use the requested agent');
+    const { messageID, parts } = admitParts(this.store, session, prompt);
+    const hasRuntime = typeof this.context.hasRuntimeContext === 'boolean' ? this.context.hasRuntimeContext :
+      Boolean(process.env.SHADOWBOT_OPENCODE_RUNTIME_CONTEXT_URL);
+    const { text, images } = parsePromptContent(prompt, this.root, hasRuntime);
+    const agent = promptAgent(session, prompt);
     if (thinking !== undefined) return this.controlThinking(session, prompt, parts, messageID, agent, thinking);
     const manager = this.manager(this.store.meta(session.id)!);
     const abort = new AbortController();
@@ -255,34 +242,6 @@ export class Runs {
     return { info: response, parts: [replyPart] };
   }
 
-  private promptContent(prompt: Prompt) {
-    const text: string[] = [];
-    const images: ImageContent[] = [];
-    for (const part of prompt.parts) {
-      if (part.type === 'text' && typeof part.text === 'string') {
-        if (prompt.noReply || !process.env.SHADOWBOT_OPENCODE_RUNTIME_CONTEXT_URL || part.metadata?.xbotPartKind !== 'runtime_context') text.push(part.text);
-        continue;
-      }
-      if (part.type !== 'file' || typeof part.url !== 'string' || !/^image\/(png|jpeg|gif|webp)$/.test(part.mime)) {
-        throw new RequestError(400, 'Only text and supported image parts are accepted');
-      }
-      let data: string;
-      const prefix = `data:${part.mime};base64,`;
-      if (part.url.startsWith(prefix)) data = part.url.slice(prefix.length);
-      else if (part.url.startsWith('file:')) {
-        let path: string;
-        try { path = realpathSync.native(fileURLToPath(part.url)); }
-        catch { throw new RequestError(400, 'Image attachment is unavailable'); }
-        if (outsideWorkspace(relative(this.root, path)) || statSync(path).size > 8 * 1024 * 1024) throw new RequestError(400, 'Image attachment is outside the workspace or too large');
-        data = readFileSync(path).toString('base64');
-      } else throw new RequestError(400, 'Unsupported attachment URL');
-      if (data.length > 12 * 1024 * 1024) throw new RequestError(400, 'Image attachment is too large');
-      images.push({ type: 'image', data, mimeType: part.mime });
-    }
-    if (!text.length && !images.length) throw new RequestError(400, 'The prompt is empty');
-    return { text: text.join('\n\n'), images };
-  }
-
   patchPart(session: Session, messageID: string, partID: string, input: Record<string, unknown>) {
     this.assertIdle(session);
     const part = this.store.message(session.id, messageID)?.parts.find(part => part.id === partID);
@@ -331,7 +290,7 @@ export class Runs {
       const available = getSupportedThinkingLevels(resolved);
       if (savedThinking && !available.includes(savedThinking)) throw new UserError(`保存的思考档位 ${savedThinking} 不受当前模型支持。请先用 /thinking 查询并设置支持的档位：${available.join('、')}。`);
       const loadedSkills = skills(this.agentDir, this.root, this.skillSources, config, agent);
-      let context = await this.context.instructions(agent === explorer, signal);
+      let context = await turnRuntimeContext(this.context, agent, signal);
       const rewrite = contextSettings();
       const settings = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: true } });
       projection = new Projection(this.store, session, user, manager, selection, this.root, active);
@@ -436,23 +395,19 @@ export class Runs {
         pi.on('session_compact', async event => {
           const compaction = manager.getBranch().findLast(entry => entry.type === 'compaction') ?? event.compactionEntry;
           try {
-            context = await this.context.instructions(agent === explorer, signal, true);
+            context = await refreshRuntimeContext(this.context, agent, signal);
             if (context) pi.appendEntry(runtimeContextEntry, { compactionID: compaction.id, instructions: context });
             this.store.native(session.id, manager.getSessionFile(), manager.getLeafId());
           } catch (error) {
             if (signal.aborted) return;
-            active.contextRefreshFailed = !databaseBusy(error);
+            active.contextRefreshFailed = refreshFailureIsFatal(error);
             active.abort.abort(error);
             void active.pi?.abort().catch(() => undefined);
           }
         });
       };
-      const summary = loadedSkills.map(skill => `${skill.name}: ${skill.description}`).join('\n');
-      // AGENTS.md rules come from the shared layer (run.instructions). prompt.system stays
-      // exactly what the host sent, because it is persisted and echoed back to the host.
-      const instructions = [agentPrompt(config, this.root, agent), active.instructions, prompt.system,
-        `ShadowBot reference directory: ${join(this.resources, 'Copilot', 'knowledge')}`,
-        summary && `Available skills. Use the skill tool to read their instructions.\n${summary}`].filter((value): value is string => Boolean(value));
+      const instructions = buildInstructions({ config, root: this.root, agent, rules: active.instructions,
+        system: prompt.system, resources: this.resources, skills: loadedSkills });
       const resourceLoader = new DefaultResourceLoader({ cwd: this.root, agentDir: this.nativeAgentDir, settingsManager: settings,
         noExtensions: true, noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true,
         disabledBuiltinExtensions: ['mcp', 'codemode', 'tool_search'], extensionFactories: [extension], appendSystemPrompt: instructions,

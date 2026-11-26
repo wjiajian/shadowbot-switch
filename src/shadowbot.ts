@@ -146,6 +146,11 @@ export class ShadowBotContext {
   private overlayUrl = endpoint(this.evidence, 'explorer-overlay');
   private trace = process.env.SHADOWBOT_OPENCODE_TRACE_ID ?? '';
 
+  get hasRuntimeContext(): boolean {
+    // Prompt admission has always consulted the current environment on each turn.
+    return Boolean(process.env.SHADOWBOT_OPENCODE_RUNTIME_CONTEXT_URL);
+  }
+
   private async get(url: URL | undefined, init?: RequestInit) {
     if (!url) return undefined;
     const signal = init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000);
