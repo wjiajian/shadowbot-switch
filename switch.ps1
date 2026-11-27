@@ -60,7 +60,7 @@ Skill 与权限下一轮生效；MCP 在空闲后的下一轮自动应用。
 '@
 }
 
-function Read-LocalStatus {
+function Read-LocalStatus([switch]$InspectHost) {
     $result = [ordered]@{ installed = $false; backend = 'unknown'; recoveryPending = $false; next = '运行 .\switch.ps1 use pi 安装 Pi；.\switch.ps1 harnesses 查看全部选项。' }
     if (Test-Path -LiteralPath $manifestPath) {
         try {
@@ -70,6 +70,14 @@ function Read-LocalStatus {
             $record = if ($installation.harnesses) { $installation.harnesses.PSObject.Properties[$backend.mode].Value } else { $null }
             $result.backend = "$($backend.mode) $($record.version)".Trim()
             $result.recoveryPending = (Test-Path -LiteralPath (Join-Path $state 'activation.pending.json')) -or (Test-Path -LiteralPath (Join-Path $state 'switch.pending.json'))
+            if ($InspectHost) {
+                try {
+                    . (Join-Path $project 'scripts/discovery.ps1')
+                    $bundled = $installation.bundled.id ?? 'original'
+                    $selected = if ($backend.mode -eq 'observe') { $bundled } else { $backend.mode }
+                    $result.attachment = Get-ShadowBotAttachment $state $installation.agentPath $selected $bundled
+                } catch { }
+            }
             $result.next = if ($result.recoveryPending) { '.\switch.ps1 repair' } else { '.\switch.ps1 doctor' }
         } catch { $result.next = '安装记录无法读取。保留 .shadowbot-switch 数据，恢复安装记录后运行 .\switch.ps1 repair。' }
     }
@@ -160,7 +168,8 @@ function Invoke-Selection([string]$Command, [string[]]$Tail, [string]$Target) {
 
 try {
     if (!$arguments.Count) {
-        $status = Read-LocalStatus
+        $status = Read-LocalStatus -InspectHost
+        if ($status.attachment.warning) { Write-Warning $status.attachment.warning }
         if ($status.installed) { Write-Host "当前后端：$($status.backend)" }
         else { Write-Host '还没有安装，从下面选择一个后端开始。' }
         if ([Console]::IsInputRedirected) { Show-Help; return }
@@ -204,7 +213,7 @@ try {
         Invoke-Selection $command $tail $target
         return
     }
-    $status = Read-LocalStatus
+    $status = Read-LocalStatus -InspectHost:($command -in 'status','doctor')
     if (!$status.installed -or !(Test-Path -LiteralPath $control)) {
         if ($jsonOutput) { $status | ConvertTo-Json }
         else { Write-Host "当前后端：$(if ($status.installed) { $status.backend } else { '未安装' })"; Write-Host "下一步：$($status.next)" }
@@ -214,7 +223,11 @@ try {
     }
     # Carry new commands through the installed launcher's config namespace.
     if ($command -cin 'rules','settings','log') { $arguments = @('config') + $arguments }
-    & $control @arguments
+    $previousAttachment = $env:SHADOWBOT_SWITCH_ATTACHMENT
+    try {
+        if ($status.attachment) { $env:SHADOWBOT_SWITCH_ATTACHMENT = $status.attachment | ConvertTo-Json -Compress }
+        & $control @arguments
+    } finally { $env:SHADOWBOT_SWITCH_ATTACHMENT = $previousAttachment }
     if ($LASTEXITCODE -ne 0) {
         if (!$jsonOutput -and $command -in 'status', 'doctor') { Write-Host "本地安装记录：$($status.backend)；下一步：$($status.next)" }
         exit $LASTEXITCODE

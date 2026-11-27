@@ -1,5 +1,5 @@
 import { once } from 'node:events';
-import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -7,8 +7,218 @@ import { DatabaseSync } from 'node:sqlite';
 import { json as readJsonBody } from 'node:stream/consumers';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { NoMcp } from '../dist/service/adapter.js';
+import { Bridge } from '../dist/service/main.js';
 import { syncSkillCommands } from '../dist/service/skill-commands.js';
 import { listen, modelFixture, mcpFixture, tempFixture, start, stream, get } from './helpers/bridge.mjs';
+
+test('6.4 session markers survive creation, migration, compaction and restart', { timeout: 45_000 }, async () => {
+  const fixture = tempFixture();
+  const model = modelFixture();
+  const url = await listen(model.server);
+  const selection = { providerID: 'fixture', modelID: 'model' };
+  const config = { model: 'fixture/model', provider: { fixture: { npm: '@ai-sdk/openai-compatible',
+    options: { baseURL: url, apiKey: 'fixture' }, models: { model: { name: 'Fixture' } } } } };
+  const marker = { shadowbotContextCompatibility: { version: 1, state: 'completed' } };
+  let bridge;
+  try {
+    bridge = await start(fixture, config);
+    const session = await get(bridge.api('/session', { method: 'POST', data: { title: '6.4 draft', metadata: marker } }));
+    const path = '/session/' + session.id;
+    const patch = data => get(bridge.api(path, { method: 'PATCH', data }));
+    assert.deepEqual(session.metadata, marker);
+    assert.deepEqual((await patch({ title: 'renamed' })).metadata, marker);
+    assert.equal((await patch({})).title, 'renamed');
+    assert.deepEqual((await patch({ metadata: { other: 1 } })).metadata, { other: 1 });
+    assert.deepEqual((await patch({ title: 'old history', metadata: {} })).metadata, {});
+    await get(bridge.api(path, { method: 'PATCH', data: { metadata: [] } }), 400);
+    await get(bridge.api(path, { method: 'PATCH', data: { metadata: null } }), 400);
+    await get(bridge.api(path, { method: 'PATCH', data: { title: 'ignored', time: { archived: 100 } } }), 501);
+    assert.equal((await get(bridge.api(path))).title, 'old history');
+    await get(bridge.api(path + '/message', { method: 'POST', data: { model: selection, parts: [{ type: 'text', text: 'fixture question' }] } }));
+    await patch({ metadata: { shadowbotContextCompatibility: { version: 1, state: 'pending' } } });
+    const dispose = () => get(bridge.api('/instance/dispose', { method: 'POST', data: {} }));
+    assert.equal(await dispose(), true);
+    const compact = () => get(bridge.api(path + '/summarize', { method: 'POST', data: selection }));
+    assert.equal(await compact(), true);
+    assert.equal(await compact(), true);
+    const messages = await get(bridge.api(path + '/message'));
+    const summaries = messages.filter(m => m.info.summary === true);
+    assert.equal(summaries.length, 2);
+    for (const summary of summaries) {
+      const fetched = await get(bridge.api(path + '/message/' + summary.info.id));
+      assert.deepEqual(fetched.parts.map(p => p.type), ['step-start', 'text', 'step-finish']);
+      assert.equal(fetched.parts.at(-1).reason, 'stop');
+      assert.ok(fetched.parts[1].time.end >= fetched.parts[1].time.start);
+    }
+    assert.ok(summaries[0].parts.some(p => p.type === 'text' && p.text.includes('fixture reply')));
+    assert.ok(messages.some(m => m.parts.some(p => p.type === 'compaction')));
+    await dispose();
+    assert.deepEqual((await patch({ metadata: marker })).metadata, marker);
+    await bridge.stop();
+    bridge = await start(fixture, config);
+    const restored = await get(bridge.api(path));
+    assert.deepEqual(restored.metadata, marker);
+    assert.equal(restored.title, 'old history');
+    await get(bridge.api(path + '/message', { method: 'POST', data: { model: selection, parts: [{ type: 'text', text: 'continue' }] } }));
+    assert.deepEqual((await get(bridge.api(path))).metadata, marker);
+    const db = new DatabaseSync(fixture.database, { readOnly: true });
+    try { assert.deepEqual(JSON.parse(db.prepare('SELECT metadata FROM session WHERE id=?').get(session.id).metadata), marker); }
+    finally { db.close(); }
+  } finally {
+    await bridge?.stop();
+    model.server.close();
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('compaction on a reverted session is cancellable, retryable and visible on the retained branch', { timeout: 45_000 }, async () => {
+  const fixture = tempFixture();
+  let behavior;
+  const waiting = Promise.withResolvers();
+  const model = modelFixture({ beforeReply: (_content, res) => {
+    if (behavior === 'hold') { waiting.resolve(); return true; }
+    if (behavior === 'fail') { res.writeHead(401).end('unauthorized: fixture-private-detail'); return true; }
+  } });
+  const url = await listen(model.server);
+  const selection = { providerID: 'fixture', modelID: 'model' };
+  let bridge, events;
+  try {
+    bridge = await start(fixture, { provider: { fixture: { npm: '@ai-sdk/openai-compatible', options: { baseURL: url, apiKey: 'key' },
+      models: { model: { name: 'Fixture' } } } } });
+    const session = await get(bridge.api('/session', { method: 'POST' }));
+    const path = '/session/' + session.id;
+    const post = (route, data) => bridge.api(path + route, { method: 'POST', data });
+    const turn = text => get(post('/message', { model: selection, parts: [{ type: 'text', text }] }));
+    await turn('preserve-this-turn');
+    const tail = await turn('discard-this-turn');
+    await get(post('/revert', { messageID: tail.info.parentID }));
+    events = await stream(bridge.api);
+    behavior = 'fail';
+    const error = await get(post('/summarize', selection), 400);
+    assert.match(error.data.message, /认证/);
+    assert.doesNotMatch(JSON.stringify(error), /fixture-private-detail/);
+    await events.until(e => e.type === 'session.error');
+    assert.equal((await get(bridge.api(path))).revert.messageID, tail.info.parentID);
+    behavior = 'hold';
+    const pending = post('/summarize', selection);
+    await waiting.promise;
+    await get(post('/summarize', selection), 409);
+    await get(bridge.api('/instance/dispose', { method: 'POST' }), 409);
+    await get(post('/abort'));
+    assert.match((await get(pending, 409)).data.message, /取消/);
+    await events.until(e => e.type === 'session.error' && e.properties.error.name === 'MessageAbortedError');
+    await get(post('/unrevert'));
+    assert.ok((await get(bridge.api(path + '/message'))).some(m => m.info.id === tail.info.id));
+    const preview = await get(post('/revert', { messageID: tail.info.parentID }));
+    behavior = undefined;
+    await get(post('/summarize', selection));
+    const updated = await get(bridge.api(path));
+    assert.equal(updated.revert, undefined);
+    assert.ok(updated.time.updated > preview.time.updated);
+    const history = () => get(bridge.api(path + '/message'));
+    const messages = await history();
+    assert.ok(!messages.some(m => m.info.id === tail.info.id));
+    const summary = messages.find(m => m.info.summary === true);
+    assert.ok(summary);
+    assert.doesNotMatch(JSON.stringify(model.requests.at(-1).request.messages), /discard-this-turn/);
+    await turn('continue');
+    assert.ok((await history()).some(m => m.info.id === summary.info.id));
+    await get(bridge.api(path + '/message/' + summary.info.id, { method: 'DELETE' }));
+    assert.deepEqual((await history()).map(m => m.info.id), messages.slice(0, 2).map(m => m.info.id));
+  } finally {
+    await events?.close();
+    await bridge?.stop();
+    model.server.closeAllConnections();
+    model.server.close();
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('a refresh finishing after disposal cannot recreate the runtime state', async t => {
+  const fixture = tempFixture();
+  const root = realpathSync.native(fixture.workspace);
+  const mcp = new NoMcp();
+  const reloadConfig = t.mock.fn();
+  const bridge = new Bridge(fixture.home, { database: fixture.database, resources: fixture.root }, new Set(),
+    { id: 'fixture', capabilities: { mcp: true } }, {
+      createConfig: () => ({ value: {}, reload: reloadConfig }), mcp: { create: () => mcp },
+      createRuns: () => ({ active: new Map(), start(_session, _prompt, _run) {} }),
+    });
+  const url = await listen(bridge.server);
+  const local = await bridge.local(root);
+  const resume = Promise.withResolvers();
+  t.after(async () => {
+    resume.resolve();
+    clearInterval(local.heartbeat);
+    await new Promise(resolve => bridge.server.close(resolve));
+    bridge.store.db.close();
+    rmSync(fixture.root, { recursive: true, force: true });
+  });
+  const states = () => readdirSync(join(fixture.home, 'running'));
+  assert.equal(states().length, 1);
+  const reload = t.mock.method(mcp, 'reloadCustom', () => resume.promise);
+  writeFileSync(join(fixture.home, 'reload.request'), 'refresh');
+  const refreshing = bridge.refresh(root, local);
+  assert.equal(reload.mock.callCount(), 1);
+  t.mock.method(mcp, 'close', async () => { throw new Error('MCP close failed'); });
+  const disposed = await get(fetch(url + '/instance/dispose?directory=' + encodeURIComponent(root), { method: 'POST' }), 500);
+  assert.equal(disposed.name, 'UnknownError');
+  assert.equal(reloadConfig.mock.callCount(), 1);
+  assert.deepEqual(states(), []);
+  resume.resolve();
+  await refreshing;
+  assert.deepEqual(states(), []);
+});
+
+test('disposing one workspace preserves live config and auth without starting idle MCP servers', async () => {
+  const fixture = tempFixture();
+  const model = modelFixture(), mcp = mcpFixture('example');
+  const url = await listen(model.server), endpoint = await listen(mcp.server);
+  let bridge;
+  try {
+    const file = join(fixture.root, 'host-config.json');
+    writeFileSync(file, JSON.stringify({ command: { disk: { template: 'old' } } }));
+    bridge = await start(fixture, { mcp: { example: { type: 'remote', url: endpoint } },
+      provider: { fixture: { npm: '@ai-sdk/openai-compatible', options: { baseURL: url }, models: { model: { name: 'Fixture' } } } } }, { OPENCODE_CONFIG: file });
+    const api = bridge.api;
+    const dispose = () => get(api('/instance/dispose', { method: 'POST' }));
+    await dispose();
+    assert.equal(mcp.initializations(), 0);
+    await get(api('/mcp'));
+    const session = await get(api('/session', { method: 'POST', directory: fixture.other }));
+    const states = () => readdirSync(join(fixture.home, 'running')).length;
+    assert.equal(states(), 2);
+    await get(api('/config', { method: 'PATCH', data: { model: 'fixture/model' } }));
+    await get(api('/auth/fixture', { method: 'PUT', data: { type: 'api', key: 'persist-key' } }));
+    writeFileSync(file, JSON.stringify({ command: { disk: { template: 'new' } } }));
+    assert.deepEqual(await Promise.all([dispose(), dispose()]), [true, true]);
+    await dispose();
+    assert.equal(states(), 1);
+    assert.equal(mcp.initializations(), 2);
+    const config = await get(api('/config'));
+    assert.equal(config.command.disk.template, 'new');
+    assert.equal(config.model, 'fixture/model');
+    const prompt = () => get(api('/session/' + session.id + '/message', { method: 'POST', directory: fixture.other,
+      data: { parts: [{ type: 'text', text: 'test' }] } }));
+    await prompt();
+    assert.equal(model.requests.at(-1).authorization, 'Bearer persist-key');
+    await get(api('/auth/fixture', { method: 'PUT', data: { type: 'api', key: 'live-key' } }));
+    await prompt();
+    assert.equal(model.requests.at(-1).authorization, 'Bearer live-key');
+    writeFileSync(file, '{');
+    const invalid = await get(api('/instance/dispose', { method: 'POST', directory: fixture.other }), 400);
+    assert.equal(invalid.name, 'ConfigurationError');
+    assert.equal(states(), 0);
+    writeFileSync(file, '{}');
+    await get(api('/mcp', { directory: fixture.other }));
+    assert.equal(states(), 1);
+  } finally {
+    await bridge?.stop();
+    model.server.close(); mcp.server.close();
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
 
 test('Pi chat, MCP, skills, permission, question, restore and revert', { timeout: 60_000 }, async () => {
   const fixture = tempFixture('a'.repeat(64), { id: 'original', version: '1.19.2' });
@@ -462,6 +672,10 @@ test('SQLite busy rejects admission and status recovers an abandoned local run l
     writer.exec('BEGIN IMMEDIATE');
     const error = await get(prompt(), 503);
     assert.equal(error.name, 'DatabaseBusyError');
+    const summary = await get(api(`/session/${session.id}/summarize`, {
+      method: 'POST', data: { providerID: 'fixture', modelID: 'model' },
+    }), 503);
+    assert.equal(summary.name, 'DatabaseBusyError');
     assert.equal(model.requests.length, 0);
     writer.exec('ROLLBACK');
     writer.prepare('UPDATE session SET running=1, owner_pid=? WHERE id=?').run(bridge.pid, session.id);

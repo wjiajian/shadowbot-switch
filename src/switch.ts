@@ -1,3 +1,4 @@
+import { verifyHistoryOwnership } from './history-ownership.js';
 import { HarnessRegistry } from './harnesses.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
@@ -226,6 +227,7 @@ export async function switchBackend(home: string, installation: Installation, de
   }
   const previous = mode(home);
   const source = registry.selected(previous).id;
+  if (registry.get(source).kind === 'managed') verifyHistoryOwnership(installation.database, join(home, 'backends', source, 'adapter.db'));
   if (source === destination) {
     atomicWrite(join(home, 'backend.json'), JSON.stringify({ mode: destination }));
     return;
@@ -238,6 +240,7 @@ export async function switchBackend(home: string, installation: Installation, de
   }
   const stage = await stageSnapshot(home, installation, destination);
   try {
+    if (registry.get(destination).kind === 'managed') verifyHistoryOwnership(stage.database, join(home, 'backends', destination, 'adapter.db'));
     checkStopped();
     atomicWrite(pending, JSON.stringify({ previous, source, destination, stage: stage.id } satisfies Journal));
     record('started', previous, destination);

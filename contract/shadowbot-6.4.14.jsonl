@@ -1,0 +1,11 @@
+{"method":"POST","route":"/session","requestShape":{"metadata":{},"title":"string"},"status":200}
+{"method":"GET","route":"/session/{id}","requestShape":null,"status":200}
+{"method":"POST","route":"/session/{id}/message","requestShape":{"agent":"string","messageID":"string","model":{"modelID":"string","providerID":"string"},"parts":[{"id":"string","metadata":{},"text":"string","type":"string"}],"system":"string"},"status":200}
+{"method":"PATCH","route":"/session/{id}","requestShape":{"metadata":{}},"status":200}
+{"method":"POST","route":"/instance/dispose","requestShape":{},"status":200}
+{"method":"POST","route":"/session/{id}/summarize","requestShape":{"modelID":"string","providerID":"string"},"status":200}
+{"method":"PATCH","route":"/session/{id}","requestShape":{"metadata":{}},"status":200}
+{"method":"POST","route":"/instance/dispose","requestShape":{},"status":200}
+{"method":"PATCH","route":"/session/{id}","requestShape":{"metadata":{}},"status":200}
+{"method":"POST","route":"/session/{id}/message","requestShape":{"agent":"string","messageID":"string","model":{"modelID":"string","providerID":"string"},"parts":[{"id":"string","metadata":{},"text":"string","type":"string"}],"system":"string"},"status":200}
+{"method":"PATCH","route":"/session/{id}/message/{id}/part/{id}","requestShape":{"id":"string","messageID":"string","metadata":{},"sessionID":"string","text":"string","type":"string"},"status":200}

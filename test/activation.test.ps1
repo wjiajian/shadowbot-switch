@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-. (Join-Path (Split-Path $PSScriptRoot) 'scripts/activation.ps1')
+. (Join-Path (Split-Path $PSScriptRoot) 'scripts/maintenance.ps1')
 
 $base = [IO.Path]::TrimEndingDirectorySeparator((Resolve-Path -LiteralPath ([IO.Path]::GetTempPath())).Path)
 $root = Join-Path $base "shadowbot-pi-install-$([Guid]::NewGuid())"
@@ -82,6 +82,21 @@ try {
         Complete-Activation $state {}
         if ((Get-Content -LiteralPath $agent) -ne 'Updated launcher fixture') { throw 'Bundled update stranded the next activation.' }
     }
+    $locator = "$agent.shadowbot-pi.json"
+    foreach ($invalid in '{', '{"home":""}', '{"home":1}') {
+        Set-Content -LiteralPath $locator $invalid
+        if ($invalid -eq '{') { Write-AtomicJson $pending @{ release = $newRelease } }
+        Repair-InstallationLocator "$state/" {}
+        if ((Get-ShadowBotLocatorHome $locator) -ne $state -or (Test-Path -LiteralPath $pending)) { throw 'Repair failed to recover a corrupt locator.' }
+    }
+    Write-AtomicJson $pending @{ release = $newRelease }
+    Repair-InstallationLocator "$state/" {}
+    if ((Test-Path -LiteralPath $pending) -or !(Test-ShadowBotPathEqual (Get-ShadowBotLocatorHome $locator) $state)) {
+        throw 'Repair failed to recognize an equivalent project path during activation.'
+    }
+    Write-AtomicJson $locator @{ home = $root }
+    try { Repair-InstallationLocator $state {}; throw 'Repair took over an existing project.' }
+    catch { if ($_.Exception.Message -notmatch '原项目仍存在') { throw } }
     Remove-Item -LiteralPath $agent
     Write-AtomicJson $pending @{ release = $newRelease }
     Complete-Activation $state {}

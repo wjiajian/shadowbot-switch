@@ -1,3 +1,5 @@
+param([string]$InspectInstallation, [string]$SelectedHarness)
+
 function Resolve-ShadowBotDirectories([string[]]$Candidates) {
     foreach ($candidate in $Candidates) {
         if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
@@ -74,8 +76,10 @@ function Find-ShadowBotDirectory([string]$ManifestPath) {
 
 $script:MinShadowBotVersion = '6.3.39'
 
-function Resolve-ShadowBotAgent([string]$ShadowBotDirectory) {
-    $hostVersion = (Get-Item -LiteralPath (Join-Path $ShadowBotDirectory 'ShadowBot.exe')).VersionInfo.ProductVersion
+function Resolve-ShadowBotAgent {
+    [CmdletBinding()]
+    param([string]$ShadowBotDirectory)
+    $hostVersion = (Get-Item -ErrorAction Stop -LiteralPath (Join-Path $ShadowBotDirectory 'ShadowBot.exe')).VersionInfo.ProductVersion
     $version = $hostVersion -as [version]
     if ($version -and $version -lt [version]$script:MinShadowBotVersion) {
         Write-Warning "影刀版本 $hostVersion 低于 $script:MinShadowBotVersion，可能不兼容。"
@@ -92,4 +96,52 @@ function Resolve-ShadowBotAgent([string]$ShadowBotDirectory) {
     $agent = $candidates | Sort-Object rank,version,path -Descending | Select-Object -First 1
     if (!$agent) { throw "在 $ShadowBotDirectory 中没有找到 shadowbot-*/opencode.exe" }
     @{ hostVersion = $hostVersion; agentPath = $agent.path; resources = Join-Path (Split-Path $agent.path) 'Resources' }
+}
+
+function Test-ShadowBotPathEqual($Left, $Right) {
+    if (!$Left -or !$Right) { return $false }
+    [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Left)) -eq [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Right))
+}
+
+function Get-ShadowBotLocatorHome($Locator) {
+    $owner = (Get-Content -Raw -LiteralPath $Locator -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop).home
+    if ($owner -isnot [string] -or ![IO.Path]::IsPathFullyQualified($owner)) { throw '启动器定位文件缺少有效的安装目录。' }
+    [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($owner))
+}
+
+function Get-ShadowBotAttachment($State, $RecordedPath, $Selected, $Bundled = 'original') {
+    try {
+        $RecordedPath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($RecordedPath))
+        $hostAgent = Resolve-ShadowBotAgent (Split-Path (Split-Path $RecordedPath)) -WarningAction SilentlyContinue
+        $path = $hostAgent.agentPath
+        $locator = "$path.shadowbot-pi.json"
+        $attached = 'bundled'
+        if (Test-Path -LiteralPath $locator) {
+            try { $attached = if (Test-ShadowBotPathEqual (Get-ShadowBotLocatorHome $locator) $State) { 'managed' } else { 'other' } }
+            catch { $attached = 'invalid' }
+        }
+        $action = $null
+        $hint = if ($attached -eq 'other') {
+            $action = 'repair'
+            '当前启动器指向其他项目目录。如果移动了本项目，请退出影刀后运行 repair。'
+        } elseif (!(Test-ShadowBotPathEqual $path $RecordedPath)) {
+            $action = 'use'
+            "影刀 $($hostAgent.hostVersion) 的当前程序在 $path，安装记录仍指向 $RecordedPath。退出影刀后运行 .\switch.ps1 use $Selected --wait。"
+        } elseif ($attached -eq 'invalid') {
+            $action = 'repair'
+            '当前启动器定位文件已损坏或无效。退出影刀后运行 repair。'
+        } elseif (($Selected -ne $Bundled) -ne ($attached -eq 'managed')) {
+            $action = 'use'
+            "当前影刀目录的启动器与所选后端不匹配。退出影刀后运行 .\switch.ps1 use $Selected --wait。"
+        }
+        @{ hostVersion = $hostAgent.hostVersion; agentPath = $path; recordedPath = $RecordedPath; attachment = $attached; warning = $hint; action = $action }
+    } catch {
+        @{ recordedPath = $RecordedPath; attachment = 'unknown'; warning = '无法确认当前影刀程序。检查影刀安装目录及启动器定位文件。' }
+    }
+}
+
+if ($InspectInstallation) {
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+    $install = Get-Content -Raw -LiteralPath (Join-Path $InspectInstallation 'install.json') | ConvertFrom-Json
+    Get-ShadowBotAttachment $InspectInstallation $install.agentPath $SelectedHarness ($install.bundled.id ?? 'original') | ConvertTo-Json -Compress
 }

@@ -66,7 +66,7 @@ export class SessionHistory {
 
   rename(session: Session, title: string) {
     this.assertIdle(session);
-    return this.options.store.update({ ...session, title, time: { ...session.time, updated: Date.now() } });
+    return this.options.store.patchSession(session.id, { title });
   }
 
   delete(session: Session) {
@@ -109,7 +109,7 @@ export class SessionHistory {
     }
     // A bridge-side error can create a projected assistant message without a native entry.
     const local = this.options.store.localCommand(session.id, messageID);
-    const cutoff = local ? local.user_id : item.info.role === 'assistant' && item.info.error && !this.options.store.mapped(session.id, messageID)
+    const cutoff = local ? local.user_id : item.info.role === 'assistant' && (item.info.summary || (item.info.error && !this.options.store.mapped(session.id, messageID)))
       ? item.info.parentID : messageID;
     const leaf = this.branchBefore(meta, cutoff);
     this.options.store.removeMessages(session, cutoff, leaf);

@@ -14,6 +14,18 @@
 - 宿主创建会话并订阅 `GET /event`，通过同步 `POST /session/{id}/message` 发送带 ID 的消息片段。回复后宿主用 `PATCH /session/{id}/message/{id}/part/{id}` 更新已提交片段的元数据。
 - 本次会话选择 `deepseek/deepseek-flash`。宿主生成的 provider 配置只包含凭据和超时选项，模型由目录提供。Pi 使用锁定版本自带的目录补齐模型定义。
 
+## 影刀 6.4.14 会话兼容
+
+[新版面板请求样本](shadowbot-6.4.14.jsonl) 保留了原版 OpenCode 1.18.12 在空白草稿中处理的关键请求结构和状态码。新建会话的 POST 同时带有标题和 `metadata.shadowbotContextCompatibility`，实测初始值为 `{"version":1,"state":"completed"}`。没有标记且已有一轮对话时，面板用仅含 metadata 的 PATCH 保存迁移进度，释放工作区实例，重新连接 MCP，通过 `POST /session/{id}/summarize` 压缩上下文，再更新标记、重新连接并发送原消息。
+
+会话更新保留未提供的字段；显式传入的 metadata 对象整体替换旧对象。Pi 将 `agent.compaction.prompt` 作为附加要求传给 SDK，保留 SDK 自带的摘要模板。Pi 为迁移生成原生上下文摘要，并将摘要消息投影到共享会话库。6.3.39 的创建、改名和消息片段更新仍沿用原有接口。
+
+2026-11-27 在 Windows 影刀 6.4.14、Pi 1.6.1 上实测：
+
+- 将测试会话还原为缺少迁移标记的旧格式后，宿主发起摘要并读取新生成的消息。摘要回复包含 `step-start`、带时间的文本、`step-finish`。影刀确认成功后写入 `state=completed`、`compactionMessageId` 和 `summaryMessageId`，然后发送待处理的问题。重开草稿后，助手能凭对话上下文答出此前注释中的数字。
+- 在空白草稿中添加注释，打开「查看变更」确认新增内容。随后通过助手找到企业自定义指令「计算最近7天日期」，插入主流程并通过静态检查。验证范围为流程生成、保存和变更展示，草稿未运行、未发布。
+- 从 Pi 切到原版 OpenCode 再切回 Pi，两侧数据库均通过完整性检查，往返前后 Pi 的会话、消息和片段内容哈希一致。旧版 6.3.39 使用原面板请求记录做回归，本次桌面实测使用 6.4.14。
+
 ## 隔离录制
 
 [opencode-fixture.jsonl](opencode-fixture.jsonl) 由本机原版 `opencode.exe` 和本地模拟模型生成。启动器转发 Basic Auth、`GET /global/health`、`POST /session`、`GET /event` 和 `POST /session/{id}/prompt_async`。`prompt_async` 返回 204。事件包括 `message.updated`、`message.part.updated`、`message.part.delta`、`session.status` 和 `session.idle`。样本保留已识别的结构，移除了时间戳和未识别的事件。

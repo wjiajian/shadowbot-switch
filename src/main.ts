@@ -22,12 +22,18 @@ import { ShadowBotContext, skills, workspace } from './shadowbot.js';
 import { databaseBusy, id, Store } from './store.js';
 import type { Frame } from './store.js';
 import { verifySchema } from './switch.js';
-import { configurationRevision, publishRuntimeState } from './runtime-state.js';
+import { configurationRevision, publishRuntimeState, removeRuntimeState } from './runtime-state.js';
 import { installationThinkingSetting, skillInventory } from './shadowbot.js';
 import { thinkingMenuCommand, skillCommand, syncSkillCommands } from './skill-commands.js';
 import { thinkingEnabled } from './thinking-command.js';
 import { userMessage } from './errors.js';
 import { agentRules } from './agent-rules.js';
+
+function metadata(input: unknown) {
+  if (input === undefined) return undefined;
+  if (!object(input)) throw new RequestError(400, 'Invalid session metadata');
+  return input;
+}
 
 function flags(args: string[]) {
   if (args[0] !== 'serve') throw new Error('Expected serve');
@@ -74,11 +80,11 @@ function value(input: unknown, field: string) {
 }
 
 type Listener = { res: ServerResponse; global: boolean; root: string };
-type Workspace = { mcp: McpConnection; runs: HarnessRuns; revision: string; queue: Promise<void>; configurationError?: string; menuReconnect?: boolean };
+type Workspace = { heartbeat?: NodeJS.Timeout; disposing?: Promise<void>; disposed?: boolean; mcp: McpConnection; runs: HarnessRuns; revision: string; queue: Promise<void>; configurationError?: string; menuReconnect?: boolean };
 
-class Bridge {
+export class Bridge {
   readonly server;
-  private config: HostConfig;
+  private readonly config: HostConfig;
   private listeners = new Set<Listener>();
   private workspaces = new Map<string, Promise<Workspace>>();
   private store: Store;
@@ -126,8 +132,8 @@ class Bridge {
           const runs = assertRunsContract(this.adapter.createRuns({ store: this.store, config: this.config, root, mcp, context: this.context, home: this.home, resources: this.installation.resources, skillSources: this.skillSources }), this.harness.id);
           const local: Workspace = { mcp, runs, revision, queue: Promise.resolve(), configurationError };
           this.publish(root, local);
-          const heartbeat = setInterval(() => this.publish(root, local), 2000);
-          heartbeat.unref();
+          local.heartbeat = setInterval(() => this.publish(root, local), 2000);
+          local.heartbeat.unref();
           return local;
         } catch (error) { await mcp.close(); throw error; }
       })();
@@ -138,6 +144,7 @@ class Bridge {
   }
 
   private publish(root: string, local: Workspace) {
+    if (local.disposed) return;
     try { publishRuntimeState(this.home, { harness: this.harness.id, root, active: local.runs.active.size, revision: local.revision,
       mcp: local.mcp.status(), errors: local.mcp.configurationErrors(), configurationError: local.configurationError, menuReconnect: local.menuReconnect }); }
     catch { console.error('ShadowBot Switch 无法写入运行状态，请检查安装数据目录的权限。'); }
@@ -164,7 +171,10 @@ class Bridge {
   }
 
   private enqueue<T>(workspace: Workspace, operation: () => T | Promise<T>) {
-    const result = workspace.queue.then(operation);
+    const result = workspace.queue.then(() => {
+      if (workspace.disposed) throw new RequestError(409, 'Reconnect to the workspace');
+      return operation();
+    });
     workspace.queue = result.then(() => undefined, () => undefined);
     return result;
   }
@@ -286,6 +296,36 @@ class Bridge {
     if (path === '/command' && method === 'GET') return json(res, Object.entries(commands).map(([name, command]) => ({ ...command, name, hints: [] })));
     if (path === '/skill' && method === 'GET') return json(res, this.harness.capabilities.skills ? skills(this.agentDir, root, this.skillSources, this.config.value) : []);
 
+    if (path === '/instance/dispose' && method === 'POST') {
+      const key = root.toLowerCase();
+      const notify = () => {
+        for (const client of this.listeners) {
+          if (client.root.toLowerCase() !== key) continue;
+          this.frame(client, { id: id('evt'), type: 'server.instance.disposed', properties: { directory } }, directory);
+          if (!client.global) client.res.end();
+        }
+      };
+      const local = await this.workspaces.get(key)?.catch(() => undefined);
+      if (local) {
+        local.disposing ??= this.configureMcp(local, async () => {
+          try {
+            try { await local.mcp.close(); }
+            finally { this.config.reload?.(); }
+          } finally {
+            local.disposed = true;
+            clearInterval(local.heartbeat);
+            this.workspaces.delete(key);
+            notify();
+            removeRuntimeState(this.home, root);
+          }
+        }).finally(() => { local.disposing = undefined; });
+        await local.disposing;
+      } else {
+        this.config.reload?.();
+        notify();
+      }
+      return json(res, true);
+    }
     const local = await this.local(root);
     const { mcp, runs } = local;
     if (resource === 'mcp') {
@@ -343,13 +383,22 @@ class Bridge {
       if (!identifier && method === 'POST') {
         const input = await body(req) as NonNullable<SessionCreateData['body']>;
         if (input.parentID && !owns(input.parentID)) throw new RequestError(404, 'Unknown parent session');
-        return json(res, this.store.create(root, directory, { title: input.title, parentID: input.parentID, permission: input.permission }));
+        return json(res, this.store.create(root, directory, { title: input.title, parentID: input.parentID, permission: input.permission, metadata: metadata(input.metadata) }));
       }
       if (!owns(identifier)) throw new RequestError(404, 'Session not found in this workspace');
       const session = this.store.get(identifier)!;
       if (!action && method === 'GET') return json(res, session);
       if (!action && method === 'DELETE') return json(res, runs.delete(session));
-      if (!action && method === 'PATCH') return json(res, runs.rename(session, value((await body(req)).title, 'title')));
+      if (!action && method === 'PATCH') {
+        const input = await body(req);
+        if (Object.keys(input).some(key => key !== 'title' && key !== 'metadata')) throw new RequestError(501, 'Unsupported session update field');
+        const fields = metadata(input.metadata);
+        const title = input.title === undefined ? undefined : value(input.title, 'title');
+        if (title !== undefined && !fields) return json(res, runs.rename(session, title));
+        if (!fields) return json(res, this.store.get(identifier));
+        if (title !== undefined && runs.running().some(run => run.id === identifier)) throw new RequestError(409, 'The session is busy');
+        return json(res, this.store.patchSession(identifier, title === undefined ? { metadata: fields } : { title, metadata: fields }));
+      }
       if (action === 'children' && !subID && method === 'GET') return json(res, this.store.list(root).filter(child => child.parentID === identifier));
       if (action === 'todo' && !subID && method === 'GET') {
         return json(res, this.store.db.prepare('SELECT content,status,priority FROM main.todo WHERE session_id=? ORDER BY position').all(identifier));
@@ -362,6 +411,17 @@ class Bridge {
           throw new RequestError(404, 'The permission request is no longer pending');
         }
         return json(res, true);
+      }
+      if (action === 'summarize' && !subID && method === 'POST') {
+        const input = await body(req);
+        const model = { providerID: value(input.providerID, 'provider ID'), modelID: value(input.modelID, 'model ID') };
+        const { result } = await this.enqueue(local, () => {
+          if (!runs.summarize) throw new RequestError(501, 'This harness does not support session compaction');
+          const current = this.store.get(identifier);
+          if (!current) throw new RequestError(404, 'Session not found');
+          return { result: runs.summarize(current, model) };
+        });
+        return json(res, await result);
       }
       if (action === 'revert' && !subID && method === 'POST') {
         const input = await body(req);
@@ -451,7 +511,7 @@ async function main() {
   });
 }
 
-void main().catch(error => {
+if (import.meta.main) void main().catch(error => {
   console.error(`ShadowBot Switch startup failed: ${error instanceof Error ? error.message : 'unknown error'}`);
   process.exitCode = 1;
 });

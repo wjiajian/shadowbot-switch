@@ -31,6 +31,7 @@ export interface HarnessRuns {
   interactions: Interactions;
   running(): { id: string }[];
   start(session: Session, prompt: Prompt, run: RunInput): Promise<ReturnType<Store['message']>>;
+  summarize?(session: Session, model: NonNullable<Prompt['model']>): Promise<boolean>;
   abort(sessionID: string): Promise<boolean>;
   rename(session: Session, title: string): Session;
   delete(session: Session): boolean;

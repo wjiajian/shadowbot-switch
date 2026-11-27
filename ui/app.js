@@ -655,7 +655,7 @@ function sidebar() {
     h('div', { class: 'brand' }, 'ShadowBot Switch'),
     h('section', { class: 'current', 'aria-label': '当前后端' },
       h('div', { class: 'current-name' },
-        h('span', { class: 'current-harness' }, current ? current.name : state.fatal ? '未连接' : '读取中…'),
+        h('span', { class: 'current-harness' }, current ? (base.shadowbot?.attachment?.warning ? '配置：' + current.name : current.name) : state.fatal ? '未连接' : '读取中…'),
         current && current.version ? h('span', { class: 'meta' }, current.version) : null),
       base ? h('div', { class: 'meta' }, `影刀 ${base.shadowbot.version || '未找到'}`) : null,
       link),
@@ -675,13 +675,17 @@ function harnessColumn(spec) {
   const mine = job && job.harness === spec.id;
   let badge = null;
   if (mine) badge = h('span', { class: 'harness-state accent' }, job.verb);
+  else if (spec.selected && state.base.shadowbot?.attachment?.warning) badge = h('span', { class: 'harness-state warn' }, '待核对');
   else if (spec.selected) badge = h('span', { class: 'harness-state ok' }, '正在使用');
   else badge = h('span', { class: 'harness-state muted' }, spec.installed ? '未使用' : '未安装');
   const actions = [];
-  if (!spec.selected) {
+  const attachment = state.base.shadowbot?.attachment;
+  if (spec.selected && attachment?.action === 'repair') {
+    actions.push(button('修复', 'btn-primary', () => startJob('repair'), { disabled: Boolean(job) }));
+  } else if (attachment?.action !== 'repair' && (!spec.selected || attachment?.action === 'use')) {
     const host = state.base.shadowbot;
     const needsHost = !state.base.installed && !(host.directory && host.version);
-    actions.push(button(spec.installed ? '切换到此' : '安装并切换', 'btn-primary', () => startJob('use', spec.id),
+    actions.push(button(spec.selected ? '重新接入' : spec.installed ? '切换到此' : '安装并切换', 'btn-primary', () => startJob('use', spec.id),
       { disabled: Boolean(job) || Boolean(state.base.problem) || needsHost, title: needsHost ? '先在下方填写影刀安装目录' : null }));
   }
   const upstream = spec.upstream;
@@ -818,6 +822,7 @@ function harnessPage() {
       h('span', null, '上次切换没有完成。保存工作并退出影刀后，点“修复”继续。'),
       button('修复', 'btn-secondary', () => startJob('repair'))));
   }
+  if (base.shadowbot?.attachment?.warning) parts.push(problemBlock(base.shadowbot.attachment.warning));
   parts.push(h('div', { class: 'harness-cols' }, base.harnesses.map(harnessColumn)));
   if (state.job) parts.push(taskSection());
   parts.push(shadowbotSection());

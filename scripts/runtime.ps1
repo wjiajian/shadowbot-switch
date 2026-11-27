@@ -67,6 +67,7 @@ function New-RuntimeRelease($Project, $State, $Toolchain, $Spec, $Installed, $Ho
         try {
             Copy-Item -LiteralPath (Join-Path $project 'dist/opencode.exe') -Destination (Join-Path $stage 'launcher.exe')
             Copy-Item -LiteralPath $Toolchain.node -Destination (Join-Path $stage 'node.exe')
+            Copy-Item -LiteralPath (Join-Path $project 'scripts/discovery.ps1') -Destination $stage
             Copy-Item -LiteralPath (Join-Path $project 'contract/schema.sql') -Destination $stage
             Copy-Item -LiteralPath (Join-Path $project 'package.json'), (Join-Path $project 'package-lock.json') -Destination $stage
             Invoke-ProjectNpm $Toolchain $stage @('ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund')

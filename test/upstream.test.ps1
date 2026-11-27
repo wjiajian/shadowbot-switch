@@ -53,7 +53,7 @@ try {
     $state = Join-Path $root '.shadowbot-switch'
     Copy-Item (Join-Path $repository 'harnesses') $root -Recurse
     foreach ($dir in 'scripts','src','launcher','skills','contract') { New-Item -ItemType Directory (Join-Path $root $dir) | Out-Null }
-    foreach ($file in 'package.json','package-lock.json','go.mod','go.sum','scripts/toolchain.ps1','install.ps1','contract/schema.sql','tsconfig.json') { Set-Content (Join-Path $root $file) 'fixture' }
+    foreach ($file in 'package.json','package-lock.json','go.mod','go.sum','scripts/toolchain.ps1','scripts/discovery.ps1','install.ps1','contract/schema.sql','tsconfig.json') { Set-Content (Join-Path $root $file) 'fixture' }
     $base = Read-HarnessBaseline $root $spec
     $original = Get-HarnessDependencyHash $base.packageDir
     $offline = @{ npm = $source.npm; offline = $root }
