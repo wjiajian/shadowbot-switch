@@ -1,15 +1,77 @@
-import { readFileSync, realpathSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { closeSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Config, Part, Session } from '@opencode-ai/sdk/v2';
 import type { Prompt } from '../adapter.js';
 import { copilot, explorer, object } from '../config.js';
-import { outsideWorkspace } from '../config-paths.js';
-import { RequestError } from '../errors.js';
+import { isRequestError, RequestError } from '../errors.js';
 import { agentPrompt } from '../shadowbot.js';
 import { id, type Store } from '../store.js';
 import { isInlineRuntimeContext } from './runtime-context.js';
 import type { ImageBlock } from './types.js';
+
+const MAX_FILE_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_BASE64_IMAGE_CHARS = 12 * 1024 * 1024;
+
+function hasImageSignature(bytes: Buffer, mime: string) {
+  if (mime === 'image/png') {
+    return bytes.length >= 8
+      && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+      && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a;
+  }
+  if (mime === 'image/jpeg') {
+    return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  }
+  if (mime === 'image/gif') {
+    if (bytes.length < 6) return false;
+    const header = bytes.subarray(0, 6).toString('ascii');
+    return header === 'GIF87a' || header === 'GIF89a';
+  }
+  if (mime === 'image/webp') {
+    return bytes.length >= 12
+      && bytes.subarray(0, 4).toString('ascii') === 'RIFF'
+      && bytes.subarray(8, 12).toString('ascii') === 'WEBP';
+  }
+  return false;
+}
+
+function readLocalImage(rawUrl: string, mime: string) {
+  let url: URL;
+  try { url = new URL(rawUrl); }
+  catch { throw new RequestError(400, 'Image attachment is unavailable'); }
+  if (url.protocol !== 'file:' || (url.hostname && url.hostname.toLowerCase() !== 'localhost')) {
+    throw new RequestError(400, 'Unsupported attachment URL');
+  }
+  let path: string;
+  let fd: number;
+  try {
+    path = realpathSync.native(fileURLToPath(url));
+    fd = openSync(path, 'r');
+  } catch { throw new RequestError(400, 'Image attachment is unavailable'); }
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile()) throw new RequestError(400, 'Image attachment is unavailable');
+    if (info.size > MAX_FILE_IMAGE_BYTES) throw new RequestError(400, 'Image attachment is too large');
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    while (true) {
+      const read = readSync(fd, chunk, 0, Math.min(chunk.length, MAX_FILE_IMAGE_BYTES + 1 - total), null);
+      if (read === 0) break;
+      total += read;
+      if (total > MAX_FILE_IMAGE_BYTES) throw new RequestError(400, 'Image attachment is too large');
+      chunks.push(Buffer.from(chunk.subarray(0, read)));
+    }
+    const bytes = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, total);
+    if (!hasImageSignature(bytes, mime)) throw new RequestError(400, 'Image attachment content does not match its declared MIME type');
+    return bytes.toString('base64');
+  } catch (error) {
+    if (isRequestError(error)) throw error;
+    throw new RequestError(400, 'Image attachment is unavailable');
+  } finally {
+    closeSync(fd);
+  }
+}
 
 export function admitParts(store: Store, session: Session, prompt: Prompt) {
   if (!Array.isArray(prompt.parts) || !prompt.parts.length) throw new RequestError(400, 'The prompt requires parts');
@@ -38,7 +100,7 @@ export function promptAgent(session: Session, prompt: Prompt) {
   return agent;
 }
 
-export function parsePromptContent(prompt: Prompt, root: string, hasRuntimeContext: boolean) {
+export function parsePromptContent(prompt: Prompt, _root: string, hasRuntimeContext: boolean) {
   const text: string[] = [];
   const images: ImageBlock[] = [];
   for (const part of prompt.parts) {
@@ -52,14 +114,9 @@ export function parsePromptContent(prompt: Prompt, root: string, hasRuntimeConte
     let data: string;
     const prefix = `data:${part.mime};base64,`;
     if (part.url.startsWith(prefix)) data = part.url.slice(prefix.length);
-    else if (part.url.startsWith('file:')) {
-      let path: string;
-      try { path = realpathSync.native(fileURLToPath(part.url)); }
-      catch { throw new RequestError(400, 'Image attachment is unavailable'); }
-      if (outsideWorkspace(relative(root, path)) || statSync(path).size > 8 * 1024 * 1024) throw new RequestError(400, 'Image attachment is outside the workspace or too large');
-      data = readFileSync(path).toString('base64');
-    } else throw new RequestError(400, 'Unsupported attachment URL');
-    if (data.length > 12 * 1024 * 1024) throw new RequestError(400, 'Image attachment is too large');
+    else if (part.url.startsWith('file:')) data = readLocalImage(part.url, part.mime);
+    else throw new RequestError(400, 'Unsupported attachment URL');
+    if (data.length > MAX_BASE64_IMAGE_CHARS) throw new RequestError(400, 'Image attachment is too large');
     images.push({ type: 'image', data, mimeType: part.mime });
   }
   if (!text.length && !images.length) throw new RequestError(400, 'The prompt is empty');
