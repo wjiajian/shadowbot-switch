@@ -22,23 +22,51 @@ test('admission distinguishes malformed, duplicated and already persisted IDs', 
   assert.throws(() => admit({ messageID: undefined }), { status: 409, message: 'The prompt part was already admitted' });
 });
 
-test('image attachments preserve MIME, workspace and size checks', t => {
+test('image attachments allow local files outside the workspace while verifying file type, MIME signature and size', t => {
   const dir = tempDirectory(t);
   const root = join(dir, 'workspace');
   mkdirSync(root);
-  const parse = url => parsePromptContent({ parts: [{ type: 'file', mime: 'image/png', url }] }, root, false);
-  const image = { type: 'image', data: 'YWJj', mimeType: 'image/png' };
-  assert.deepEqual(parse('data:image/png;base64,YWJj').images, [image]);
+  const parse = (url, mime = 'image/png') => parsePromptContent({ parts: [{ type: 'file', mime, url }] }, root, false);
+  const inlineImage = { type: 'image', data: 'YWJj', mimeType: 'image/png' };
+  assert.deepEqual(parse('data:image/png;base64,YWJj').images, [inlineImage]);
   assert.throws(() => parse('data:image/jpeg;base64,YWJj'), { status: 400, message: 'Unsupported attachment URL' });
-  for (const base of [root, dir]) writeFileSync(join(base, 'file'), 'abc');
-  for (const [base, tooLarge] of [[dir, false], [root, true]]) {
-    const path = join(base, 'file');
-    if (tooLarge) {
-      assert.deepEqual(parse(pathToFileURL(path).href).images, [image]);
-      truncateSync(path, 8 * 1024 * 1024 + 1);
+
+  const samples = [
+    ['image/png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00])],
+    ['image/jpeg', Buffer.from([0xff, 0xd8, 0xff, 0xe0])],
+    ['image/gif', Buffer.from('GIF89a\x01\x00', 'binary')],
+    ['image/gif', Buffer.from('GIF87a\x01\x00', 'binary')],
+    ['image/webp', Buffer.from('RIFF\x04\x00\x00\x00WEBP', 'ascii')],
+  ];
+  for (const [index, [mime, bytes]] of samples.entries()) {
+    for (const base of [root, dir]) {
+      const path = join(base, `sample-${index}`);
+      writeFileSync(path, bytes);
+      assert.deepEqual(parse(pathToFileURL(path).href, mime).images, [{ type: 'image', data: bytes.toString('base64'), mimeType: mime }]);
     }
-    assert.throws(() => parse(pathToFileURL(path).href), { status: 400, message: 'Image attachment is outside the workspace or too large' });
   }
+
+  const pngPath = join(dir, 'sample-0');
+  assert.throws(() => parse(pathToFileURL(pngPath).href, 'image/jpeg'), {
+    status: 400,
+    message: 'Image attachment content does not match its declared MIME type',
+  });
+
+  const textPath = join(dir, 'notes.txt');
+  writeFileSync(textPath, 'not an image');
+  assert.throws(() => parse(pathToFileURL(textPath).href, 'image/png'), {
+    status: 400,
+    message: 'Image attachment content does not match its declared MIME type',
+  });
+
+  const oversized = join(dir, 'oversized.png');
+  writeFileSync(oversized, samples[0][1]);
+  truncateSync(oversized, 8 * 1024 * 1024 + 1);
+  assert.throws(() => parse(pathToFileURL(oversized).href, 'image/png'), { status: 400, message: 'Image attachment is too large' });
+
+  assert.throws(() => parse(pathToFileURL(root).href, 'image/png'), { status: 400, message: 'Image attachment is unavailable' });
+  assert.throws(() => parse(pathToFileURL(join(dir, 'missing.png')).href, 'image/png'), { status: 400, message: 'Image attachment is unavailable' });
+  assert.throws(() => parse('file://example.com/share/pic.png', 'image/png'), { status: 400, message: 'Unsupported attachment URL' });
   assert.throws(() => parse('data:image/png;base64,' + 'A'.repeat(12 * 1024 * 1024 + 1)), { status: 400, message: 'Image attachment is too large' });
 });
 
