@@ -1,13 +1,13 @@
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, estimateTokens, generateSummaryWithUsage, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import type { AgentSession, AgentSessionEvent, ExtensionFactory, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { clampThinkingLevel, getSupportedThinkingLevels } from '@earendil-works/pi-ai';
-import type { AssistantMessage as PiAssistant, ModelThinkingLevel } from '@earendil-works/pi-ai';
+import type { AssistantMessage as PiAssistant, ModelThinkingLevel, Usage } from '@earendil-works/pi-ai';
 import type { UserMessage } from '@opencode-ai/sdk/v2';
 import type { AdapterContext } from '../../adapter.js';
-import { object } from '../../config.js';
+import { copilot, object } from '../../config.js';
 import { modelError, RequestError } from '../../errors.js';
 import type { DriverTurn, HarnessDriver, ThinkingCapability } from '../../host/runs.js';
 import type { ToolDescriptor } from '../../host/types.js';
@@ -24,6 +24,11 @@ type Turn = DriverTurn<Model, SessionManager>;
 type PiHostTool = HostTool & { definition: ToolDefinition };
 
 function string(value: unknown) { return typeof value === 'string' ? value : ''; }
+
+function usageTotals(usage?: Usage) {
+  return { cost: usage?.cost.total ?? 0, tokens: { total: usage?.totalTokens ?? 0, input: usage?.input ?? 0,
+    output: usage?.output ?? 0, reasoning: usage?.reasoning ?? 0, cache: { read: usage?.cacheRead ?? 0, write: usage?.cacheWrite ?? 0 } } };
+}
 
 export class PiDriver implements HarnessDriver<Model, SessionManager> {
   readonly displayName = 'Pi';
@@ -79,7 +84,7 @@ export class PiDriver implements HarnessDriver<Model, SessionManager> {
     },
     parentOf: (meta, entryID) => {
       const entry = this.manager(meta).getEntry(entryID);
-      if (entry?.type !== 'message') throw new RequestError(409, 'The native Pi entry is unavailable');
+      if (entry?.type !== 'message' && entry?.type !== 'compaction') throw new RequestError(409, 'The native Pi entry is unavailable');
       return entry.parentId;
     },
   };
@@ -147,6 +152,24 @@ export class PiDriver implements HarnessDriver<Model, SessionManager> {
     session?.unsubscribe?.();
     session?.pi.dispose();
     this.sessions.delete(sessionID);
+  }
+
+  async summarize(meta: Meta, selection: UserMessage['model'], signal: AbortSignal) {
+    const manager = this.manager(meta);
+    const file = manager.getSessionFile()!;
+    const messages = manager.buildSessionContext().messages;
+    const { handle } = await this.resolveModel(selection, copilot);
+    const instructions = this.ctx.config.value.agent?.compaction?.prompt ??
+      '用中文按以下 Markdown 标题整理会话：## 目标、## 重要信息、## 工作状态（### 已完成、### 进行中、### 阻塞）、## 下一步、## 相关文件。';
+    const { text, usage } = await generateSummaryWithUsage(messages, handle.resolved, undefined, undefined, undefined, signal,
+      instructions, undefined, undefined, (model, context, options) => handle.runtime.streamSimple(model, context, options));
+    signal.throwIfAborted();
+    if (!text.trim()) throw new Error('Pi returned an empty session summary');
+    const tokens = messages.reduce((total, message) => total + estimateTokens(message), 0);
+    const entry = manager.appendCompaction(text, null, tokens, undefined, false, usage);
+    // Pi delays writing new files until the first assistant message (e.g. command-only sessions).
+    if (!existsSync(file)) atomicWrite(file, [manager.getHeader(), ...manager.getEntries()].map(row => JSON.stringify(row)).join('\n') + '\n');
+    return { text, file, leaf: entry, ...usageTotals(usage) };
   }
 
   async runTurn(turn: Turn) {
@@ -259,9 +282,7 @@ class Projection {
       if (item.type === 'text') segments.push({ index, kind: 'text', text: item.text });
       if (item.type === 'thinking') segments.push({ index, kind: 'reasoning', text: item.thinking });
     }
-    this.turn.recorder.finishStep({ created: native.timestamp, segments, cost: native.usage.cost.total,
-      tokens: { total: native.usage.totalTokens, input: native.usage.input, output: native.usage.output,
-        reasoning: native.usage.reasoning ?? 0, cache: { read: native.usage.cacheRead, write: native.usage.cacheWrite } },
+    this.turn.recorder.finishStep({ created: native.timestamp, segments, ...usageTotals(native.usage),
       finish: native.stopReason === 'toolUse' ? 'tool-calls' : native.stopReason,
       error: native.stopReason === 'error' || native.stopReason === 'aborted'
         ? { message: modelError(native.errorMessage), aborted: native.stopReason === 'aborted' } : undefined });

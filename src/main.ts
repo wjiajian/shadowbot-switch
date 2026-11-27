@@ -29,6 +29,12 @@ import { thinkingEnabled } from './thinking-command.js';
 import { userMessage } from './errors.js';
 import { agentRules } from './agent-rules.js';
 
+function metadata(input: unknown) {
+  if (input == null) return undefined;
+  if (!object(input)) throw new RequestError(400, 'Invalid session metadata');
+  return input;
+}
+
 function flags(args: string[]) {
   if (args[0] !== 'serve') throw new Error('Expected serve');
   let hostname = '127.0.0.1', port = 0;
@@ -74,7 +80,7 @@ function value(input: unknown, field: string) {
 }
 
 type Listener = { res: ServerResponse; global: boolean; root: string };
-type Workspace = { mcp: McpConnection; runs: HarnessRuns; revision: string; queue: Promise<void>; configurationError?: string; menuReconnect?: boolean };
+type Workspace = { heartbeat?: NodeJS.Timeout; disposed?: boolean; mcp: McpConnection; runs: HarnessRuns; revision: string; queue: Promise<void>; configurationError?: string; menuReconnect?: boolean };
 
 class Bridge {
   readonly server;
@@ -126,8 +132,8 @@ class Bridge {
           const runs = assertRunsContract(this.adapter.createRuns({ store: this.store, config: this.config, root, mcp, context: this.context, home: this.home, resources: this.installation.resources, skillSources: this.skillSources }), this.harness.id);
           const local: Workspace = { mcp, runs, revision, queue: Promise.resolve(), configurationError };
           this.publish(root, local);
-          const heartbeat = setInterval(() => this.publish(root, local), 2000);
-          heartbeat.unref();
+          local.heartbeat = setInterval(() => this.publish(root, local), 2000);
+          local.heartbeat.unref();
           return local;
         } catch (error) { await mcp.close(); throw error; }
       })();
@@ -164,7 +170,10 @@ class Bridge {
   }
 
   private enqueue<T>(workspace: Workspace, operation: () => T | Promise<T>) {
-    const result = workspace.queue.then(operation);
+    const result = workspace.queue.then(() => {
+      if (workspace.disposed) throw new RequestError(409, 'Reconnect to the workspace');
+      return operation();
+    });
     workspace.queue = result.then(() => undefined, () => undefined);
     return result;
   }
@@ -288,6 +297,22 @@ class Bridge {
 
     const local = await this.local(root);
     const { mcp, runs } = local;
+    if (path === '/instance/dispose' && method === 'POST') {
+      await this.configureMcp(local, async () => {
+        const config = this.adapter.createConfig();
+        await mcp.close();
+        local.disposed = true;
+        clearInterval(local.heartbeat);
+        this.config = config;
+        this.workspaces.delete(root.toLowerCase());
+        for (const client of this.listeners) {
+          if (client.root.toLowerCase() !== root.toLowerCase()) continue;
+          this.frame(client, { id: id('evt'), type: 'server.instance.disposed', properties: { directory } }, directory);
+          if (!client.global) client.res.end();
+        }
+      });
+      return json(res, true);
+    }
     if (resource === 'mcp') {
       if (!this.adapter.mcp) throw new RequestError(501, 'This harness does not support host MCP');
       if (path === '/mcp' && method === 'GET') return json(res, mcp.status());
@@ -343,13 +368,21 @@ class Bridge {
       if (!identifier && method === 'POST') {
         const input = await body(req) as NonNullable<SessionCreateData['body']>;
         if (input.parentID && !owns(input.parentID)) throw new RequestError(404, 'Unknown parent session');
-        return json(res, this.store.create(root, directory, { title: input.title, parentID: input.parentID, permission: input.permission }));
+        return json(res, this.store.create(root, directory, { title: input.title, parentID: input.parentID, permission: input.permission, metadata: metadata(input.metadata) }));
       }
       if (!owns(identifier)) throw new RequestError(404, 'Session not found in this workspace');
       const session = this.store.get(identifier)!;
       if (!action && method === 'GET') return json(res, session);
       if (!action && method === 'DELETE') return json(res, runs.delete(session));
-      if (!action && method === 'PATCH') return json(res, runs.rename(session, value((await body(req)).title, 'title')));
+      if (!action && method === 'PATCH') {
+        const input = await body(req);
+        const fields = metadata(input.metadata);
+        const title = input.title === undefined ? undefined : value(input.title, 'title');
+        if (title !== undefined && !fields) return json(res, runs.rename(session, title));
+        if (!fields) return json(res, this.store.get(identifier));
+        if (title !== undefined && runs.running().some(run => run.id === identifier)) throw new RequestError(409, 'The session is busy');
+        return json(res, this.store.patchSession(identifier, title === undefined ? { metadata: fields } : { title, metadata: fields }));
+      }
       if (action === 'children' && !subID && method === 'GET') return json(res, this.store.list(root).filter(child => child.parentID === identifier));
       if (action === 'todo' && !subID && method === 'GET') {
         return json(res, this.store.db.prepare('SELECT content,status,priority FROM main.todo WHERE session_id=? ORDER BY position').all(identifier));
@@ -362,6 +395,15 @@ class Bridge {
           throw new RequestError(404, 'The permission request is no longer pending');
         }
         return json(res, true);
+      }
+      if (action === 'summarize' && !subID && method === 'POST') {
+        const input = await body(req);
+        const model = { providerID: value(input.providerID, 'provider ID'), modelID: value(input.modelID, 'model ID') };
+        const { result } = await this.enqueue(local, () => {
+          if (!runs.summarize) throw new RequestError(501, 'This harness does not support session compaction');
+          return { result: runs.summarize(session, model) };
+        });
+        return json(res, await result);
       }
       if (action === 'revert' && !subID && method === 'POST') {
         const input = await body(req);

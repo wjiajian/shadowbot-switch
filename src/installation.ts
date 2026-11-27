@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -69,6 +70,17 @@ export function ownsAgent(home: string, install: Installation) {
     const locator = readJson<{home?: string}>(install.agentPath + '.shadowbot-pi.json');
     return typeof locator?.home === 'string' && !!locator.home.trim() && resolve(locator.home).toLowerCase() === resolve(home).toLowerCase();
   } catch { return false; }
+}
+
+export function hostAttachment(home: string, selected: string) {
+  const script = join(dirname(home), 'scripts', 'discovery.ps1');
+  try {
+    const result = execFileSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', script, '-InspectInstallation', home, '-SelectedHarness', selected],
+      { windowsHide: true, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
+    return JSON.parse(result) as { attachment: string; recordedPath?: string; agentPath?: string; hostVersion?: string; warning?: string };
+  } catch {
+    return { attachment: 'unknown', warning: '无法确认当前影刀程序。检查 PowerShell 7 和项目的 scripts/discovery.ps1。' };
+  }
 }
 
 export const hostVersion = (install: Installation) => install.bundled?.version ?? protocolVersion;

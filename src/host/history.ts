@@ -66,7 +66,7 @@ export class SessionHistory {
 
   rename(session: Session, title: string) {
     this.assertIdle(session);
-    return this.options.store.update({ ...session, title, time: { ...session.time, updated: Date.now() } });
+    return this.options.store.patchSession(session.id, { title });
   }
 
   delete(session: Session) {

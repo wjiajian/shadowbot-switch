@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { AssistantMessage, Message, Part, Session, ToolPart } from '@opencode-ai/sdk/v2';
+import { RequestError } from './errors.js';
 import { protocolVersion } from './installation.js';
 
 type Json = Record<string, unknown>;
@@ -44,12 +45,14 @@ function part(row: PartRow): Part {
 
 export class Store {
   readonly db: DatabaseSync;
+  private readonly hasSessionMetadata: boolean;
   private publish: (frame: Frame, directory: string, root: string) => void;
 
   constructor(database: string, adapter: string, publish: (frame: Frame, directory: string, root: string) => void) {
     this.publish = publish;
     mkdirSync(dirname(adapter), { recursive: true });
     this.db = new DatabaseSync(database, { timeout: 3000, enableForeignKeyConstraints: true });
+    this.hasSessionMetadata = this.db.prepare('PRAGMA main.table_info(session)').all().some(row => row.name === 'metadata');
     this.db.prepare('ATTACH DATABASE ? AS adapter').run(adapter);
     this.db.exec(`
       PRAGMA main.journal_mode=DELETE;
@@ -159,14 +162,14 @@ export class Store {
       .map(row => JSON.parse(String(row.session)) as Session).sort((a, b) => b.time.updated - a.time.updated || b.id.localeCompare(a.id));
   }
 
-  create(root: string, directory: string, options: { title?: string; parentID?: string; permission?: Session['permission'] }) {
+  create(root: string, directory: string, options: Pick<Session, 'parentID' | 'permission' | 'metadata'> & { title?: string }) {
     const time = Date.now();
     const sessionID = id('ses');
     const projectID = createHash('sha256').update(root.toLowerCase()).digest('hex').slice(0, 32);
     const session: Session = {
       id: sessionID, directory, projectID, path: '.', slug: sessionID, version: protocolVersion,
       title: options.title || `New session - ${new Date(time).toISOString()}`,
-      time: { created: time, updated: time }, parentID: options.parentID, permission: options.permission,
+      time: { created: time, updated: time }, parentID: options.parentID, permission: options.permission, metadata: options.metadata,
     };
     this.transaction(() => {
       this.db.prepare('INSERT INTO main.project (id, worktree, time_created, time_updated, sandboxes) VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING')
@@ -174,22 +177,45 @@ export class Store {
       this.db.prepare(`INSERT INTO main.session (id, project_id, parent_id, directory, path, slug, version, title, permission, time_created, time_updated)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(sessionID, projectID, session.parentID ?? null, directory, '.', session.slug,
         session.version, session.title, options.permission ? JSON.stringify(options.permission) : null, time, time);
+      if (options.metadata && this.hasSessionMetadata) this.db.prepare('UPDATE main.session SET metadata=? WHERE id=?').run(JSON.stringify(options.metadata), sessionID);
       this.db.prepare('INSERT INTO adapter.session (id, root, session) VALUES (?, ?, ?)').run(sessionID, root, JSON.stringify(session));
     });
     this.event(sessionID, 'session.created', { info: session });
     return session;
   }
 
-  private writeSession(session: Session) {
+  private writeSession(id: string, patch: Partial<Pick<Session, 'title' | 'metadata' | 'revert'>>) {
+    const current = this.get(id);
+    if (!current) throw new RequestError(404, 'Session not found');
+    const session = { ...current, ...patch, time: { ...current.time, updated: Date.now() } };
+    if (patch.metadata && this.hasSessionMetadata) {
+      this.db.prepare('UPDATE main.session SET metadata=? WHERE id=?').run(JSON.stringify(patch.metadata), id);
+    }
+    this.saveSession(session);
+    return session;
+  }
+
+  private saveSession(session: Session) {
     this.db.prepare('UPDATE adapter.session SET session=? WHERE id=?').run(JSON.stringify(session), session.id);
     this.db.prepare('UPDATE main.session SET title=?, time_updated=?, time_archived=?, revert=? WHERE id=?')
       .run(session.title, session.time.updated, session.time.archived ?? null, session.revert ? JSON.stringify(session.revert) : null, session.id);
   }
 
-  update(session: Session) {
-    this.transaction(() => this.writeSession(session));
+  patchSession(id: string, patch: Partial<Pick<Session, 'title' | 'metadata'>>) {
+    const session = this.transaction(() => this.writeSession(id, patch));
     this.event(session.id, 'session.updated', { info: session });
     return session;
+  }
+
+  // Keep the full update API for older harnesses. Metadata belongs to the host PATCH route.
+  update(session: Session) {
+    const updated = this.transaction(() => {
+      const current = { ...session, metadata: this.get(session.id)?.metadata };
+      this.saveSession(current);
+      return current;
+    });
+    this.event(session.id, 'session.updated', { info: updated });
+    return updated;
   }
 
   delete(session: Session) {
@@ -268,13 +294,13 @@ export class Store {
   }
 
   setRevert(session: Session, leaf: string | null, previous: string | null) {
-    this.transaction(() => {
+    const updated = this.transaction(() => {
       this.db.prepare('UPDATE adapter.session SET native_leaf=?, cutoff=?, revert_leaf=? WHERE id=?')
         .run(leaf, session.revert?.messageID ?? null, previous, session.id);
-      this.writeSession(session);
+      return this.writeSession(session.id, { revert: session.revert });
     });
-    this.event(session.id, 'session.updated', { info: session });
-    return session;
+    this.event(session.id, 'session.updated', { info: updated });
+    return updated;
   }
 
   wasMessageRemoved(sessionID: string, messageID: string) {
@@ -289,16 +315,13 @@ export class Store {
 
   removeMessages(session: Session, cutoff: string, leaf: string | null) {
     const sessionID = session.id;
-    const updated = { ...session, time: { ...session.time, updated: Date.now() } };
-    delete updated.revert;
-    const removed = this.transaction(() => {
+    const { removed, updated } = this.transaction(() => {
       const rows = this.db.prepare(`DELETE FROM main.message WHERE session_id=? AND rowid >=
         (SELECT rowid FROM main.message WHERE session_id=? AND id=?) RETURNING id`).all(sessionID, sessionID, cutoff) as { id: string }[];
       const remember = this.db.prepare('INSERT OR IGNORE INTO adapter.removed_message VALUES (?,?)');
       for (const { id } of rows) remember.run(sessionID, id);
       this.db.prepare('UPDATE adapter.session SET native_leaf=?, cutoff=NULL, revert_leaf=NULL WHERE id=?').run(leaf, sessionID);
-      this.writeSession(updated);
-      return rows;
+      return { removed: rows, updated: this.writeSession(sessionID, { revert: undefined }) };
     });
     for (const { id } of removed) this.event(sessionID, 'message.removed', { sessionID, messageID: id });
     this.event(sessionID, 'session.updated', { info: updated });

@@ -59,6 +59,8 @@ flowchart LR
 > [!IMPORTANT]
 > 启动器只接管已验证的影刀版本，会校验原版 `opencode.exe`。影刀升级后，需等本项目完成兼容验证再切换。
 
+影刀升级会创建新的版本目录。升级后先看 `status` 或 `doctor`。如果提示仍关联旧目录，请保存工作、退出影刀并执行 `.\switch.ps1 use pi --wait`。从旧版 ShadowBot Switch 首次安装 6.4 兼容修复时，请先更新项目源码，再执行 `.\switch.ps1 update pi --local-only --wait`，以保留当前 Pi 版本并重建兼容服务。
+
 ### 安装并切换
 
 1. 在 [GitHub 项目页](https://github.com/wjiajian/shadowbot-switch) 点击 **Code → Download ZIP**，解压到准备长期保留的目录；也可以 `git clone`。

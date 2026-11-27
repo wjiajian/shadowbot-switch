@@ -38,8 +38,12 @@ function Get-OpenCodeVersion($Path,$Fallback) { Get-Content -LiteralPath $Path }
        users = Join-Path $local 'ShadowBot/users' } | ConvertTo-Json | Set-Content (Join-Path $state 'install.json')
     @{ mode = 'original' } | ConvertTo-Json | Set-Content (Join-Path $state 'backend.json')
     @{ home = $state } | ConvertTo-Json | Set-Content "$old.shadowbot-pi.json"
+    $binding = Get-ShadowBotAttachment $state $old pi
+    if (!$binding.warning -or $binding.agentPath -ne $new -or $binding.attachment -ne 'bundled') { throw 'Upgrade misreported as an active managed harness.' }
     & (Join-Path $project 'install.ps1') -Harness original -ShadowBotDirectory $hostDir
     $install = Get-Content (Join-Path $state 'install.json') -Raw | ConvertFrom-Json
+    $binding = Get-ShadowBotAttachment $state $install.agentPath original
+    if ($binding.warning -or $binding.attachment -ne 'bundled') { throw 'Restored bundled installation should be active.' }
     if ((Get-Content $old) -ne '1.19.0' -or (Test-Path "$old.shadowbot-pi.json")) { throw 'Old host was not restored before replacing backup.' }
     if ((Get-Content $backup) -ne '1.20.0' -or $install.bundled.version -ne '1.20.0' -or $install.agentPath -ne $new -or $install.resources -ne (Join-Path (Split-Path $new) 'Resources')) { throw 'Upgrade lost new host metadata or backup.' }
 } finally { Remove-Item -LiteralPath $project -Recurse -Force }

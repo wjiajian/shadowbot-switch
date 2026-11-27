@@ -49,6 +49,7 @@ export interface DriverTurn<Model, Native> {
 export interface HarnessDriver<Model = unknown, Native = unknown> {
   displayName: string; logPrefix: string; fallbackError: string;
   resolveModel(request: Selection | undefined, agent: string): Promise<{ selection: Selection; handle: Model }>;
+  summarize?(meta: Meta, model: Selection, signal: AbortSignal): Promise<{ text: string; file: string; leaf: string; cost: number; tokens: AssistantMessage['tokens'] }>;
   runTurn(turn: DriverTurn<Model, Native>): Promise<void>;
   abort(sessionID: string): Promise<void>;
   dispose?(sessionID: string): void;
@@ -282,12 +283,62 @@ class HostRuns<Model, Native> {
       }
       checkpoint('finish');
       this.store.complete(session.id);
-      const current = this.store.get(session.id)!;
-      this.store.update({ ...current, time: { ...current.time, updated: Date.now() } });
+      this.store.patchSession(session.id, {});
       this.store.event(session.id, 'session.status', { sessionID: session.id, status: { type: 'idle' } });
       this.store.event(session.id, 'session.idle', { sessionID: session.id });
     }
     return recorder?.last ? this.store.message(session.id, recorder.last.id) : undefined;
+  }
+
+  async summarize(session: Session, model: Selection) {
+    if (!this.driver.summarize) throw new RequestError(501, 'This harness does not support session compaction');
+    this.history.assertIdle(session);
+    if (!this.store.claim(session.id)) throw new RequestError(409, 'The session is busy');
+    const abort = new AbortController();
+    const done = Promise.withResolvers<Reply>();
+    this.active.set(session.id, { abort, done: done.promise, instructions: '' });
+    try {
+      const meta = this.store.meta(session.id)!;
+      this.store.event(session.id, 'session.status', { sessionID: session.id, status: { type: 'busy' } });
+      const started = Date.now();
+      const summary = await this.driver.summarize(meta, model, abort.signal);
+      abort.signal.throwIfAborted();
+      if (summary.leaf !== meta.native_leaf) {
+        const now = Date.now();
+        const user: UserMessage = { id: id('msg'), sessionID: session.id, role: 'user', agent: copilot, model, summary: { diffs: [] }, time: { created: started } };
+        const assistant: AssistantMessage = { id: id('msg'), sessionID: session.id, role: 'assistant', parentID: user.id,
+          agent: 'compaction', mode: 'compaction', summary: true, finish: 'stop', ...model, path: { cwd: this.root, root: this.root },
+          time: { created: started, completed: now }, cost: summary.cost, tokens: summary.tokens };
+        const parts: Part[] = [
+          { id: id('prt'), sessionID: session.id, messageID: user.id, type: 'compaction', auto: false },
+          { id: id('prt'), sessionID: session.id, messageID: assistant.id, type: 'step-start' },
+          { id: id('prt'), sessionID: session.id, messageID: assistant.id, type: 'text', text: summary.text, time: { start: started, end: now } },
+          { id: id('prt'), sessionID: session.id, messageID: assistant.id, type: 'step-finish', reason: 'stop', cost: summary.cost, tokens: summary.tokens },
+        ];
+        this.store.transaction(() => {
+          for (const message of [user, assistant]) {
+            this.store.putMessage(message, false);
+            this.store.mapMessage(session.id, message.id, summary.leaf);
+          }
+          for (const part of parts) this.store.putPart(part, false);
+          this.store.native(session.id, summary.file, summary.leaf);
+        });
+        for (const info of [user, assistant]) {
+          this.store.event(session.id, 'message.updated', { info });
+          for (const part of parts.filter(p => p.messageID === info.id)) {
+            this.store.event(session.id, 'message.part.updated', { part, time: now });
+          }
+        }
+      }
+      this.store.event(session.id, 'session.compacted', { sessionID: session.id });
+      return true;
+    } finally {
+      this.active.delete(session.id);
+      done.resolve(undefined);
+      this.store.complete(session.id);
+      this.store.event(session.id, 'session.status', { sessionID: session.id, status: { type: 'idle' } });
+      this.store.event(session.id, 'session.idle', { sessionID: session.id });
+    }
   }
 
   async abort(sessionID: string) {

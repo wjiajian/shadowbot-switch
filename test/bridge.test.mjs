@@ -10,6 +10,63 @@ import test from 'node:test';
 import { syncSkillCommands } from '../dist/service/skill-commands.js';
 import { listen, modelFixture, mcpFixture, tempFixture, start, stream, get } from './helpers/bridge.mjs';
 
+test('6.4 session markers survive creation, migration, compaction and restart', { timeout: 45_000 }, async () => {
+  const fixture = tempFixture();
+  const model = modelFixture();
+  const url = await listen(model.server);
+  const selection = { providerID: 'fixture', modelID: 'model' };
+  const config = { model: 'fixture/model', provider: { fixture: { npm: '@ai-sdk/openai-compatible',
+    options: { baseURL: url, apiKey: 'fixture' }, models: { model: { name: 'Fixture' } } } } };
+  const marker = { shadowbotContextCompatibility: { version: 1, state: 'completed' } };
+  let bridge;
+  try {
+    bridge = await start(fixture, config);
+    const session = await get(bridge.api('/session', { method: 'POST', data: { title: '6.4 draft', metadata: marker } }));
+    const path = '/session/' + session.id;
+    const patch = data => get(bridge.api(path, { method: 'PATCH', data }));
+    assert.deepEqual(session.metadata, marker);
+    assert.deepEqual((await patch({ title: 'renamed' })).metadata, marker);
+    assert.equal((await patch({})).title, 'renamed');
+    assert.deepEqual((await patch({ metadata: { other: 1 } })).metadata, { other: 1 });
+    assert.deepEqual((await patch({ title: 'old history', metadata: {} })).metadata, {});
+    await get(bridge.api(path, { method: 'PATCH', data: { metadata: [] } }), 400);
+    await get(bridge.api(path + '/message', { method: 'POST', data: { model: selection, parts: [{ type: 'text', text: 'fixture question' }] } }));
+    await patch({ metadata: { shadowbotContextCompatibility: { version: 1, state: 'pending' } } });
+    const dispose = () => get(bridge.api('/instance/dispose', { method: 'POST', data: {} }));
+    assert.equal(await dispose(), true);
+    const compact = () => get(bridge.api(path + '/summarize', { method: 'POST', data: selection }));
+    assert.equal(await compact(), true);
+    assert.equal(await compact(), true);
+    const messages = await get(bridge.api(path + '/message'));
+    const summaries = messages.filter(m => m.info.summary === true);
+    assert.equal(summaries.length, 2);
+    for (const summary of summaries) {
+      const fetched = await get(bridge.api(path + '/message/' + summary.info.id));
+      assert.deepEqual(fetched.parts.map(p => p.type), ['step-start', 'text', 'step-finish']);
+      assert.equal(fetched.parts.at(-1).reason, 'stop');
+      assert.ok(fetched.parts[1].time.end >= fetched.parts[1].time.start);
+    }
+    assert.ok(summaries[0].parts.some(p => p.type === 'text' && p.text.includes('fixture reply')));
+    assert.ok(messages.some(m => m.parts.some(p => p.type === 'compaction')));
+    await dispose();
+    assert.deepEqual((await patch({ metadata: marker })).metadata, marker);
+    await bridge.stop();
+    bridge = await start(fixture, config);
+    const restored = await get(bridge.api(path));
+    assert.deepEqual(restored.metadata, marker);
+    assert.equal(restored.title, 'old history');
+    await get(bridge.api(path + '/message', { method: 'POST', data: { model: selection, parts: [{ type: 'text', text: 'continue' }] } }));
+    assert.deepEqual((await get(bridge.api(path))).metadata, marker);
+    const db = new DatabaseSync(fixture.database, { readOnly: true });
+    try { assert.deepEqual(JSON.parse(db.prepare('SELECT metadata FROM session WHERE id=?').get(session.id).metadata), marker); }
+    finally { db.close(); }
+  } finally {
+    await bridge?.stop();
+    model.server.close();
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('Pi chat, MCP, skills, permission, question, restore and revert', { timeout: 60_000 }, async () => {
   const fixture = tempFixture('a'.repeat(64), { id: 'original', version: '1.19.2' });
   const model = modelFixture();

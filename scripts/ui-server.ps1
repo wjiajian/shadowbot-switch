@@ -354,6 +354,9 @@ function Get-UiState($Request) {
         }
         $directory = $script:Ui.Detected.value
     }
+    if ($installed -and $installation.agentPath) {
+        $attachment = Get-ShadowBotAttachment $state $installation.agentPath $selected $bundled.id
+    }
     $preference = $null
     $preferences = Join-Path $state 'preferences.json'
     if (Test-Path -LiteralPath $preferences -PathType Leaf) {
@@ -370,7 +373,7 @@ function Get-UiState($Request) {
         recoveryPending = @('activation.pending.json', 'switch.pending.json' | Where-Object { Test-Path -LiteralPath (Join-Path $state $_) }).Count -gt 0
         upstreamCheckedAt = $script:Ui.Upstream.checkedAt
         harnesses = $harnesses
-        shadowbot = [ordered]@{ directory = $directory; version = (Get-UiShadowBotVersion $directory) }
+        shadowbot = [ordered]@{ directory = $directory; version = (Get-UiShadowBotVersion $directory); attachment = $attachment }
         home = $state
         app = $preference
         job = if ($job -and !$job.Done) { [ordered]@{ id = $job.Id; cmd = $job.Cmd; harness = $job.Harness; localOnly = $job.LocalOnly } } else { $null }

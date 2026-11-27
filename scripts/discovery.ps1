@@ -1,3 +1,5 @@
+param([string]$InspectInstallation, [string]$SelectedHarness)
+
 function Resolve-ShadowBotDirectories([string[]]$Candidates) {
     foreach ($candidate in $Candidates) {
         if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
@@ -92,4 +94,29 @@ function Resolve-ShadowBotAgent([string]$ShadowBotDirectory) {
     $agent = $candidates | Sort-Object rank,version,path -Descending | Select-Object -First 1
     if (!$agent) { throw "在 $ShadowBotDirectory 中没有找到 shadowbot-*/opencode.exe" }
     @{ hostVersion = $hostVersion; agentPath = $agent.path; resources = Join-Path (Split-Path $agent.path) 'Resources' }
+}
+
+function Get-ShadowBotAttachment($State, $RecordedPath, $Selected, $Bundled = 'original') {
+    try {
+        $hostAgent = Resolve-ShadowBotAgent (Split-Path (Split-Path $RecordedPath)) -WarningAction SilentlyContinue
+        $path = $hostAgent.agentPath
+        $locator = "$path.shadowbot-pi.json"
+        $attached = if (!(Test-Path -LiteralPath $locator)) { 'bundled' }
+            elseif ((Get-Content -Raw -LiteralPath $locator -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop).home -eq $State) { 'managed' }
+            else { 'other' }
+        $hint = if ($path -ne $RecordedPath) {
+            "影刀 $($hostAgent.hostVersion) 的当前程序在 $path，安装记录仍指向 $RecordedPath。退出影刀后运行 .\switch.ps1 use $Selected --wait。"
+        } elseif ($attached -eq 'other' -or (($Selected -ne $Bundled) -ne ($attached -eq 'managed'))) {
+            '当前影刀目录的启动器与所选后端不匹配。退出影刀后检查安装定位并运行 repair。'
+        }
+        @{ hostVersion = $hostAgent.hostVersion; agentPath = $path; recordedPath = $RecordedPath; attachment = $attached; warning = $hint }
+    } catch {
+        @{ recordedPath = $RecordedPath; attachment = 'unknown'; warning = '无法确认当前影刀程序。检查影刀安装目录及启动器定位文件。' }
+    }
+}
+
+if ($InspectInstallation) {
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+    $install = Get-Content -Raw -LiteralPath (Join-Path $InspectInstallation 'install.json') | ConvertFrom-Json
+    Get-ShadowBotAttachment $InspectInstallation $install.agentPath $SelectedHarness ($install.bundled.id ?? 'original') | ConvertTo-Json -Compress
 }
