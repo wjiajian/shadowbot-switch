@@ -148,3 +148,39 @@ test('only versions below the minimum trigger the host version warning', () => {
     assert.equal(vm.runInNewContext(comparison + '\nbelowMinimum(version)', { version }), expected);
   }
 });
+
+const extract = name => new RegExp('(?:async )?function ' + name + '\\([^)]*\\) \\{[\\s\\S]+?\\n}').exec(script)[0];
+test('rule editor measures normalized UTF-8 bytes, thresholds and CRLF without rendering on input', () => {
+  const context = vm.createContext({ TextEncoder });
+  vm.runInContext(['normalizeEol', 'ruleBytes', 'ruleStatus'].map(extract).join('\n'), context);
+  assert.equal(context.normalizeEol('a\r\nb\rc\nd', 'lf'), 'a\nb\nc\nd');
+  assert.equal(context.ruleBytes('中\n🙂', 'crlf'), 9);
+  for (const [size, status] of [[29491, 'ok'], [29492, 'warn'], [32768, 'warn'], [32769, 'bad']]) assert.equal(context.ruleStatus(size), status);
+  assert.doesNotMatch(extract('updateRuleDraft'), /\brender\(/);
+});
+
+test('permission forms preserve order, including a wildcard entered after a specific rule', () => {
+  const context = vm.createContext({});
+  vm.runInContext(['permissionRows', 'permissionPayload', 'invalidPermissions'].map(extract).join('\n'), context);
+  const star = { pattern: '*', action: 'ask' }, docs = { pattern: 'docs_*', action: 'allow' };
+  for (const list of [[], [star, docs], [docs, star]]) {
+    const form = context.permissionRows(list);
+    assert.equal(form.defaultAction, list[0] === star ? 'ask' : '');
+    assert.deepEqual(JSON.parse(JSON.stringify(context.permissionPayload(form))), list);
+    assert.ok(!context.invalidPermissions(form).includes(true));
+  }
+  assert.ok(context.invalidPermissions(context.permissionRows([star, docs, star])).includes(true));
+});
+
+test('import previews and switch labels reflect CLI output and the dedicated upload limit', () => {
+  const context = vm.createContext({});
+  vm.runInContext(/const LOG_ACTIONS = [^\n]+/.exec(script)[0] + '\n' + ['importSummary', 'logLabel', 'unwrap'].map(extract).join('\n'), context);
+  const plan = { files: [{ action: 'create' }, { action: 'overwrite' }] };
+  assert.deepEqual(JSON.parse(JSON.stringify(context.importSummary(plan, false))), { creates: 1, overwrites: 1, blocked: true });
+  assert.equal(context.importSummary(plan, true).blocked, false);
+  assert.equal(context.logLabel('committed'), '切换完成'); assert.equal(context.logLabel('other'), 'other');
+  assert.throws(() => context.unwrap({ stdout: '{"error":"changed","code":"conflict"}', exitCode: 1 }), { code: 'conflict' });
+  assert.equal(context.unwrap({ stdout: '{"data":{"warnings":["rule"]}}', exitCode: 1 }).data.warnings[0], 'rule');
+  assert.match(server, /\$limit = if \(\$path -ceq '\/api\/config\/stage'\) \{ 32MB \} else \{ 1MB \}/);
+  assert.match(server, /\$bodyBytes.Length \+ \$count -gt \$limit/);
+});

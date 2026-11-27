@@ -67,3 +67,14 @@ test('custom endpoint preserves catalog-specific thinking restrictions', async (
   assert.equal(compatible.api, 'openai-completions');
   assert.deepEqual(getSupportedThinkingLevels(compatible), getSupportedThinkingLevels(resolved));
 });
+
+test('thinking command reads only installation settings and tolerates a damaged file', async t => {
+  const { installationThinkingSetting } = await import('../dist/service/shadowbot.js');
+  const { thinkingEnabled } = await import('../dist/service/thinking-command.js');
+  const root = mkdtempSync(join(tmpdir(), 'thinking-setting-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, 'shadowbot.json'), '{');
+  assert.equal(installationThinkingSetting(root), undefined);
+  writeFileSync(join(root, 'shadowbot.json'), '{"thinkingCommand":false}');
+  assert.equal(thinkingEnabled('pi', {}, undefined, { thinkingCommand: installationThinkingSetting(root) }), false);
+});

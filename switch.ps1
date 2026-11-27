@@ -36,6 +36,14 @@ ShadowBot Switch — 在项目根目录管理影刀 Copilot
   .\switch.ps1 config check            配置及路径检查
   .\switch.ps1 config export <文件>     导出配置
   .\switch.ps1 config import <文件>     导入配置，--replace 先备份再覆盖
+  .\switch.ps1 config import <文件> --dry-run  预览目标和冲突
+  .\switch.ps1 config backups [--limit n] [--offset n]
+  .\switch.ps1 config restore <备份编号> [--dry-run]
+  .\switch.ps1 rules show / settings show  查看规则或授权设置
+  .\switch.ps1 rules save|remove --scope installation|application --expect <摘要|absent>（保存加 --from <文件>）
+  .\switch.ps1 settings save --from <补丁文件> --expect <摘要|absent>
+  .\switch.ps1 log [--limit n] [--offset n]  查看最近切换
+  .\switch.ps1 apps add|remove <路径>   管理自定义应用
   .\switch.ps1 apps list|select|clear   选择应用或恢复安装级默认范围
   .\switch.ps1 update [harness]        检查上游同主版本并更新指定或当前 harness，保持当前选择
   .\switch.ps1 update [harness] --check   只检查版本（--all 检查全部）
@@ -204,6 +212,8 @@ try {
         if ($command -eq 'doctor') { $global:LASTEXITCODE = 1; exit 1 }
         return
     }
+    # Carry new commands through the installed launcher's config namespace.
+    if ($command -cin 'rules','settings','log') { $arguments = @('config') + $arguments }
     & $control @arguments
     if ($LASTEXITCODE -ne 0) {
         if (!$jsonOutput -and $command -in 'status', 'doctor') { Write-Host "本地安装记录：$($status.backend)；下一步：$($status.next)" }

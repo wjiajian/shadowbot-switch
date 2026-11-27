@@ -130,3 +130,13 @@ test('thinking command registration honors installed capabilities and legacy Pi 
   assert.equal(thinkingEnabled('mock', {}, { ...caps, thinking: true }), true);
   assert.equal(thinkingEnabled('mock', { command: { thinking: {} } }, { ...caps, thinking: true }), false);
 });
+
+test('disabling the installation thinking command delivers slash text to a capable driver', async t => {
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const { driver, ctx, send } = fixture(t);
+  driver.thinking = { supportedLevels: () => ['high'], baseline: () => assert.fail('disabled local command ran') };
+  mkdirSync(join(ctx.home, 'agent'), { recursive: true });
+  writeFileSync(join(ctx.home, 'agent', 'shadowbot.json'), '{"thinkingCommand":false}');
+  driver.runTurn = async turn => { assert.equal(turn.text, '/thinking high'); step(turn.recorder); };
+  assert.equal((await send('/thinking high')).info.finish, 'stop');
+});

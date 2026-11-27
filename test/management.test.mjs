@@ -280,3 +280,14 @@ test('human output shows terminal control and bidi characters from third-party t
     assert.match(result.stdout, /fake \\x1b\[2J\\u202e done/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('log bounds the input window even when its first partial record is several MiB', async t => {
+  const home = mkdtempSync(join(tmpdir(), 'shadowbot-log-tail-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  put(join(home, 'switch-log.jsonl'), 'x'.repeat(5 * 1024 * 1024) + '\n' +
+    JSON.stringify({ at: '2026-01-01T00:00:00Z', action: 'committed', from: 'original', to: 'pi' }) + '\n');
+  const output = t.mock.method(console, 'log', () => {});
+  await manage(home, {}, ['log', '--json']);
+  const { data } = JSON.parse(output.mock.calls[0].arguments[0]);
+  assert.equal(data.total, 1); assert.equal(data.skipped, 0);
+});
