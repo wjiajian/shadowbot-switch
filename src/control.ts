@@ -5,10 +5,11 @@ import { installationHome, mode, protocolVersion, readJson, installedVersion, ru
 import type { Installation } from './installation.js';
 import { HostConfig } from './config.js';
 import { skillSources } from './host-skills.js';
-import { skillInventory } from './shadowbot.js';
+import { installationThinkingSetting, skillInventory } from './shadowbot.js';
 import { syncSkillCommands } from './skill-commands.js';
 import { thinkingEnabled } from './thinking-command.js';
 import { assertHostStopped, switchBackend, verifySchema } from './switch.js';
+import { isUserError } from './errors.js';
 import { manage, managementHelp, visible } from './management.js';
 
 async function main([command, arg]: string[]) {
@@ -51,7 +52,7 @@ async function main([command, arg]: string[]) {
     await switchBackend(home, install, harness.id, schema);
     const config = new HostConfig().value;
     syncSkillCommands(install.resources, harnessCapabilities(install, harness).skills ? skillInventory(agentDir, undefined, skillSources(home, install, harness.id), config)
-      .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, thinkingEnabled(harness.id, config, harnessCapabilities(install, harness)));
+      .filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, thinkingEnabled(harness.id, config, harnessCapabilities(install, harness), { thinkingCommand: installationThinkingSetting(agentDir) }));
     return;
   }
   throw new Error('Expected doctor, skills list, mcp list, or reload. Use install.ps1 to switch harnesses.');
@@ -59,7 +60,7 @@ async function main([command, arg]: string[]) {
 
 void main(process.argv.slice(2)).catch(error => {
   const message = error instanceof Error ? error.message : '命令失败。运行 help 或 doctor 查看帮助。';
-  if (process.argv.includes('--json')) console.log(JSON.stringify({ error: message }));
+  if (process.argv.includes('--json')) console.log(JSON.stringify({ error: message, code: isUserError(error) ? error.code : undefined }));
   else console.error(`ShadowBot Switch：${visible(message)}`);
   process.exitCode = 1;
 });

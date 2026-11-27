@@ -5,7 +5,7 @@ import { copilot, emptyTokens } from '../config.js';
 import { RequestError, UserError, userMessage } from '../errors.js';
 import { Interactions } from '../interactions.js';
 import type { HostTool } from '../mcp/hub.js';
-import { skills } from '../shadowbot.js';
+import { installationThinkingSetting, skills } from '../shadowbot.js';
 import { databaseBusy, failure, id, type Meta, type Store } from '../store.js';
 import { thinkingArgument } from '../thinking-command.js';
 import { runExplorerTask } from './explorer.js';
@@ -87,7 +87,7 @@ class HostRuns<Model, Native> {
   running() { return this.history.running(); }
 
   start(session: Session, prompt: Prompt, run: RunInput, interaction?: InteractionTarget) {
-    const thinking = this.driver.thinking ? thinkingArgument(prompt) : undefined;
+    const thinking = this.driver.thinking && installationThinkingSetting(this.agentDir) !== false ? thinkingArgument(prompt) : undefined;
     if (thinking === undefined) this.history.assertIdle(session);
     const { messageID, parts } = admitParts(this.store, session, prompt);
     const hasRuntime = typeof this.ctx.context.hasRuntimeContext === 'boolean' ? this.ctx.context.hasRuntimeContext :

@@ -149,3 +149,18 @@ test('stable path and handle metadata may differ without rejecting valid rules',
     assert.deepEqual(result.warnings, []);
   } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
 });
+
+test('editor inspection hashes the full snapshot and bounds its preview', async t => {
+  const { inspectRuleFile } = await import('../dist/service/agent-rules.js');
+  const { createHash } = await import('node:crypto');
+  const f = fixture(t), bytes = Buffer.alloc(150000, 97);
+  bytes[bytes.length - 1] = 255;
+  fs.writeFileSync(f.install, bytes);
+  const info = inspectRuleFile(f.install, f.agent);
+  assert.equal(info.bytes, bytes.length); assert.equal(info.tooLarge, true); assert.equal(info.utf8Valid, false);
+  assert.equal(info.sha256, createHash('sha256').update(bytes).digest('hex'));
+  assert.equal(info.preview.length, 65536);
+  fs.writeFileSync(f.install, '\uFEFF a\r\nb\nc ');
+  assert.equal(inspectRuleFile(f.install, f.agent).eol, 'mixed');
+  assert.equal(inspectRuleFile(f.install, f.agent, 2).content, ' a\r\nb\nc ');
+});

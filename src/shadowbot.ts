@@ -11,10 +11,11 @@ import { officialSkillDirectories } from './host-skills.js';
 import type { SkillSources } from './host-skills.js';
 import { UserError } from './errors.js';
 
-export type UserSettings = { enabledSkills?: string[]; disabledSkills?: string[]; mcpPermission?: Record<string, 'allow' | 'ask' | 'deny'> };
+export type UserSettings = { thinkingCommand?: boolean; enabledSkills?: string[]; disabledSkills?: string[]; mcpPermission?: Record<string, 'allow' | 'ask' | 'deny'> };
 
 export function validateUserSettings(input: unknown, path: string): UserSettings {
   if (!object(input)) throw new UserError(`${path} 必须是 JSON 对象。`);
+  if (input.thinkingCommand !== undefined && typeof input.thinkingCommand !== 'boolean') throw new UserError(`${path}：thinkingCommand 必须是 true 或 false。`);
   for (const key of ['enabledSkills', 'disabledSkills']) {
     if (input[key] !== undefined && (!Array.isArray(input[key]) || input[key].some(name => typeof name !== 'string'))) {
       throw new UserError(`${path}：${key} 必须是 Skill 名称数组。`);
@@ -26,8 +27,14 @@ export function validateUserSettings(input: unknown, path: string): UserSettings
   return input as UserSettings;
 }
 
+export function installationThinkingSetting(agentDir: string) {
+  try { return validateUserSettings(readJson(join(agentDir, 'shadowbot.json')), agentDir).thinkingCommand; }
+  catch { return undefined; }
+}
+
 export function userSettings(agentDir: string, root?: string): UserSettings {
-  return settingsFromFiles([join(agentDir, 'shadowbot.json'), ...appConfigFiles(root, 'shadowbot.json')]);
+  const installation = settingsFromFiles([join(agentDir, 'shadowbot.json')]);
+  return settingsFromFiles(appConfigFiles(root, 'shadowbot.json'), installation, true);
 }
 
 export function mergeUserSettings(current: UserSettings, file: UserSettings): UserSettings {
@@ -36,11 +43,11 @@ export function mergeUserSettings(current: UserSettings, file: UserSettings): Us
     mcpPermission: { ...current.mcpPermission, ...file.mcpPermission } };
 }
 
-export function settingsFromFiles(paths: string[]): UserSettings {
-  let current: UserSettings = {};
+export function settingsFromFiles(paths: string[], current: UserSettings = {}, application = false): UserSettings {
   for (const path of paths) {
     if (!existsSync(path)) continue;
     const file = validateUserSettings(readJson(path), path);
+    if (application) delete file.thinkingCommand;
     current = mergeUserSettings(current, file);
   }
   return current;

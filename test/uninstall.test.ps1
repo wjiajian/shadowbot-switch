@@ -29,7 +29,7 @@ try {
         New-Item -ItemType Directory -Force -Path $path | Out-Null
     }
     Copy-Item -LiteralPath (Join-Path $repository 'harnesses/original/harness.json') -Destination (Join-Path $project 'harnesses/original')
-    foreach ($path in '.tools', 'dist', 'node_modules', '.shadowbot-switch/backends', '.shadowbot-switch/skills', '.shadowbot-switch/agent', '.shadowbot-switch/harnesses/pi/agent', '.shadowbot-switch/harnesses/pi/releases', '.shadowbot-switch/harnesses/pi/dependencies') {
+    foreach ($path in '.tools', 'dist', 'node_modules', '.shadowbot-switch/backends', '.shadowbot-switch/ui-staging', '.shadowbot-switch/skills', '.shadowbot-switch/agent', '.shadowbot-switch/harnesses/pi/agent', '.shadowbot-switch/harnesses/pi/releases', '.shadowbot-switch/harnesses/pi/dependencies') {
         New-Item -ItemType Directory -Path (Join-Path $project $path) | Out-Null
     }
     Set-Content -LiteralPath $original -Value 'fixture bundled'
@@ -65,7 +65,7 @@ try {
     $result = Uninstall-Project $project
     if (!$switched -or $result.restored -ne $agent -or (Get-Content -LiteralPath $agent) -ne 'fixture bundled') { throw 'Bundled backend or executable was not restored.' }
     if (!(Test-Path -LiteralPath (Join-Path $commands.FullName 'skill-user.md'))) { throw 'User command was removed.' }
-    foreach ($path in (Join-Path $state 'harnesses/pi/releases'), (Join-Path $state 'harnesses/pi/dependencies'), $generated, $locator, $original, (Join-Path $state 'install.json'), (Join-Path $project '.tools'), (Join-Path $project 'dist'), (Join-Path $project 'node_modules'), (Join-Path $project 'harnesses/original/node_modules')) {
+    foreach ($path in (Join-Path $state 'ui-staging'), (Join-Path $state 'harnesses/pi/releases'), (Join-Path $state 'harnesses/pi/dependencies'), $generated, $locator, $original, (Join-Path $state 'install.json'), (Join-Path $project '.tools'), (Join-Path $project 'dist'), (Join-Path $project 'node_modules'), (Join-Path $project 'harnesses/original/node_modules')) {
         if (Test-Path -LiteralPath $path) { throw "Left behind: $path" }
     }
     foreach ($name in 'backends', 'skills', 'agent', 'harnesses/pi/agent') {

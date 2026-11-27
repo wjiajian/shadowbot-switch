@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { UserError } from './errors.js';
 import { harnessID } from './harnesses.js';
@@ -54,8 +54,14 @@ export function readJson<T>(path: string): T {
 export function atomicWrite(path: string, data: string | Buffer) {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, data, { flag: 'wx', flush: true });
-  renameSync(temporary, path);
+  const fd = openSync(temporary, 'wx');
+  try {
+    try { writeFileSync(fd, data); fsyncSync(fd); } finally { closeSync(fd); }
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
 }
 
 export function ownsAgent(home: string, install: Installation) {

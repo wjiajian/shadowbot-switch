@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
 import type { BigIntStats } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { appConfigDirectory, outsideWorkspace } from './config-paths.js';
 
 export const maxRuleBytes = 32 * 1024;
@@ -51,15 +52,18 @@ function readRules(path: string, root: string) {
   } finally { closeSync(fd); }
 }
 
+export function ruleCandidates(agentDir?: string, root?: string) {
+  return [
+    ...(agentDir ? [{ scope: 'Installation', root: agentDir, paths: [join(agentDir, 'AGENTS.md')] }] : []),
+    ...(root ? [{ scope: 'Application', root, paths: [join(root, 'AGENTS.md'), join(appConfigDirectory(root), 'AGENTS.md')] }] : []),
+  ];
+}
+
 export function loadAgentRules(agentDir: string | undefined, root?: string) {
   const files: RuleFile[] = [];
   const warnings: string[] = [];
   const seen = new Set<string>();
-  const sources = [
-    ...(agentDir ? [{ scope: 'Installation', root: agentDir, paths: [join(agentDir, 'AGENTS.md')] }] : []),
-    ...(root ? [{ scope: 'Application', root, paths: [join(root, 'AGENTS.md'), join(appConfigDirectory(root), 'AGENTS.md')] }] : []),
-  ];
-  for (const source of sources) {
+  for (const source of ruleCandidates(agentDir, root)) {
     for (const path of source.paths) {
       try {
         if (!lstatSync(path, { throwIfNoEntry: false })) continue;
@@ -89,4 +93,64 @@ export function agentRules(agentDir: string, root: string) {
   const result = loadAgentRules(agentDir, root);
   for (const warning of result.warnings) console.error(`AGENTS.md: ${warning}；本轮已跳过该规则文件。`);
   return result.instructions;
+}
+
+export function inspectRuleFile(path: string, root: string, previewLimit = 64 * 1024) {
+  const result = { exists: false, link: false, readonlyReason: null as string | null, bytes: 0,
+    sha256: 'absent', utf8Valid: true, tooLarge: false, bom: false, eol: 'none', content: '', preview: '' };
+  try {
+    if (lstatSync(root, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      return { ...result, exists: !!lstatSync(path, { throwIfNoEntry: false }), link: true, readonlyReason: 'link' };
+    }
+    let parent = root;
+    for (const part of relative(root, path).split(sep).slice(0, -1)) {
+      parent = join(parent, part);
+      const stat = lstatSync(parent, { throwIfNoEntry: false });
+      if (stat?.isSymbolicLink()) { result.link = true; result.readonlyReason = 'link'; }
+      else if (stat && !stat.isDirectory()) return { ...result, readonlyReason: 'not-file' };
+    }
+    const info = lstatSync(path, { throwIfNoEntry: false });
+    if (!info) return result;
+    result.exists = true;
+    result.link ||= info.isSymbolicLink();
+    if (result.link) result.readonlyReason = 'link';
+    const canonical = realpathSync.native(path);
+    if (outsideWorkspace(relative(realpathSync.native(root), canonical))) return { ...result, link: true, readonlyReason: 'link' };
+    const initial = statSync(canonical, { bigint: true });
+    if (!initial.isFile()) return { ...result, readonlyReason: result.readonlyReason ?? 'not-file' };
+    const fd = openSync(canonical, 'r');
+    try {
+      const before = fstatSync(fd, { bigint: true });
+      const hash = createHash('sha256'), decoder = new TextDecoder('utf-8', { fatal: true });
+      const chunk = Buffer.alloc(64 * 1024);
+      const sample = Buffer.alloc(Math.min(Number(initial.size), Math.max(maxRuleBytes, previewLimit)));
+      let size = 0, lf = false, crlf = false, loneCR = false, pendingCR = false;
+      while (size <= Number(initial.size)) {
+        const n = readSync(fd, chunk, 0, Math.min(chunk.length, Number(initial.size) - size + 1), null);
+        if (!n) break;
+        const bytes = chunk.subarray(0, n);
+        hash.update(bytes);
+        if (size < sample.length) bytes.copy(sample, size);
+        for (const byte of bytes) {
+          if (byte === 10) {
+            if (pendingCR) crlf = true; else lf = true;
+          } else if (pendingCR) loneCR = true;
+          pendingCR = byte === 13;
+        }
+        if (result.utf8Valid) try { decoder.decode(bytes, { stream: true }); } catch { result.utf8Valid = false; }
+        size += n;
+      }
+      try { decoder.decode(); } catch { result.utf8Valid = false; }
+      if (size !== Number(initial.size) || !unchanged(before, fstatSync(fd, { bigint: true })) ||
+        realpathSync.native(path) !== canonical || !unchanged(initial, statSync(canonical, { bigint: true }))) throw new Error();
+      result.bytes = size;
+      result.sha256 = hash.digest('hex');
+      result.tooLarge = size > maxRuleBytes;
+      result.bom = sample.subarray(0, 3).equals(Buffer.from([239, 187, 191]));
+      result.eol = loneCR || pendingCR || (lf && crlf) ? 'mixed' : crlf ? 'crlf' : lf ? 'lf' : 'none';
+      if (result.utf8Valid && !result.tooLarge) result.content = new TextDecoder().decode(sample);
+      else result.preview = new TextDecoder().decode(sample.subarray(0, previewLimit));
+    } finally { closeSync(fd); }
+  } catch { result.readonlyReason ??= 'unreadable'; }
+  return result;
 }

@@ -3,8 +3,8 @@ import type { Prompt } from './adapter.js';
 import { RequestError } from './errors.js';
 import type { HostConfig } from './config.js';
 
-export function thinkingEnabled(harness: string, config: HostConfig['value'], capabilities?: Capabilities) {
-  return (capabilities?.thinking ?? harness === 'pi') && !config.command?.thinking;
+export function thinkingEnabled(harness: string, config: HostConfig['value'], capabilities?: Capabilities, settings?: { thinkingCommand?: boolean }) {
+  return (capabilities?.thinking ?? harness === 'pi') && !config.command?.thinking && settings?.thinkingCommand !== false;
 }
 
 export const thinkingCommands = {

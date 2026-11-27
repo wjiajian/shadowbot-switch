@@ -145,3 +145,18 @@ test('managed doctor requires an executable and a valid project locator', t => {
   rmSync(locator);
   assert.equal(active(), '失败');
 });
+
+test('editing an application backup manifest cannot redirect it to another application', t => {
+  const { root, home, app, ok, run } = setup(t);
+  const bundle = join(root, 'package.json'), target = join(app, '.shadowbot-switch', 'AGENTS.md');
+  put(bundle, { format: 'shadowbot-switch-config', version: 1, entries: [{ path: 'agent/AGENTS.md', data: 'b2xk' }] });
+  const { backup } = ok('config', 'import', bundle, '--app', app);
+  const file = join(home, 'config-backups', backup + '.backup.json');
+  const manifest = JSON.parse(readFileSync(file));
+  const other = join(root, 'other'); mkdirSync(other);
+  manifest.scope.app = other; manifest.entries[0].target = join(other, 'AGENTS.md');
+  put(manifest.entries[0].target, 'preserve'); put(file, manifest);
+  assert.equal(run('config', 'restore', backup, '--global').status, 1);
+  assert.equal(readFileSync(manifest.entries[0].target, 'utf8'), 'preserve');
+  assert.equal(readFileSync(target, 'utf8'), 'old');
+});

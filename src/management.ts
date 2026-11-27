@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, unlinkSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, fstatSync, openSync, readSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { createInterface } from 'node:readline/promises';
 import { loadSkillsFromDir } from './skills.js';
 import { HostConfig, object } from './config.js';
@@ -11,10 +12,14 @@ import { atomicWrite, mode, ownsAgent, readJson, installedVersion } from './inst
 import type { Installation } from './installation.js';
 import { customMcp, mcpInventory, mergeMcpEntry, validateCustomMcp } from './mcp-config.js';
 import { HarnessRegistry, harnessCapabilities, loadAdapter } from './harnesses.js';
-import { appConfigDirectory, appConfigDirectories, appConfigFiles } from './config-paths.js';
+import { configPathStat, within, appConfigDirectory, appConfigDirectories, appConfigFiles } from './config-paths.js';
 import { runtimeStates } from './runtime-state.js';
-import { skillInventory, userSettings, validateUserSettings, settingsFromFiles } from './shadowbot.js';
+import { installationThinkingSetting, skillInventory, userSettings, validateUserSettings, settingsFromFiles } from './shadowbot.js';
 import { syncSkillCommands } from './skill-commands.js';
+import { applicationList, editApplication } from './app-registry.js';
+export { applicationList } from './app-registry.js';
+import { backupScope, createBackup, listBackups, restoreBackup } from './config-backups.js';
+import { appThinkingWarnings, editRules, ruleLayers, saveSettings, showSettings } from './config-editor.js';
 import { thinkingEnabled } from './thinking-command.js';
 import { verifySchema } from './switch.js';
 import { decodeRuleContent, loadAgentRules } from './agent-rules.js';
@@ -36,7 +41,14 @@ const help = `ShadowBot Switch
   config open [mcp|skills]     创建并打开配置文件
   config check                检查配置及路径
   config export <文件>        导出安装级或所选应用配置
-  config import <文件> [--replace]
+  config import <文件> [--replace] [--dry-run]
+  config backups [--limit n] [--offset n]
+  config restore <备份编号> [--dry-run]
+  rules show / settings show   查看规则或授权设置
+  rules save|remove --scope installation|application --expect <摘要|absent>（保存加 --from <文件>）
+  settings save --from <补丁文件> --expect <摘要|absent>
+  apps add|remove <应用路径>    管理手动添加的应用
+  log [--limit n] [--offset n] 查看最近切换
   apps [list|select|clear]     选择并记住应用；clear 恢复安装级范围
   update [harness]            更新指定或当前 harness，保持当前选择
   repair                      修复本项目搬迁后的定位，再完成待恢复操作
@@ -54,8 +66,8 @@ function options(input: string[]): Options {
     const token = input[i];
     if (!token.startsWith('--')) { result.args.push(token); continue; }
     const [key, inline] = token.slice(2).split(/=(.*)/s, 2);
-    if (['json', 'global', 'replace'].includes(key)) { result.flags.add(key); continue; }
-    if (!['app', 'url', 'command', 'arg', 'cwd', 'permission'].includes(key)) throw new UserError(`未知选项 ${token}。运行 help 查看用法。`);
+    if (['json', 'global', 'replace', 'dry-run'].includes(key)) { result.flags.add(key); continue; }
+    if (!['app', 'url', 'command', 'arg', 'cwd', 'permission', 'scope', 'from', 'expect', 'limit', 'offset'].includes(key)) throw new UserError(`未知选项 ${token}。运行 help 查看用法。`);
     const value = inline ?? input[++i];
     if (value === undefined) throw new UserError(`${token} 需要一个值。`);
     result.values.set(key, [...(result.values.get(key) ?? []), value]);
@@ -144,20 +156,13 @@ function menuSync(home: string, install: Installation) {
   try { harness = registry.selected(mode(home)); }
   catch { return { added: 0, updated: 0, removed: 0 }; }
   return syncSkillCommands(install.resources, harnessCapabilities(install, harness).skills
-    ? skillRows(home, install).filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, thinkingEnabled(harness.id, new HostConfig().value, harnessCapabilities(install, harness)));
+    ? skillRows(home, install).filter(row => row.source !== 'official' && row.status === 'enabled').map(row => row.skill!) : undefined, thinkingEnabled(harness.id, new HostConfig().value, harnessCapabilities(install, harness), { thinkingCommand: installationThinkingSetting(join(home, 'agent')) }));
 }
 // One readable line instead of the full counter table; conflicts are already warned on stderr.
 function menuSummary(menu: { added: number; updated: number; removed: number }) {
   const changes = ([['新增', menu.added], ['更新', menu.updated], ['删除', menu.removed]] as const)
     .filter(([, count]) => count).map(([label, count]) => `${label} ${count} 项`);
   return changes.length ? `菜单：${changes.join('、')}，重新连接 Copilot 后显示。` : undefined;
-}
-
-export function applicationList(home: string, install: Installation) {
-  const paths = new Set(runtimeStates(home, true).map(state => state.root));
-  const directories = (path: string) => existsSync(path) ? readdirSync(path, { withFileTypes: true }).filter(entry => entry.isDirectory() && !entry.isSymbolicLink()).map(entry => join(path, entry.name)) : [];
-  for (const user of directories(install.users)) for (const app of directories(join(user, 'apps'))) paths.add(app);
-  return [...paths].filter(existsSync).sort().map(path => ({ name: basename(path), path }));
 }
 
 function safeTree(root: string, omitRootRules = false): { path: string; data: string }[] {
@@ -195,40 +200,129 @@ function applicationConfigTree(root: string) {
   return { entries: [...files.values()], warnings: rules.warnings };
 }
 
-function configPathStat(path: string) {
-  try { return lstatSync(path, { throwIfNoEntry: false }); }
-  catch (error) {
-    const code = (error as NodeJS.ErrnoException).code ?? '未知错误';
-    throw new UserError(`无法检查配置路径：${path}（${code}）。检查目录结构和读取权限。`);
-  }
-}
-
-function within(root: string, name: string) {
-  if (!name || name.includes('\\') || name.split('/').some(p => !p || p === '.' || p === '..' || /[:\x00-\x1f]/.test(p))) throw new UserError(`无效配置路径：${name}`);
-  const path = resolve(root, name);
-  if (!path.startsWith(resolve(root) + sep)) throw new UserError('配置路径越出了目标目录。');
-  let cursor = root;
-  for (const part of name.split('/')) {
-    const info = configPathStat(cursor);
-    if (info?.isSymbolicLink()) throw new UserError(`目标目录包含链接：${cursor}`);
-    if (info && !info.isDirectory()) throw new UserError(`目标路径不是目录：${cursor}`);
-    cursor = join(cursor, part);
-  }
-  if (configPathStat(path)?.isSymbolicLink()) throw new UserError(`目标文件是链接：${path}`);
-  return path;
-}
-
 function pathWarnings(value: unknown, path = ''): string[] {
   if (typeof value === 'string' && (isAbsolute(value) || /^[A-Z]:[\\/]/i.test(value)) && !existsSync(value)) return [`${path}：路径不存在 ${value}`];
   if (Array.isArray(value)) return value.flatMap((item, i) => pathWarnings(item, `${path}[${i}]`));
   return object(value) ? Object.entries(value).flatMap(([key, item]) => pathWarnings(item, `${path}.${key}`)) : [];
 }
 
+type Bundle = { format: string; version: number; entries: { path: string; data: string }[] };
+function prepareImport(home: string, app: string | undefined, bundle: Bundle, { replace, collectConflicts }: { replace: boolean; collectConflicts: boolean }) {
+  const conflicts: string[] = [];
+  if (!bundle || bundle.format !== 'shadowbot-switch-config' || bundle.version !== 1 || !Array.isArray(bundle.entries)) throw new UserError('不是支持的 ShadowBot Switch 配置包。');
+  const seen = new Set<string>();
+  const importedWarnings: string[] = [];
+  const prepared = bundle.entries.map(entry => {
+    if (!entry || typeof entry.path !== 'string' || typeof entry.data !== 'string' || !/^(skills|agent)\//.test(entry.path)) throw new UserError('配置包中存在无效文件。');
+    const isRule = entry.path.toLowerCase() === 'agent/agents.md';
+    const normalized = isRule ? 'agent/AGENTS.md' : entry.path;
+    const name = app ? normalized.replace(/^agent\//, '') : normalized;
+    // Preserve the root-level convention when updating an existing app.
+    const path = app && isRule && configPathStat(join(app, 'AGENTS.md'))
+      ? within(app, name) : within(app ?? home, app ? '.shadowbot-switch/' + name : name);
+    if (seen.has(path.toLowerCase())) throw new UserError(`配置包中存在重复文件：${name}`);
+    seen.add(path.toLowerCase());
+    if (existsSync(path)) {
+      conflicts.push(path);
+      if (!replace && !collectConflicts) throw new UserError(`文件已存在：${path}。使用 --replace 时会先备份。`, 'exists');
+    }
+    if (existsSync(path) && !lstatSync(path).isFile()) throw new UserError(`配置目标不是普通文件：${path}`);
+    const data = Buffer.from(entry.data, 'base64');
+    if (isRule) {
+      try { decodeRuleContent(data); }
+      catch (error) { throw new UserError(`${name}：${error instanceof Error ? error.message : '规则内容无效'}`); }
+    }
+    if (name.toLowerCase().endsWith('.json')) {
+      let parsed: unknown;
+      try { parsed = JSON.parse(data.toString('utf8').replace(/^\uFEFF/, '')); } catch { throw new UserError(`导入文件 JSON 无效：${name}`); }
+      if (basename(name).toLowerCase() === 'shadowbot.json') validateUserSettings(parsed, name);
+      if (basename(name).toLowerCase() === 'mcp.json') {
+        if (!object(parsed) || !object(parsed.mcpServers)) throw new UserError(`${name} 必须包含 mcpServers 对象。`);
+        const inherited = app ? mcpInventory([join(home, 'agent', 'mcp.json'), ...appConfigFiles(app, 'mcp.json').filter(file => file !== path)]).entries : new Map();
+        for (const [server, raw] of Object.entries(parsed.mcpServers)) {
+          const base = inherited.get(server);
+          validateCustomMcp(server, mergeMcpEntry(base, raw));
+        }
+      }
+      importedWarnings.push(...pathWarnings(parsed, name));
+    }
+    const kind = isRule ? 'rules' : basename(name) === 'shadowbot.json' ? 'settings' :
+      basename(name) === 'mcp.json' ? 'mcp' : entry.path.split('/').includes('skills') ? 'skill' : 'other';
+    return { path, name, kind, data, previous: existsSync(path) ? readFileSync(path) : undefined };
+  });
+  // A package cannot create a file and a child of that same file.
+  for (const path of seen) {
+    for (let p = dirname(path); p !== dirname(p); p = dirname(p)) {
+      if (seen.has(p)) throw new UserError('配置包中的文件路径互相重叠。');
+    }
+  }
+  return { prepared, importedWarnings, conflicts };
+}
+
+function pageNumber(value: string | undefined, fallback: number, min: number, max: number) {
+  if (value === undefined) return fallback;
+  const n = Number(value);
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(n) || n < min || n > max) throw new UserError('分页参数超出范围。');
+  return n;
+}
+
+function switchLog(home: string, limit: number, offset: number) {
+  const file = within(home, 'switch-log.jsonl');
+  let lines: string[] = [];
+  if (existsSync(file)) {
+    const fd = openSync(file, 'r');
+    try {
+      const size = fstatSync(fd).size, start = Math.max(0, size - 4 * 1024 * 1024);
+      const bytes = Buffer.alloc(size - start);
+      let pos = 0;
+      while (pos < bytes.length) {
+        const n = readSync(fd, bytes, pos, bytes.length - pos, start + pos);
+        if (!n) break;
+        pos += n;
+      }
+      lines = bytes.toString('utf8', 0, pos).split('\n');
+      if (start) lines.shift();
+      if (lines.at(-1) === '') lines.pop();
+    } finally { closeSync(fd); }
+  }
+  let skipped = 0;
+  const entries = lines.reverse().flatMap(line => {
+    try {
+      const { at, action, from, to } = JSON.parse(line);
+      if ([at, action, from, to].every(v => typeof v === 'string' && v)) return [{ at, action, from, to }];
+    } catch { /* count incomplete records below */ }
+    skipped++;
+    return [];
+  });
+  return { limit, offset, skipped, total: entries.length, entries: entries.slice(offset, offset + limit) };
+}
+
 export async function manage(home: string, install: Installation, input: string[]) {
   const opts = options(input);
+  // Existing launchers forward the config namespace to this management process.
+  if (opts.args[0] === 'config' && ['rules', 'settings', 'log'].includes(opts.args[1])) opts.args.shift();
+  const [command, action] = opts.args;
+  if (opts.flags.has('dry-run') && !(command === 'config' && ['restore', 'import'].includes(action))) {
+    throw new UserError('--dry-run 只支持 config import 或 config restore。');
+  }
+  const writesConfig = (['skills', 'mcp', 'apps', 'rules', 'settings'].includes(command) &&
+    ['add', 'enable', 'disable', 'save', 'remove'].includes(action)) ||
+    (command === 'config' && ['open', 'import', 'restore'].includes(action) && !opts.flags.has('dry-run'));
+  if (!writesConfig) return manageOptions(home, install, opts);
+  // Serialize CLI and web writers across processes. SQLite releases the lock on
+  // process exit, including a crash between comparing --expect and the rename.
+  mkdirSync(home, { recursive: true });
+  const lock = new DatabaseSync(within(home, 'config-lock.sqlite'));
+  try {
+    lock.exec('PRAGMA busy_timeout=5000; BEGIN IMMEDIATE');
+    return await manageOptions(home, install, opts);
+  } finally { lock.close(); }
+}
+
+async function manageOptions(home: string, install: Installation, opts: Options) {
   const [command, action = 'list', target] = opts.args;
   let app: string | undefined, appError: unknown;
-  try { app = ['skills', 'mcp', 'config', 'doctor'].includes(command) ? selectedApp(home, opts) : undefined; }
+  try { app = ['skills', 'mcp', 'config', 'doctor', 'rules', 'settings'].includes(command) ? selectedApp(home, opts) : undefined; }
   catch (error) { if (command !== 'doctor') throw error; appError = error; }
   const directory = app ? appConfigDirectory(app) : join(home, 'agent');
   const registry = new HarnessRegistry();
@@ -243,12 +337,20 @@ export async function manage(home: string, install: Installation, input: string[
       human(value);
     }
   };
+  const option = (key: string) => opts.values.get(key)?.at(-1);
+  const dryRun = opts.flags.has('dry-run'), replace = opts.flags.has('replace');
+  const offset = () => pageNumber(option('offset'), 0, 0, Number.MAX_SAFE_INTEGER);
   const settingsFile = join(directory, 'shadowbot.json');
   const mcpFile = join(directory, 'mcp.json');
-  const changed = (message: string) => {
-    const menu = menuSync(home, install);
+  const changed = (message: string, details: Record<string, unknown> = {}) => {
+    let menu;
+    try { menu = menuSync(home, install); }
+    catch (error) {
+      emit({ ...details, message, menu: null, next: '配置已写入，菜单同步失败。修复配置后运行 reload。', errorDetail: userMessage(error) });
+      return;
+    }
     const next = menu.added + menu.updated + menu.removed ? '下一轮读取最新配置；重新连接 Copilot 刷新 / 菜单。' : '应用空闲后的下一轮自动生效。';
-    if (json) { emit({ message, menu, next }); return; }
+    if (json) { emit({ message, menu, next, ...details }); return; }
     say(message);
     say(`范围：${app ?? '此安装下的所有应用'}`);
     const summary = menuSummary(menu);
@@ -256,16 +358,32 @@ export async function manage(home: string, install: Installation, input: string[
     say('下一轮对话生效。');
   };
   if (command === 'help') { console.log(help); return; }
+  if (command === 'rules') {
+    if (action === 'show') emit({ layers: ruleLayers(home, app) });
+    else if (action === 'save' || action === 'remove') emit(editRules(home, app, option('scope'), option('from'), option('expect'), action === 'remove'));
+    else throw new UserError('rules 支持 show、save、remove。');
+    return;
+  }
+  if (command === 'settings') {
+    if (action === 'show') {
+      const harness = selected(), caps = harnessCapabilities(install, harness);
+      emit(showSettings(home, app, caps.thinking ?? harness.id === 'pi', !!new HostConfig().value.command?.thinking));
+    } else if (action === 'save') changed('已保存设置。', saveSettings(home, app, required(option('from'), '补丁文件'), option('expect')));
+    else throw new UserError('settings 支持 show、save。');
+    return;
+  }
+  if (command === 'log') { emit(switchLog(home, pageNumber(option('limit'), 50, 1, 500), offset()), null); return; }
   if (command === 'status') {
     const harness = selected();
     const capabilities = harnessCapabilities(install, harness);
     const states = runtimeStates(home);
     const backend = `${harness.name} ${installedVersion(install, harness.id) ?? harness.version ?? ''}`.trim();
     const recoveryPending = ['activation.pending.json', 'switch.pending.json'].some(file => existsSync(join(home, file)));
-    const configuration = (s: typeof states[number]) => s.configurationError || Object.keys(s.errors).length ? '失败（原可用连接已保留）' : s.pending ? '待应用' : '已应用';
+    const configuration = (s: typeof states[number]) => s.configurationError || Object.keys(s.errors ?? {}).length ? '失败（原可用连接已保留）' : s.pending ? '待应用' : '已应用';
     if (json) {
       emit({ harness: harness.id, backend, capabilities, recoveryPending,
-        applications: states.map(s => ({ app: s.root, active: s.active, configuration: configuration(s), errors: s.errors })),
+        applications: states.map(s => ({ app: s.root, pid: s.pid, live: s.live, pending: s.pending, updated: s.updated, harness: s.harness ?? null, mcp: s.mcp ?? {},
+          configurationError: s.configurationError ?? null, menuReconnect: s.menuReconnect ?? false, active: s.active ?? 0, configuration: configuration(s), errors: s.errors ?? {} })),
         next: '运行 doctor 查看完整诊断；use <harness> 切换后端。' });
       return;
     }
@@ -278,7 +396,7 @@ export async function manage(home: string, install: Installation, input: string[
       for (const s of states) {
         say(`  ${s.root}  配置${configuration(s)}${s.active ? '，正在处理请求' : ''}`);
         if (s.configurationError) say(`    ${s.configurationError}`);
-        for (const [name, error] of Object.entries(s.errors)) say(`    ${name}：${error}`);
+        for (const [name, error] of Object.entries(s.errors ?? {})) say(`    ${name}：${error}`);
       }
     }
     say('完整诊断：.\\switch.ps1 doctor');
@@ -292,10 +410,11 @@ export async function manage(home: string, install: Installation, input: string[
     return;
   }
   if (command === 'apps') {
+    if (action === 'add' || action === 'remove') { emit(editApplication(home, install, required(target, '应用路径'), action === 'add'), null); return; }
     if (action === 'clear') { writeJson(join(home, 'preferences.json'), {}); emit('已恢复默认范围：此安装下的所有应用。', null); return; }
     const apps = applicationList(home, install);
     if (action === 'list') { emit(apps, '影刀应用：'); return; }
-    if (action !== 'select') throw new UserError('apps 支持 list、select、clear。');
+    if (action !== 'select') throw new UserError('apps 支持 list、select、clear、add、remove。');
     let chosen = target;
     if (!chosen) {
       if (!process.stdin.isTTY) throw new UserError('请使用 apps select <应用路径>，或在交互终端中选择。');
@@ -350,16 +469,8 @@ export async function manage(home: string, install: Installation, input: string[
       const roots = app ? appConfigDirectories(app) : [home, join(home, 'agent')];
       const sources = roots.map(root => within(root, `skills/${name}`)).filter(existsSync);
       if (!sources.length) throw new UserError(`当前范围没有此 Skill：${name}。`);
-      const backup = join(home, 'config-backups', randomUUID());
-      const moved: { source: string; destination: string }[] = [];
-      try {
-        for (const [index, source] of sources.entries()) {
-          const destination = join(backup, String(index), name);
-          mkdirSync(dirname(destination), { recursive: true });
-          renameSync(source, destination);
-          moved.push({ source, destination });
-        }
-      } catch (error) { for (const item of moved.reverse()) renameSync(item.destination, item.source); throw error; }
+      const { path: backup } = createBackup(home, { kind: 'skill-remove', scope: backupScope(app),
+        entries: sources.map((target, i) => ({ target, stored: `${i}/${name}`, type: 'directory' })) }, true);
       changed(`已移除 ${name}，备份保留在 ${backup}`);
       return;
     }
@@ -377,7 +488,7 @@ export async function manage(home: string, install: Installation, input: string[
   }
   if (command === 'mcp') {
     if (action === 'status') {
-      emit(runtimeStates(home).filter(s => !app || s.root.toLowerCase() === app.toLowerCase()).map(s => ({ app: s.root, pid: s.pid, configuration: s.configurationError ?? (Object.keys(s.errors).length ? '部分配置失败，保留原连接' : s.pending ? '待应用' : '已应用'), mcp: s.mcp, errors: s.errors })), '正在运行的 Copilot 状态（最多延迟 2 秒）');
+      emit(runtimeStates(home).filter(s => !app || s.root.toLowerCase() === app.toLowerCase()).map(s => ({ app: s.root, pid: s.pid, configuration: s.configurationError ?? (Object.keys(s.errors ?? {}).length ? '部分配置失败，保留原连接' : s.pending ? '待应用' : '已应用'), mcp: s.mcp, errors: s.errors })), '正在运行的 Copilot 状态（最多延迟 2 秒）');
       return;
     }
     const entries = customMcp(join(home, 'agent'), app);
@@ -435,8 +546,8 @@ export async function manage(home: string, install: Installation, input: string[
         return [{ path, previous, value }];
       });
       if (!changes.length) throw new UserError(`当前范围没有 ${name}；若继承自安装级，可使用 disable。`);
-      const backup = join(home, 'config-backups', randomUUID());
-      for (const [index, item] of changes.entries()) atomicWrite(join(backup, String(index), 'mcp.json'), item.previous);
+      const { path: backup } = createBackup(home, { kind: 'mcp-remove', scope: backupScope(app),
+        entries: changes.map((e, i) => ({ target: e.path, stored: `${i}/mcp.json`, type: 'file' })) });
       const applied: typeof changes = [];
       try { for (const item of changes) { writeJson(item.path, item.value); applied.push(item); } }
       catch (error) { for (const item of applied.reverse()) atomicWrite(item.path, item.previous); throw error; }
@@ -448,6 +559,13 @@ export async function manage(home: string, install: Installation, input: string[
     return;
   }
   if (command === 'config') {
+    if (action === 'backups') { emit(listBackups(home, { limit: pageNumber(option('limit'), 20, 1, 100), offset: offset() }), null); return; }
+    if (action === 'restore') {
+      const result = restoreBackup(home, required(target, '备份编号'), { dryRun });
+      if ('message' in result && result.message) changed(result.message, result);
+      else emit(result, null);
+      return;
+    }
     if (action === 'open') {
       if (target && !['mcp', 'skills'].includes(target)) throw new UserError('config open 支持 mcp 或 skills。');
       const path = target === 'skills' ? settingsFile : mcpFile;
@@ -463,6 +581,7 @@ export async function manage(home: string, install: Installation, input: string[
       const entries = customMcp(join(home, 'agent'), app);
       for (const [name, value] of entries) validateCustomMcp(name, value);
       const warnings = [...entries].flatMap(([name, raw]) => pathWarnings(raw, name));
+      warnings.push(...appThinkingWarnings(app));
       warnings.push(...loadAgentRules(join(home, 'agent'), app).warnings);
       const errors = skillRows(home, install, app).filter(row => row.status === 'invalid').map(({ path, reason }) => ({ path, reason }));
       if (json) emit({ valid: !errors.length && !warnings.length, warnings, skills: errors });
@@ -505,44 +624,15 @@ export async function manage(home: string, install: Installation, input: string[
       return;
     }
     if (action === 'import') {
-      const bundle = readJson<{ format: string; version: number; entries: { path: string; data: string }[] }>(resolve(required(target, '导入文件路径')));
-      if (bundle.format !== 'shadowbot-switch-config' || bundle.version !== 1 || !Array.isArray(bundle.entries)) throw new UserError('不是支持的 ShadowBot Switch 配置包。');
-      const seen = new Set<string>();
-      const importedWarnings: string[] = [];
-      const prepared = bundle.entries.map(entry => {
-        if (typeof entry.path !== 'string' || typeof entry.data !== 'string' || !/^(skills|agent)\//.test(entry.path)) throw new UserError('配置包中存在无效文件。');
-        const isRule = entry.path.toLowerCase() === 'agent/agents.md';
-        const normalized = isRule ? 'agent/AGENTS.md' : entry.path;
-        const name = app ? normalized.replace(/^agent\//, '') : normalized;
-        // Preserve the root-level convention when updating an existing app.
-        const path = app && isRule && configPathStat(join(app, 'AGENTS.md'))
-          ? within(app, name) : within(app ? directory : home, name);
-        if (seen.has(path.toLowerCase())) throw new UserError(`配置包中存在重复文件：${name}`);
-        seen.add(path.toLowerCase());
-        if (existsSync(path) && !opts.flags.has('replace')) throw new UserError(`文件已存在：${path}。使用 --replace 时会先备份。`);
-        const data = Buffer.from(entry.data, 'base64');
-        if (isRule) {
-          try { decodeRuleContent(data); }
-          catch (error) { throw new UserError(`${name}：${error instanceof Error ? error.message : '规则内容无效'}`); }
-        }
-        if (name.endsWith('.json')) {
-          let parsed: unknown;
-          try { parsed = JSON.parse(data.toString('utf8').replace(/^\uFEFF/, '')); } catch { throw new UserError(`导入文件 JSON 无效：${name}`); }
-          if (basename(name) === 'shadowbot.json') validateUserSettings(parsed, name);
-          if (basename(name) === 'mcp.json') {
-            if (!object(parsed) || !object(parsed.mcpServers)) throw new UserError(`${name} 必须包含 mcpServers 对象。`);
-            const inherited = app ? mcpInventory([join(home, 'agent', 'mcp.json'), ...appConfigFiles(app, 'mcp.json').filter(file => file !== path)]).entries : new Map();
-            for (const [server, raw] of Object.entries(parsed.mcpServers)) {
-              const base = inherited.get(server);
-              validateCustomMcp(server, mergeMcpEntry(base, raw));
-            }
-          }
-          importedWarnings.push(...pathWarnings(parsed, name));
-        }
-        return { path, name, data, previous: existsSync(path) ? readFileSync(path) : undefined };
-      });
-      const backup = join(home, 'config-backups', randomUUID());
-      for (const entry of prepared) if (entry.previous) atomicWrite(join(backup, entry.name), entry.previous);
+      const bundle = readJson<Bundle>(resolve(required(target, '导入文件路径')));
+      const { prepared, importedWarnings, conflicts } = prepareImport(home, app, bundle, { replace, collectConflicts: dryRun });
+      if (dryRun) {
+        emit({ dryRun, replace, conflicts, warnings: importedWarnings, files: prepared.map(e => ({
+          path: e.path, name: e.name, action: e.previous ? 'overwrite' : 'create', kind: e.kind, bytes: e.data.length })) });
+        return;
+      }
+      const { path: backup, id } = createBackup(home, { kind: 'import', scope: backupScope(app),
+        entries: prepared.map(e => ({ target: e.path, stored: e.name, type: 'file' })) });
       const applied: typeof prepared = [];
       try {
         for (const entry of prepared) { atomicWrite(entry.path, entry.data); applied.push(entry); }
@@ -552,7 +642,7 @@ export async function manage(home: string, install: Installation, input: string[
         }
         throw new UserError(`导入写入失败，已恢复原配置。检查目录权限。备份：${backup}`);
       }
-      changed(`已导入 ${prepared.length} 个文件。覆盖前备份：${backup}。${importedWarnings.length ? importedWarnings.join('\n') : '绝对路径检查通过。'}`);
+      changed(`已导入 ${prepared.length} 个文件。覆盖前备份：${backup}。${importedWarnings.length ? importedWarnings.join('\n') : '绝对路径检查通过。'}`, { backup: id, warnings: importedWarnings });
       return;
     }
     throw new UserError('config 支持 open、check、export、import。');

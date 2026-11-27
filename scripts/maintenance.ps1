@@ -205,7 +205,7 @@ function Uninstall-Project($Project, [string]$ShadowBotDirectory, [switch]$Wait,
                     }
                 }
                 if ($restored) { $paths += Join-Path $state 'original' }
-                foreach ($name in 'releases', 'running', 'host-skills', 'shadowbot-pi.exe', 'backend.json', 'prepared.json', 'activation.pending.json', 'switch.pending.json') {
+                foreach ($name in 'releases', 'running', 'ui-staging', 'config-lock.sqlite', 'host-skills', 'shadowbot-pi.exe', 'backend.json', 'prepared.json', 'activation.pending.json', 'switch.pending.json') {
                     $paths += Join-Path $state $name
                 }
             }

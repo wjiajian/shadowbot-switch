@@ -84,7 +84,7 @@ flowchart LR
 
 ## 图形界面
 
-不想记命令时，可以用图形界面管理 Skill、MCP 和 harness：
+不想记命令时，可以用本地图形界面管理 harness 和日常配置：
 
 ```powershell
 .\ui.ps1                 # 或 .\switch.ps1 ui，菜单里按 u
@@ -93,7 +93,11 @@ flowchart LR
 
 - **Harness**：安装、切换、更新，切换时显示进度和日志，等待影刀退出时可以停止。首次安装前可以修改影刀安装目录。
 - **Skills / MCP**：按范围查看、启用、停用、添加、移除；MCP 可以单独测试连接。
-- **诊断**：显示未通过的检查项，AGENTS.md 的问题可以直接打开文件。
+- **规则**可编辑安装级和应用级 AGENTS.md，显示 UTF-8 字节数、换行方式和生效路径。保存前会检查文件是否已被其他程序修改。
+- **配置**可调整 MCP 授权顺序和安装级 `/thinking` 开关、预览导入、下载配置包、恢复备份和管理应用路径。
+- **诊断**列出检查结果、运行实例的 PID、配置应用情况、MCP 错误和最近的切换记录。
+
+已有安装更新源码后，运行 `.\switch.ps1 update <托管 harness> --wait` 重建运行时，新的界面命令随运行时生效。
 
 ## 日常命令
 
@@ -104,6 +108,7 @@ flowchart LR
 .\switch.ps1 update [harness]   # 更新指定或当前 harness，不改变当前选择
 .\switch.ps1 reload             # 同步 Skill 菜单，安排 MCP 配置刷新
 .\switch.ps1 status             # 后端、运行中的应用和配置生效状态
+.\switch.ps1 log --limit 20 --offset 0  # 最近切换记录，最新的在前
 .\switch.ps1 doctor             # 完整诊断，每个问题附修复提示
 .\switch.ps1 ui                 # 打开图形界面
 .\switch.ps1 help               # 完整命令帮助，未安装时也可用
@@ -124,12 +129,14 @@ flowchart LR
 默认管理**此安装下的所有应用**，不会把终端所在目录当成影刀应用。应用级配置优先于安装级。
 
 ```powershell
+.\switch.ps1 apps add 'D:\Path\To\App'     # 登记手动路径
 .\switch.ps1 apps list
+.\switch.ps1 apps remove 'D:\Path\To\App'  # 仅移除登记
 .\switch.ps1 apps select 'D:\Path\To\App'  # 记住此应用，后续命令沿用
 .\switch.ps1 apps clear                    # 恢复安装级默认范围
 ```
 
-`apps select` 不带路径时可交互选择。应用列表来自已登记的运行实例和当前影刀用户目录。新配置写入应用下的 `.shadowbot-switch/`；旧版的 `.pi/` 配置继续读取，同名时新目录优先。
+`apps select` 不带路径时可交互选择。应用列表汇总运行实例、影刀用户目录和手动添加的路径。`apps clear` 清除选择，手动登记会保留。新配置写入应用下的 `.shadowbot-switch/`；旧版的 `.pi/` 配置继续读取，同名时新目录优先。
 
 ## Skills
 
@@ -169,6 +176,8 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 
 可选档位取决于模型，非推理模型只支持 `off`。切换模型后，如果原档位不受支持，请求会提示你用 `/thinking` 重新设置。
 
+在配置页的安装级设置中可关闭 `/thinking`，对应 `.shadowbot-switch/agent/shadowbot.json` 中的 `"thinkingCommand": false`。关闭后会移除生成的菜单项，直接发送的 `/thinking high` 会作为普通消息处理。应用级同名字段只会产生提示。
+
 首次使用需执行 `.\switch.ps1 update pi --wait` 更新运行时。如果 `/` 菜单里仍然没有 `thinking`，重新连接 Copilot 即可。已有同名的自定义 `thinking` 命令时，菜单入口优先使用你自己的。
 
 ## MCP
@@ -202,6 +211,16 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 
 示例：[examples/mcp.json](examples/mcp.json) · [examples/shadowbot.json](examples/shadowbot.json)
 
+在 `mcpPermission` 中，工具名形如 `docs_search`，最后命中的授权规则生效。将默认授权 `"*"` 放在第一位，例如 `{"*":"ask","docs_*":"allow"}`。安装级、旧应用目录和当前应用目录按顺序合并，同名规则更新授权并保留原位置。配置页的“当前生效的授权规则”显示合并后的顺序。
+
+`settings show --json` 返回当前文件摘要。使用 `settings save --from patch.json --expect <摘要>` 可只修改授权和功能开关，文件不存在时传 `absent`。补丁示例：
+
+```json
+{"version":1,"mcpPermission":[{"pattern":"*","action":"ask"},{"pattern":"docs_*","action":"allow"}],"thinkingCommand":false}
+```
+
+省略字段会保留当前值。`mcpPermission: []` 清除本层授权，`thinkingCommand: null` 恢复默认开关。Skill 状态和其他字段会保留。
+
 ## AGENTS.md
 
 托管 harness（目前为 Pi）会自动加载两层规则，影刀原版 OpenCode 不使用：
@@ -214,6 +233,14 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 规则每轮对话重新读取，保存后下一轮生效，不需要 reload。主 Agent 和它发起的子 Agent（如浏览器探索）都会加载。只读取上面两个位置，不扫描父目录或子目录；规则也不会改变工具授权。
 
 规则文件须为 UTF-8，每层最多 32 KiB，不能是指向所在目录之外的链接。不符合要求的文件会整个跳过，不会截断。可用 `.\switch.ps1 config check` 或 `doctor` 检查，应用级加 `--app <应用根目录>`。`config export --app` 会一并导出应用规则。
+
+从规则页或 `rules show --json` 查看每层的生效状态和文件摘要。根目录已有 AGENTS.md 时，空文件或无效文件也会阻止回退规则生效。两处都没有时，应用级编辑器在 `.shadowbot-switch/AGENTS.md` 新建文件。
+
+```powershell
+.\switch.ps1 rules show --global --json
+.\switch.ps1 rules save --global --scope installation --from .\AGENTS.md --expect absent
+.\switch.ps1 rules remove --app 'D:\Apps\demo' --scope application --expect <摘要>
+```
 
 ## 更新与迁移
 
@@ -237,6 +264,15 @@ Skill 的内容、增删和权限在下一轮对话生效。启用 Skill 不会�
 **搬迁目录**：移动整个项目目录（包括 `.shadowbot-switch/`）后运行 `repair`。旧目录仍存在时会拒绝接管，避免两套会话混用。
 
 **换设备**：先在新设备安装，再导入配置。导出包含所选范围的配置和自定义 Skill，不含聊天库和构建缓存。导入遇到同名文件会停止；加 `--replace` 时先备份到 `.shadowbot-switch/config-backups/` 再覆盖。
+
+导入前可以加 `--dry-run` 查看全部新建、覆盖和冲突路径。实际导入、移除 Skill/MCP、覆盖或删除规则、覆盖设置时，程序会在 `config-backups/<编号>.backup.json` 记录原目标与文件类型。恢复导入可删除该次新建的文件。恢复之前也会自动备份当前状态，返回的编号可用于撤销这次恢复。旧备份没有清单，可打开目录手动取回文件。
+
+```powershell
+.\switch.ps1 config import .\config.json --global --dry-run
+.\switch.ps1 config backups --global --limit 20
+.\switch.ps1 config restore <编号> --global --dry-run
+.\switch.ps1 config restore <编号> --global
+```
 
 > [!WARNING]
 > 导出文件可能包含你填写的 MCP 凭据，请保存在私人位置。
@@ -283,7 +319,10 @@ go-mod/                     # 可选，复制自 .tools/go-work/pkg/mod/，也�
 | `.shadowbot-switch/harnesses/<id>/agent/` | 适配器专属配置（如 Pi SDK 的 agent 目录） |
 | `.shadowbot-switch/host-skills/` | 官方 Skill 联接与缓存 |
 | `.shadowbot-switch/running/` | 运行实例状态（不含凭据） |
-| `.shadowbot-switch/config-backups/` | 导入覆盖前和移除 Skill 的备份 |
+| `.shadowbot-switch/config-lock.sqlite` | 协调 CLI 和界面同时写入配置 |
+| `.shadowbot-switch/apps.json` | 手动添加的应用目录 |
+| `.shadowbot-switch/ui-staging/` | 界面编辑与导入导出的临时文件 |
+| `.shadowbot-switch/config-backups/` | 配置变更与恢复前的备份、清单和应用范围记录 |
 | `.tools/` | 构建工具和缓存 |
 
 切换只恢复对应后端的聊天历史，不恢复业务项目文件。取消聊天后，已经启动的影刀流程可能仍在运行，可以在影刀中按运行 ID 查询或停止。

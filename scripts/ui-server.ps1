@@ -58,10 +58,93 @@ function Get-UiScopeArguments($Request) {
     @('--global')
 }
 
+function Assert-UiDigest($Value) {
+    if ($Value -isnot [string] -or $Value -cnotmatch '\A(?:[0-9a-f]{64}|absent)\z') { throw '文件摘要无效。' }
+    $Value
+}
+
+function Assert-UiBackupId($Value) {
+    if ($Value -isnot [string] -or $Value -cnotmatch '\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z') { throw '备份编号无效。' }
+    $Value
+}
+
+function Assert-UiCount($Value, $Min, $Max) {
+    if (($Value -isnot [int] -and $Value -isnot [long]) -or $Value -lt $Min -or $Value -gt $Max) { throw '分页参数无效。' }
+    [string]$Value
+}
+
+function Assert-UiRuleScope($Value) {
+    if ($Value -isnot [string] -or $Value -cnotin 'installation', 'application') { throw '规则范围无效。' }
+    $Value
+}
+
+function Assert-UiIdle {
+    if ($script:Ui.Job -and !$script:Ui.Job.Done) { throw '任务运行中，结束后再保存。' }
+}
+
+function Get-UiStageDirectory {
+    $folder = Join-Path $script:Ui.State 'ui-staging'
+    foreach ($path in $script:Ui.State, $folder) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($item -and (!$item.PSIsContainer -or $item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw '暂存目录不能是链接或普通文件。' }
+    }
+    [void][IO.Directory]::CreateDirectory($folder)
+    $folder
+}
+
+function New-UiStageFile([string]$Text) {
+    try { $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes($Text) }
+    catch { throw '内容包含无法编码的字符。' }
+    $id = [Guid]::NewGuid().ToString('N')
+    $path = Join-Path (Get-UiStageDirectory) "$id.json"
+    $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew)
+    try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+    if ($null -ne $script:Ui.StageFiles) { [void]$script:Ui.StageFiles.Add($path) }
+    @{ id = $id; path = $path; bytes = $bytes.Length }
+}
+
+function Get-UiStagePath($Id) {
+    if ($Id -isnot [string] -or $Id -cnotmatch '\A[0-9a-f]{32}\z') { throw '暂存编号无效。' }
+    $path = Join-Path (Get-UiStageDirectory) "$Id.json"
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if (!$item -or $item.PSIsContainer -or $item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw '暂存文件已过期，请重新选择文件。' }
+    $path
+}
+
+function Remove-UiStageFile([string]$Path) {
+    [IO.File]::Delete($Path)
+    if ($null -ne $script:Ui.StageFiles) { [void]$script:Ui.StageFiles.Remove($Path) }
+}
+
+function Clear-UiStage([TimeSpan]$OlderThan, [switch]$OwnedOnly) {
+    if (!(Test-Path -LiteralPath (Join-Path $script:Ui.State 'ui-staging'))) { return }
+    $folder = Get-UiStageDirectory
+    foreach ($item in Get-ChildItem -LiteralPath $folder -Force -File) {
+        if ($OwnedOnly -and !$script:Ui.StageFiles.Contains($item.FullName)) { continue }
+        if ($item.Name -cmatch '\A[0-9a-f]{32}\.json\z' -and $item.LastWriteTimeUtc -le [DateTime]::UtcNow.Subtract($OlderThan)) {
+            Remove-UiStageFile $item.FullName
+        }
+    }
+}
+
 # Maps a page request onto control arguments. Anything not listed here is refused.
 function ConvertTo-UiCommand($Request) {
     $command = [string]$Request.cmd
+    if ($command -cin 'reload','skills.add','skills.enable','skills.disable','skills.remove','mcp.add','mcp.enable','mcp.disable','mcp.remove','config.open','apps.add','apps.remove','rules.remove') { Assert-UiIdle }
     switch -CaseSensitive ($command) {
+        'rules.show' { return @('rules', 'show', '--json') + (Get-UiScopeArguments $Request) }
+        'rules.remove' { return @('rules', 'remove', '--scope', (Assert-UiRuleScope $Request.scope), '--expect', (Assert-UiDigest $Request.expect), '--json') + (Get-UiScopeArguments $Request) }
+        'settings.show' { return @('settings', 'show', '--json') + (Get-UiScopeArguments $Request) }
+        'status' { return @('status', '--json') }
+        'log' { return @('log', '--limit', (Assert-UiCount ($Request.limit ?? 50) 1 500), '--offset', (Assert-UiCount ($Request.offset ?? 0) 0 ([int]::MaxValue)), '--json') }
+        'config.backups' { return @('config', 'backups', '--limit', (Assert-UiCount ($Request.limit ?? 20) 1 100), '--offset', (Assert-UiCount ($Request.offset ?? 0) 0 ([int]::MaxValue)), '--json', '--global') }
+        'config.restore' {
+            if ($Request.dryRun -isnot [bool]) { throw 'dryRun 需要布尔值。' }
+            $arguments = @('config', 'restore', (Assert-UiBackupId $Request.id))
+            if ($Request.dryRun) { $arguments += '--dry-run' } else { Assert-UiIdle }
+            return $arguments + @('--json', '--global')
+        }
+        { $_ -cin 'apps.add', 'apps.remove' } { return @('apps', $command.Split('.')[1], (Assert-UiPath $Request.path), '--json') }
         'apps' { return @('apps', 'list', '--json') }
         'reload' { return @('reload', '--json') }
         'doctor' { return @('doctor', '--json') + (Get-UiScopeArguments $Request) }
@@ -198,6 +281,8 @@ function Invoke-UiProcess([string]$FileName, [string[]]$Arguments, [int]$Timeout
 function Invoke-UiControl([string[]]$Arguments) {
     $control = Join-Path $script:Ui.State 'shadowbot-pi.exe'
     if (!(Test-Path -LiteralPath $control -PathType Leaf)) { throw '安装尚未就绪。先在 Harness 页面安装并切换。' }
+    # The installed launcher's management whitelist already accepts config.
+    if ($Arguments[0] -cin 'rules','settings','log') { $Arguments = @('config') + $Arguments }
     Invoke-UiProcess $control $Arguments 120
 }
 
@@ -276,6 +361,7 @@ function Get-UiState($Request) {
     }
     $job = $script:Ui.Job
     [ordered]@{
+        windows = $IsWindows
         installed = $installed
         canUninstall = (Test-Path -LiteralPath $state) -or (Test-Path -LiteralPath (Join-Path $project '.tools')) -or (Test-Path -LiteralPath (Join-Path $project 'dist')) -or (Test-Path -LiteralPath (Join-Path $project 'node_modules'))
         ready = $installed -and (Test-Path -LiteralPath (Join-Path $state 'shadowbot-pi.exe') -PathType Leaf)
@@ -363,7 +449,7 @@ function Get-UiJobProgress($Request) {
     }
 }
 
-function Select-UiFolder {
+function Select-UiFolder([ValidateSet('skill','app')]$Purpose = 'skill') {
     if (!$IsWindows) { throw '文件夹选择框只在 Windows 上可用，请直接填写路径。' }
     $script = @'
 try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { }
@@ -372,6 +458,7 @@ $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true }
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog -Property @{ Description = '选择包含 SKILL.md 的文件夹'; UseDescriptionForTitle = $true }
 if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath) }
 '@
+    if ($Purpose -ceq 'app') { $script = $script.Replace('选择包含 SKILL.md 的文件夹', '选择影刀应用根目录') }
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
     $result = Invoke-UiProcess (Get-Process -Id $PID).Path @('-STA', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', $encoded) 900
     $result.stdout.Trim()
@@ -427,8 +514,70 @@ function Invoke-UiUpdateCheck($Request) {
     $cache
 }
 
+function Invoke-UiSave($Command, $Request) {
+    Assert-UiIdle
+    $arguments = @($Command, 'save', '--expect', (Assert-UiDigest $Request.expect), '--json') + (Get-UiScopeArguments $Request)
+    if ($Command -ceq 'rules') {
+        $arguments += @('--scope', (Assert-UiRuleScope $Request.scope))
+        if ($Request.content -isnot [string] -or $Request.content.Length -gt 128KB) { throw '规则文本无效或过长。' }
+        $text = $Request.content
+    } else {
+        $patch = @{ version = 1 }
+        if ($Request.ContainsKey('thinkingCommand')) {
+            if ($null -ne $Request.thinkingCommand -and $Request.thinkingCommand -isnot [bool]) { throw 'thinkingCommand 需要布尔值。' }
+            $patch.thinkingCommand = $Request.thinkingCommand
+        }
+        if ($Request.ContainsKey('mcpPermission')) {
+            if ($Request.mcpPermission -isnot [array] -or $Request.mcpPermission.Count -gt 200) { throw '授权规则最多 200 条。' }
+            $patch.mcpPermission = @(foreach ($row in $Request.mcpPermission) {
+                if ($row.pattern -isnot [string] -or $row.action -isnot [string] -or $row.action -cnotin 'allow','ask','deny') { throw '授权规则无效。' }
+                @{ pattern = $row.pattern; action = $row.action }
+            })
+        }
+        $text = ConvertTo-Json -InputObject $patch -Depth 5
+    }
+    $stage = New-UiStageFile $text
+    try { Invoke-UiControl ($arguments + @('--from', $stage.path)) }
+    finally { Remove-UiStageFile $stage.path }
+}
+
 function Invoke-UiApi([string]$Path, $Request) {
     switch -CaseSensitive ($Path) {
+        '/api/rules/save' { return Invoke-UiSave 'rules' $Request }
+        '/api/settings/save' { return Invoke-UiSave 'settings' $Request }
+        '/api/config/stage' {
+            Assert-UiIdle
+            $stage = New-UiStageFile $Request.content
+            return @{ id = $stage.id; bytes = $stage.bytes }
+        }
+        '/api/config/discard' {
+            Assert-UiIdle
+            Remove-UiStageFile (Get-UiStagePath $Request.stage)
+            return @{ ok = $true }
+        }
+        '/api/config/import' {
+            if ($Request.replace -isnot [bool] -or $Request.dryRun -isnot [bool]) { throw 'replace 和 dryRun 需要布尔值。' }
+            if (!$Request.dryRun) { Assert-UiIdle }
+            $stage = Get-UiStagePath $Request.stage
+            $arguments = @('config', 'import', $stage, '--json') + (Get-UiScopeArguments $Request)
+            if ($Request.replace) { $arguments += '--replace' }
+            if ($Request.dryRun) { $arguments += '--dry-run' }
+            $result = Invoke-UiControl $arguments
+            if (!$Request.dryRun -and $result.exitCode -eq 0) { Remove-UiStageFile $stage }
+            return $result
+        }
+        '/api/config/export' {
+            Assert-UiIdle
+            $scope = @(Get-UiScopeArguments $Request)
+            $stage = New-UiStageFile ''
+            try {
+                $result = Invoke-UiControl (@('config', 'export', $stage.path, '--replace', '--json') + $scope)
+                $result.content = [IO.File]::ReadAllText($stage.path)
+                $label = if ($Request.app) { (Split-Path -Leaf $Request.app) -replace '[^\p{L}\p{N}_-]','_' } else { '全局' }
+                $result.fileName = "shadowbot-config-$label-$(Get-Date -Format 'yyyyMMdd-HHmm').json"
+                return $result
+            } finally { Remove-UiStageFile $stage.path }
+        }
         '/api/ping' { return @{ ok = $true } }
         '/api/updates/check' { return Invoke-UiUpdateCheck $Request }
         '/api/state' { return Get-UiState $Request }
@@ -439,11 +588,11 @@ function Invoke-UiApi([string]$Path, $Request) {
             if (!$script:Ui.Job -or $script:Ui.Job.Id -ne [int]$Request.id) { throw '找不到这个任务，界面服务可能已经重启。' }
             return @{ accepted = Stop-UiJob $script:Ui.Job }
         }
-        '/api/pick-folder' { return @{ path = Select-UiFolder } }
+        '/api/pick-folder' { return @{ path = Select-UiFolder ($Request.purpose ?? 'skill') } }
         '/api/skill-preview' { return @{ name = Get-UiSkillPreview $Request.path } }
         '/api/open' { Open-UiPath $Request.kind $Request.path; return @{ ok = $true } }
     }
-    throw '找不到这个接口。'
+    throw [Collections.Generic.KeyNotFoundException]::new('找不到这个接口。')
 }
 
 function Send-UiBytes($Response, [int]$Status, [string]$ContentType, [byte[]]$Bytes) {
@@ -461,6 +610,23 @@ function Send-UiJson($Response, [int]$Status, $Value) {
     Send-UiBytes $Response $Status 'application/json; charset=utf-8' ([Text.UTF8Encoding]::new($false).GetBytes($json))
 }
 
+# ConvertFrom-Json in early PowerShell 7 turns date-shaped strings into
+# DateTime and substitutes invalid surrogate pairs. Keep editor text exact.
+function Read-UiEditorStrings($Path, $Text, $Body) {
+    $doc = [Text.Json.JsonDocument]::Parse([string]$Text)
+    try {
+        if ($Path -ceq '/api/rules/save') {
+            $Body.content = $doc.RootElement.GetProperty('content').GetString()
+        } elseif ($Body.mcpPermission -is [array]) {
+            $rows = $doc.RootElement.GetProperty('mcpPermission')
+            for ($i = 0; $i -lt $Body.mcpPermission.Count; $i++) {
+                $Body.mcpPermission[$i].pattern = $rows[$i].GetProperty('pattern').GetString()
+            }
+        }
+    } catch { throw '内容包含无法编码的字符，或字段不是有效字符串。' }
+    finally { $doc.Dispose() }
+}
+
 function Invoke-UiRequest($Context) {
     $request = $Context.Request
     $response = $Context.Response
@@ -473,9 +639,18 @@ function Invoke-UiRequest($Context) {
             return
         }
         if ($request.HttpMethod -cne 'POST' -or !$path.StartsWith('/api/')) { Send-UiJson $response 404 @{ error = '找不到这个地址。' }; return }
-        if ($request.ContentLength64 -gt 1MB) { Send-UiJson $response 413 @{ error = '请求太大。' }; return }
-        $reader = [IO.StreamReader]::new($request.InputStream, [Text.UTF8Encoding]::new($false))
-        try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        if ($path -cne '/api/bye' -and !(Test-UiToken $script:Ui.Token $request.Headers['X-Token'])) { Send-UiJson $response 403 @{ error = '页面已过期，请重新运行 ui.ps1。' }; return }
+        $limit = if ($path -ceq '/api/config/stage') { 32MB } else { 1MB }
+        if ($request.ContentLength64 -gt $limit) { Send-UiJson $response 413 @{ error = '请求太大。' }; return }
+        $bodyBytes = [IO.MemoryStream]::new()
+        try {
+            $chunk = [byte[]]::new(65536)
+            while (($count = $request.InputStream.Read($chunk, 0, $chunk.Length)) -gt 0) {
+                if ($bodyBytes.Length + $count -gt $limit) { Send-UiJson $response 413 @{ error = '请求太大。' }; return }
+                $bodyBytes.Write($chunk, 0, $count)
+            }
+            $text = [Text.UTF8Encoding]::new($false, $true).GetString($bodyBytes.GetBuffer(), 0, [int]$bodyBytes.Length)
+        } finally { $bodyBytes.Dispose() }
         if ($path -ceq '/api/bye') {
             # sendBeacon cannot set headers, so the token comes as the body. A reload pings
             # again right away; a closed window lets the server stop within a few seconds.
@@ -483,11 +658,13 @@ function Invoke-UiRequest($Context) {
             Send-UiJson $response 200 @{ ok = $true }
             return
         }
-        if (!(Test-UiToken $script:Ui.Token $request.Headers['X-Token'])) { Send-UiJson $response 403 @{ error = '页面已过期，请重新运行 ui.ps1。' }; return }
         $script:Ui.LastSeen = [DateTime]::UtcNow
-        $body = if ($text.Trim()) { ConvertFrom-Json -InputObject $text -AsHashtable } else { @{} }
+        $body = if ($path -ceq '/api/config/stage') { @{ content = $text } } elseif ($text.Trim()) { ConvertFrom-Json -InputObject $text -AsHashtable } else { @{} }
         if ($body -isnot [Collections.IDictionary]) { throw '请求格式无效。' }
+        if ($path -cin '/api/rules/save', '/api/settings/save') { Read-UiEditorStrings $path $text $body }
         Send-UiJson $response 200 (Invoke-UiApi $path $body)
+    } catch [Collections.Generic.KeyNotFoundException] {
+        Send-UiJson $response 404 @{ error = $_.Exception.Message }
     } catch {
         try { Send-UiJson $response 400 @{ error = $_.Exception.Message } } catch { }
     } finally {
@@ -519,9 +696,11 @@ function Test-UiIdle {
 function Start-UiServer([string]$Project, [switch]$NoBrowser) {
     $script:Ui = @{
         Project = $Project; State = (Join-Path $Project '.shadowbot-switch'); Token = (New-UiToken)
+        StageFiles = [Collections.Generic.HashSet[string]]::new()
         # Give the window time to open before the first heartbeat is expected.
         LastSeen = [DateTime]::UtcNow.AddSeconds(60); Job = $null; JobCount = 0; Detected = $null
     }
+    Clear-UiStage ([TimeSpan]::FromHours(24))
     $listener = $null
     for ($attempt = 0; $attempt -lt 5 -and !$listener; $attempt++) {
         # localStorage belongs to the origin. Prefer a repeatable port for this project.
@@ -561,5 +740,6 @@ function Start-UiServer([string]$Project, [switch]$NoBrowser) {
             }
         }
         $listener.Close()
+        Clear-UiStage ([TimeSpan]::Zero) -OwnedOnly
     }
 }

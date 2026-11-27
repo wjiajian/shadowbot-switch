@@ -1,5 +1,7 @@
 /** Only deliberately constructed messages cross the UI boundary. Never expose raw provider payloads. */
-export class UserError extends Error {}
+export class UserError extends Error {
+  constructor(message: string, readonly code?: 'conflict' | 'exists' | 'readonly' | 'invalid') { super(message); }
+}
 
 const userErrors = new Set<typeof UserError>([UserError]);
 const requestErrors = new Set<typeof RequestError>();

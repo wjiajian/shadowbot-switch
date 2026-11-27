@@ -3,6 +3,8 @@
 'use strict';
 
 const ICONS = {
+  'file-text': 'M56 24h99l53 53v139a16 16 0 0 1-16 16H56a16 16 0 0 1-16-16V40a16 16 0 0 1 16-16Zm0 16v176h136V88h-48V40Zm104 11v21h21ZM80 120h88v16H80Zm0 40h72v16H80Z',
+  gear: 'M108 24h40l6 24 22 12 24-7 20 35-17 18v31l17 19-20 35-25-7-21 12-6 25h-40l-6-25-21-12-25 7-20-35 17-19v-31L36 88l20-35 24 7 22-12Zm12 16-5 19-32 19-20-6-8 14 14 15v43l-14 15 8 14 20-6 32 19 5 20h16l5-20 32-19 20 6 8-14-14-15v-43l14-15-8-14-20 6-32-19-5-19Zm8 42a40 40 0 1 1 0 80 40 40 0 1 1 0-80Zm0 16a24 24 0 1 0 0 48 24 24 0 1 0 0-48Z',
   harness: 'M213.66,181.66l-32,32a8,8,0,0,1-11.32-11.32L188.69,184H48a8,8,0,0,1,0-16H188.69l-18.35-18.34a8,8,0,0,1,11.32-11.32l32,32A8,8,0,0,1,213.66,181.66Zm-139.32-64a8,8,0,0,0,11.32-11.32L67.31,88H208a8,8,0,0,0,0-16H67.31L85.66,53.66A8,8,0,0,0,74.34,42.34l-32,32a8,8,0,0,0,0,11.32Z',
   puzzle: 'M220.27,158.54a8,8,0,0,0-7.7-.46,20,20,0,1,1,0-36.16A8,8,0,0,0,224,114.69V72a16,16,0,0,0-16-16H171.78a35.36,35.36,0,0,0,.22-4,36.11,36.11,0,0,0-11.36-26.24,36,36,0,0,0-60.55,23.62,36.56,36.56,0,0,0,.14,6.62H64A16,16,0,0,0,48,72v32.22a35.36,35.36,0,0,0-4-.22,36.12,36.12,0,0,0-26.24,11.36,35.7,35.7,0,0,0-9.69,27,36.08,36.08,0,0,0,33.31,33.6,35.68,35.68,0,0,0,6.62-.14V208a16,16,0,0,0,16,16H208a16,16,0,0,0,16-16V165.31A8,8,0,0,0,220.27,158.54ZM208,208H64V165.31a8,8,0,0,0-11.43-7.23,20,20,0,1,1,0-36.16A8,8,0,0,0,64,114.69V72h46.69a8,8,0,0,0,7.23-11.43,20,20,0,1,1,36.16,0A8,8,0,0,0,161.31,72H208v32.23a35.68,35.68,0,0,0-6.62-.14A36,36,0,0,0,204,176a35.36,35.36,0,0,0,4-.22Z',
   plug: 'M237.66,66.34a8,8,0,0,0-11.32,0L192,100.69,155.31,64l34.35-34.34a8,8,0,1,0-11.32-11.32L144,52.69,117.66,26.34a8,8,0,0,0-11.32,11.32L112.69,44l-53,53a40,40,0,0,0,0,56.57l15.71,15.71L26.34,218.34a8,8,0,0,0,11.32,11.32l49.09-49.09,15.71,15.71a40,40,0,0,0,56.57,0l53-53,6.34,6.35a8,8,0,0,0,11.32-11.32L203.31,112l34.35-34.34A8,8,0,0,0,237.66,66.34ZM147.72,185a24,24,0,0,1-33.95,0L71,142.23a24,24,0,0,1,0-33.95l53-53L200.69,132Z',
@@ -20,7 +22,7 @@ const ICONS = {
   circle: 'M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Z',
 };
 
-const PAGES = ['harness', 'skills', 'mcp', 'doctor'];
+const PAGES = ['harness', 'skills', 'mcp', 'rules', 'config', 'doctor'];
 const TOKEN_KEY = 'shadowbot-switch-token';
 const MIN_SHADOWBOT = '6.3.39';
 function belowMinimum(version) {
@@ -43,7 +45,20 @@ const SKILL_STATUS = {
 const PERMISSIONS = [['ask', '询问'], ['allow', '允许'], ['deny', '拒绝']];
 const RULES_LINE = /^(.+AGENTS\.md)：/i;
 
+const CONFIG_TABS = [['settings', '权限与功能'], ['transfer', '导入导出'], ['backups', '备份'], ['apps', '应用']];
+function editorState() {
+  return {
+    rules: { layers: null, active: 'application', drafts: {}, conflict: null, ticket: 0 },
+    settings: { data: null, form: null, dirty: false, conflict: null, ticket: 0 },
+    transfer: { stage: null, plan: null, source: 'file', text: '', replace: false, error: null },
+    backups: { items: null, total: 0, expanded: null, ticket: 0 },
+    runtime: { apps: null, ticket: 0 }, log: { entries: null, total: 0, skipped: 0, ticket: 0 },
+  };
+}
+
 const state = {
+  ...editorState(),
+  tab: 'settings',
   token: takeToken(),
   mirror: readMirror(),
   fatal: null,
@@ -51,6 +66,7 @@ const state = {
   page: null,
   base: null,
   apps: [],
+  appsError: null,
   scope: '',
   dirOverride: '',
   editingDir: false,
@@ -159,12 +175,16 @@ function announce(data) {
 // ---------------------------------------------------------------- service calls
 
 async function api(path, body = {}) {
+  return apiText(path, JSON.stringify(body));
+}
+
+async function apiText(path, text, keepalive = false) {
   let response;
   try {
     response = await fetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Token': state.token },
-      body: JSON.stringify(body),
+      body: text, keepalive,
     });
   } catch {
     throw new Error('连不上界面服务，它可能已经退出。请重新运行 ui.ps1。');
@@ -179,12 +199,15 @@ async function api(path, body = {}) {
 async function run(cmd, extra = {}, scoped = true) {
   const body = { cmd, ...extra };
   if (scoped && state.scope) body.app = state.scope;
-  const result = await api('/api/run', body);
+  return unwrap(await api('/api/run', body));
+}
+
+function unwrap(result) {
   const text = (result.stdout || '').trim();
   let parsed = null;
   if (text) { try { parsed = JSON.parse(text); } catch { /* not JSON */ } }
-  if (parsed && parsed.error) throw new Error(parsed.error);
-  if (!parsed) throw new Error((result.stderr || text).trim() || `命令没有返回结果（退出码 ${result.exitCode}）。`);
+  if (parsed && parsed.error) throw Object.assign(new Error(parsed.error), { code: parsed.code });
+  if (!parsed || !Object.hasOwn(parsed, 'data')) throw new Error((result.stderr || text).trim() || `命令没有返回结果（退出码 ${result.exitCode}）。`);
   return { data: parsed.data, exitCode: result.exitCode };
 }
 
@@ -198,7 +221,8 @@ async function refreshBase() {
 }
 
 async function loadApps() {
-  try { state.apps = (await run('apps', {}, false)).data || []; } catch { state.apps = []; }
+  try { state.apps = (await run('apps', {}, false)).data || []; state.appsError = null; }
+  catch (error) { state.appsError = error.message; }
   render();
 }
 
@@ -227,7 +251,14 @@ const loadMcp = () => load('mcp', async () => {
   return { rows, runtime };
 });
 
-function resetData() {
+function resetData(discardDrafts = false) {
+  const fresh = editorState();
+  if (!discardDrafts) {
+    fresh.rules.drafts = Object.fromEntries(Object.entries(state.rules.drafts).filter(([, draft]) => draft.dirty));
+    if (state.settings.dirty) fresh.settings = state.settings;
+  }
+  discardTransfer();
+  Object.assign(state, fresh);
   for (const key of ['skills', 'mcp', 'doctor']) {
     const box = state[key];
     box.ticket++;
@@ -241,9 +272,20 @@ function resetData() {
 
 async function ensureData(page) {
   if (!ready()) return;
-  const loaders = { skills: loadSkills, mcp: loadMcp, doctor: loadDoctor };
-  const box = state[page];
-  if (loaders[page] && !box.rows && !box.loading && !box.error) await loaders[page]();
+  const needs = (box, key) => !box[key] && !box.loading && !box.error;
+  if (page === 'config') {
+    if (state.tab === 'settings' && needs(state.settings, 'data')) await loadSettings();
+    if (state.tab === 'backups' && needs(state.backups, 'items')) await loadBackups();
+    if (state.tab === 'apps') await loadApps();
+    return;
+  }
+  if (page === 'doctor') {
+    await Promise.all([needs(state.doctor, 'rows') && loadDoctor(), needs(state.runtime, 'apps') && loadRuntime(), needs(state.log, 'entries') && loadLog()]);
+    return;
+  }
+  if (page === 'rules' && needs(state.rules, 'layers')) await loadRules();
+  if (page === 'skills' && needs(state.skills, 'rows')) await loadSkills();
+  if (page === 'mcp' && needs(state.mcp, 'rows')) await loadMcp();
 }
 
 // Fills the sidebar counts after the visible page has its data.
@@ -256,17 +298,24 @@ async function loadCounts() {
 // ---------------------------------------------------------------- navigation
 
 function pageFromHash() {
-  const match = /^#\/(\w+)$/.exec(location.hash);
-  return match && PAGES.includes(match[1]) ? match[1] : null;
+  const match = /^#\/(\w+)(?:\/(\w+))?$/.exec(location.hash);
+  if (!match || !PAGES.includes(match[1])) return null;
+  return match[1] === 'config' && CONFIG_TABS.some(([tab]) => tab === match[2]) ? `config/${match[2]}` : match[1];
 }
 
 function setPage(page) {
   const target = page !== 'harness' && !ready() ? 'harness' : page;
   if (location.hash !== `#/${target}`) history.replaceState(null, '', `#/${target}`);
-  state.page = target;
+  const [name, tab = 'settings'] = target.split('/');
+  if (state.page === 'config' && state.tab === 'transfer' && (name !== 'config' || tab !== 'transfer')) {
+    discardTransfer();
+    state.transfer = editorState().transfer;
+  }
+  state.page = name;
+  state.tab = tab;
   state.confirm = null;
   render();
-  ensureData(target);
+  ensureData(state.page);
 }
 
 window.addEventListener('hashchange', () => {
@@ -274,9 +323,23 @@ window.addEventListener('hashchange', () => {
   if (page) setPage(page);
 });
 
-function changeScope(value) {
+function hasDrafts() {
+  return state.settings.dirty || Object.values(state.rules.drafts).some(draft => draft.dirty);
+}
+
+window.addEventListener('beforeunload', event => {
+  if (hasDrafts()) { event.preventDefault(); event.returnValue = ''; }
+});
+
+function changeScope(value, confirmed = false) {
+  if (state.scope === value || isBusy('config-write')) return;
+  if (hasDrafts() && !confirmed) {
+    render();
+    confirmDialog('切换范围', '有未保存的修改，切换范围会丢弃。', '丢弃并切换', () => changeScope(value, true));
+    return;
+  }
   state.scope = value;
-  resetData();
+  resetData(true);
   render();
   ensureData(state.page).then(loadCounts);
 }
@@ -514,13 +577,14 @@ function problemBlock(message, retry) {
 }
 
 function scopeSelect() {
-  const options = [['', '此安装的全部应用'], ...state.apps.map(app => [app.path, app.path])];
+  const options = [['', '此安装的全部应用'], ...state.apps.filter(app => app.exists !== false).map(app => [app.path, app.path])];
   if (state.scope && !options.some(([value]) => value === state.scope)) options.push([state.scope, state.scope]);
-  return h('label', { class: 'scope' },
-    h('span', null, '范围'),
+  return h('div', { class: 'scope' },
+    h('label', { for: 'scope' }, '范围'),
     h('span', { class: 'select-field' },
-      h('select', { class: 'field', id: 'scope', value: state.scope, onchange: event => changeScope(event.target.value) },
-        options.map(([value, label]) => h('option', { value }, label))), icon('caret', 16)));
+      h('select', { class: 'field', id: 'scope', disabled: isBusy('config-write'), value: state.scope, onchange: event => changeScope(event.target.value) },
+        options.map(([value, label]) => h('option', { value }, label))), icon('caret', 16)),
+    button(icon('plus', 16), 'icon-btn', openAppDialog, { 'aria-label': '手动添加应用路径', disabled: jobRunning() || isBusy('config-write') }));
 }
 
 function toggleButton({ id, pressed, label, disabled, title, onclick }) {
@@ -599,6 +663,7 @@ function sidebar() {
       navItem('harness', 'Harness', 'harness'),
       navItem('skills', 'Skills', 'puzzle', skills ? h('span', { class: 'nav-count quiet' }, String(skills.length)) : null),
       navItem('mcp', 'MCP', 'plug', mcpFailures ? h('span', { class: 'nav-count bad' }, `${mcpFailures} 个失败`) : null),
+      navItem('rules', '规则', 'file-text'), navItem('config', '配置', 'gear'),
       navItem('doctor', '诊断', 'pulse', doctorFailures ? h('span', { class: 'nav-count bad' }, `${doctorFailures} 项未通过`) : null)),
     refresh);
 }
@@ -892,7 +957,7 @@ function mcpPage() {
     h('h1', { class: 'page-title' }, 'MCP'),
     scopeSelect(),
     box.rows && !box.rows.length ? null : [
-      button('编辑 mcp.json', 'btn-secondary', () => openConfig('mcp'), { disabled: isBusy('config:mcp') }),
+      button('编辑 mcp.json', 'btn-secondary', () => openConfig('mcp'), { disabled: jobRunning() || isBusy('config:mcp') }),
       h('button', { type: 'button', class: 'btn btn-primary', disabled: jobRunning(), onclick: openMcpDialog }, icon('plus', 16), h('span', null, '添加 MCP')),
     ]);
   let body;
@@ -900,7 +965,7 @@ function mcpPage() {
   else if (box.rows && !box.rows.length) {
     body = emptyState('plug', '还没有配置 MCP', '添加后，支持 MCP 的 Harness 就能调用它提供的工具。', [
       h('button', { type: 'button', class: 'btn btn-primary', disabled: jobRunning(), onclick: openMcpDialog }, icon('plus', 16), h('span', null, '添加 MCP')),
-      button('编辑 mcp.json', 'btn-secondary', () => openConfig('mcp'), { disabled: isBusy('config:mcp') }),
+      button('编辑 mcp.json', 'btn-secondary', () => openConfig('mcp'), { disabled: jobRunning() || isBusy('config:mcp') }),
     ]);
   } else {
     body = h('div', { class: 'table-wrap', 'aria-busy': String(!box.rows) },
@@ -927,7 +992,7 @@ function checkRow(row) {
       const rules = RULES_LINE.exec(line);
       return h('div', { class: 'detail-line' },
         h('span', null, line),
-        rules ? button('打开文件', 'btn-secondary', () => openPath('rules', rules[1])) : null);
+        rules ? [button('打开文件', 'btn-secondary', () => openPath('rules', rules[1])), h('a', { href: '#/rules' }, '在界面中编辑')] : null);
     })) : null);
 }
 
@@ -940,7 +1005,7 @@ function doctorPage() {
       box.rows ? h('span', { class: failures ? 'bad' : 'ok' }, failures ? `${failures} 项未通过` : '全部通过') : null),
     scopeSelect(),
     button('修复', 'btn-secondary', () => startJob('repair'), { disabled: jobRunning(), title: '重新定位安装并完成中断的切换' }),
-    h('button', { type: 'button', class: 'btn btn-primary', disabled: box.loading, onclick: loadDoctor }, icon('refresh', 16), h('span', null, box.loading ? '正在检查…' : '重新检查')));
+    h('button', { type: 'button', class: 'btn btn-primary', disabled: box.loading, onclick: () => Promise.all([loadDoctor(), loadRuntime(), loadLog()]) }, icon('refresh', 16), h('span', null, box.loading ? '正在检查…' : '重新检查')));
   let body;
   if (box.error) body = problemBlock(box.error, loadDoctor);
   else if (!box.rows) {
@@ -950,7 +1015,7 @@ function doctorPage() {
       return h('li', null, h('span', { class: 'sk sk-toggle' }), bar);
     }));
   } else body = h('ul', { class: 'checks', 'aria-label': '检查结果' }, box.rows.map(checkRow));
-  return [head, body];
+  return [head, body, runtimeSection(), logSection()];
 }
 
 // ---------------------------------------------------------------- dialogs
@@ -1122,7 +1187,7 @@ function mainView() {
   if (!state.base) {
     return h('main', { class: 'main', id: 'main' }, state.fatal ? problemBlock(state.fatal) : h('span', { class: 'muted' }, '正在读取安装状态…'));
   }
-  const pages = { harness: harnessPage, skills: skillsPage, mcp: mcpPage, doctor: doctorPage };
+  const pages = { harness: harnessPage, skills: skillsPage, mcp: mcpPage, rules: rulesPage, config: configPage, doctor: doctorPage };
   const content = (pages[state.page] || harnessPage)();
   return h('main', { class: `main${state.page === 'harness' ? ' roomy' : ''}`, id: 'main' },
     state.offline ? problemBlock(state.offline) : null,
@@ -1135,12 +1200,13 @@ function captureView() {
     ? { id: active.id, start: active.selectionStart, end: active.selectionEnd } : null;
   const log = document.getElementById('job-log');
   return {
-    focus,
+    focus, scroll: [...document.querySelectorAll('[data-keep-scroll][id]')].map(el => [el.id, el.scrollTop]),
     log: log ? { bottom: log.scrollHeight - log.scrollTop - log.clientHeight < 8, top: log.scrollTop } : null,
   };
 }
 
 function restoreView(saved) {
+  for (const [id, top] of saved.scroll) { const el = document.getElementById(id); if (el) el.scrollTop = top; }
   if (state.focusNext) {
     const target = document.getElementById(state.focusNext);
     state.focusNext = null;
@@ -1191,6 +1257,11 @@ function heartbeat() {
   }, 10000);
   setInterval(updateClocks, 1000);
   window.addEventListener('pagehide', () => {
+    const stage = state.transfer.stage;
+    if (stage) {
+      state.transfer.stage = null; state.transfer.plan = null;
+      apiText('/api/config/discard', JSON.stringify({ stage }), true).catch(() => {});
+    }
     try { navigator.sendBeacon('/api/bye', state.token); } catch { /* the idle timeout still applies */ }
   });
 }
@@ -1221,6 +1292,420 @@ async function boot() {
     await ensureData(state.page);
     loadCounts();
   }
+}
+
+// ---------------------------------------------------------------- daily configuration
+
+function normalizeEol(text, eol) {
+  return text.replace(/\r\n|\r|\n/g, eol === 'crlf' ? '\r\n' : '\n');
+}
+
+function ruleBytes(text, eol) {
+  return new TextEncoder().encode(normalizeEol(text, eol)).length;
+}
+
+function ruleStatus(bytes) {
+  return bytes > 32768 ? 'bad' : bytes >= 32768 * 0.9 ? 'warn' : 'ok';
+}
+
+function permissionRows(list) {
+  const rows = list.map(row => ({ ...row }));
+  const defaultAction = rows[0]?.pattern === '*' ? rows.shift().action : '';
+  return { defaultAction, rows };
+}
+
+function permissionPayload(form) {
+  return [...(form.defaultAction ? [{ pattern: '*', action: form.defaultAction }] : []), ...form.rows.map(({ pattern, action }) => ({ pattern, action }))];
+}
+
+function importSummary(plan, replace) {
+  const overwrites = plan.files.filter(row => row.action === 'overwrite').length;
+  return { creates: plan.files.length - overwrites, overwrites, blocked: !replace && overwrites > 0 };
+}
+
+const LOG_ACTIONS = { started: '开始切换', committed: '切换完成', recovered: '已恢复中断的切换', discarded: '已丢弃中断的切换', 'rolled-back': '已回滚' };
+function logLabel(action) {
+  return Object.hasOwn(LOG_ACTIONS, action) ? LOG_ACTIONS[action] : action;
+}
+
+const BACKUP_KINDS = { import: '导入配置', 'skill-remove': '移除 Skill', 'mcp-remove': '移除 MCP', 'rules-save': '保存规则',
+  'rules-remove': '删除规则', 'settings-save': '保存设置', 'pre-restore': '恢复前自动备份', legacy: '旧备份（无记录）' };
+const ACTIONS = { create: '新建', overwrite: '覆盖', delete: '删除', 'replace-directory': '替换目录' };
+const writeDisabled = () => jobRunning() || isBusy('config-write');
+const scopedBody = () => state.scope ? { app: state.scope } : {};
+const loadRules = () => load('rules', async () => ({ layers: (await run('rules.show')).data.layers }));
+const loadSettings = () => load('settings', async () => ({ data: (await run('settings.show')).data }));
+const loadRuntime = () => load('runtime', async () => ({ apps: (await run('status', {}, false)).data.applications }));
+function loadBackups(more = false) {
+  const old = more === true ? state.backups.items || [] : [];
+  return load('backups', async () => {
+    const { data } = await run('config.backups', { limit: 20, offset: old.length }, false);
+    return { items: [...old, ...data.items], total: data.total };
+  });
+}
+
+function loadLog(more = false) {
+  const old = more === true ? state.log.entries || [] : [];
+  return load('log', async () => {
+    const { data } = await run('log', { limit: 20, offset: old.length }, false);
+    return { entries: [...old, ...data.entries], total: data.total, skipped: data.skipped };
+  });
+}
+
+function confirmDialog(title, body, label, action) {
+  const dialog = openDialog(title, 'confirmation-title', h('div', { class: 'facts' }, body),
+    h('div', { class: 'dialog-foot' }, button('取消', 'btn-secondary', () => dialog.close()),
+      h('button', { type: 'submit', class: 'btn btn-danger' }, label)), () => { dialog.close(); action(); });
+}
+
+function configWrite(fn) {
+  if (writeDisabled()) return;
+  return withBusy('config-write', async () => {
+    try { await fn(); } catch (error) { toast(error.message, 'error'); }
+  });
+}
+
+function pageHeading(title) {
+  return h('header', { class: 'page-head' }, h('h1', { class: 'page-title' }, title), scopeSelect());
+}
+
+function dataTable(labels, rows) {
+  return h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+    h('thead', null, h('tr', null, labels.map(label => h('th', { scope: 'col' }, label)))),
+    h('tbody', null, rows.map(cells => h('tr', null, cells.map(content => h('td', null, content)))))));
+}
+
+function loadingBlock() {
+  return h('div', { class: 'table-wrap', role: 'status', 'aria-label': '读取中' },
+    h('table', { class: 'list' }, skeletonRows(['text', 'text'], 3)));
+}
+
+function ruleMessage(bytes) {
+  const tone = ruleStatus(bytes);
+  return `${bytes.toLocaleString()} / 32,768 字节${tone === 'warn' ? ' · 接近上限' : tone === 'bad' ? ' · 超过 32 KiB，运行时会整份跳过' : ''}`;
+}
+
+function updateRuleDraft(event, draft, layer) {
+  draft.text = event.target.value;
+  draft.dirty = draft.unlocked || !layer.exists || draft.text !== normalizeEol(layer.content, 'lf') || draft.eol !== (layer.eol === 'crlf' ? 'crlf' : 'lf');
+  const bytes = ruleBytes(draft.text, draft.eol);
+  const label = document.getElementById('rules-bytes');
+  label.textContent = ruleMessage(bytes);
+  label.className = ruleStatus(bytes);
+  document.getElementById('rules-meter').value = bytes;
+  document.getElementById('rules-save').disabled = !draft.dirty || bytes > 32768 || writeDisabled();
+  document.getElementById('rules-discard').disabled = !draft.dirty || writeDisabled();
+}
+
+function rulesPage() {
+  const box = state.rules;
+  const head = pageHeading('规则');
+  if (box.error || !box.layers) return [head, box.error ? problemBlock(box.error, loadRules) : loadingBlock()];
+  const layer = box.layers.find(l => l.scope === box.active) || box.layers[0];
+  const key = layer.path;
+  const reset = async () => { delete box.drafts[key]; box.conflict = null; await loadRules(); };
+  const create = (text, unlocked = false) => {
+    box.drafts[key] = { text: normalizeEol(text, 'lf'), eol: layer.eol === 'crlf' ? 'crlf' : 'lf',
+      baseSha: layer.sha256, dirty: unlocked, unlocked };
+  };
+  const intro = [head, state.scope ? segmented('rules-layer', '规则范围', [['application', '应用级'], ['installation', '安装级']],
+    layer.scope, value => { box.active = value; render(); }, writeDisabled()) : h('p', { class: 'muted' }, '选择应用后可编辑应用级规则。'),
+    h('div', { class: 'editor-bar' }, h('code', null, key), layer.effective ? '生效中' : '未生效',
+      state.base.windows && layer.exists ? button('用记事本打开', 'btn-secondary', () => openPath('rules', key)) : null),
+    layer.shadowed ? h('p', { class: 'muted' }, layer.shadowed.path, ' 未生效：被根目录 AGENTS.md 覆盖。') : null,
+    layer.warning ? problemBlock(layer.warning) : null];
+  if (layer.readonlyReason || (!layer.editable && !box.drafts[key]?.unlocked)) {
+    const reason = { link: '请直接编辑链接目标。', 'not-file': '路径不是普通文件。', unreadable: '无法读取文件。' }[layer.readonlyReason];
+    return [...intro, h('p', null, reason || (layer.tooLarge ? '文件超限，只显示前 64 KiB。' : '部分字符无法显示。')),
+      h('pre', { class: 'log preview' }, layer.preview || layer.content),
+      !reason ? button('用新内容替换', 'btn-danger', () => confirmDialog('替换规则文件', '原文件会先备份到 config-backups，再被替换。', '开始替换',
+        () => { create(layer.preview, true); render(); }), { disabled: writeDisabled() }) : null];
+  }
+  if (!box.drafts[key]) {
+    if (!layer.exists) return [...intro, emptyState('file-text', '还没有规则文件', `将创建：${key}`,
+      button('创建', 'btn-primary', () => { create(''); state.focusNext = 'rules-editor'; render(); }, { disabled: writeDisabled() }))];
+    create(layer.content);
+  }
+  const draft = box.drafts[key], bytes = ruleBytes(draft.text, draft.eol);
+  const submit = (remove, force = false) => configWrite(async () => {
+    try {
+      let expect = draft.baseSha;
+      if (force) {
+        const latest = (await run('rules.show')).data.layers.find(l => l.scope === layer.scope);
+        if (latest.path !== key || latest.readonlyReason) throw new Error('规则路径已变化，请重新加载。');
+        expect = latest.sha256;
+      }
+      const body = { ...scopedBody(), scope: layer.scope, expect };
+      const { data } = remove ? await run('rules.remove', body) :
+        unwrap(await api('/api/rules/save', { ...body, content: normalizeEol(draft.text, draft.eol) }));
+      announce(data); state.confirm = null; state.backups.items = null; await reset();
+    } catch (error) {
+      if (error.code !== 'conflict') throw error;
+      box.conflict = { key, remove };
+    }
+  });
+  const save = () => draft.text.trim() ? submit(false) : confirmDialog('保存空规则',
+    '空文件会让这一层规则失效，且应用根目录的空文件会阻止回退文件生效。', '保存空文件', () => submit(false));
+  return [...intro, box.conflict?.key === key ? [problemBlock('文件已被其他程序修改。'), h('div', { class: 'actions' },
+    button('重新加载（丢弃我的修改）', 'btn-secondary', reset),
+    !box.conflict.remove && button('仍然保存', 'btn-danger', () => submit(false, true), { disabled: writeDisabled() || bytes > 32768 }))] : null,
+    h('textarea', { class: 'field mono editor', id: 'rules-editor', 'aria-label': 'AGENTS.md 内容', 'data-keep-scroll': true,
+      spellcheck: 'false', value: draft.text, disabled: isBusy('config-write'), oninput: event => updateRuleDraft(event, draft, layer) }),
+    h('div', { class: 'editor-bar', role: 'status' },
+      h('span', { id: 'rules-bytes', class: ruleStatus(bytes) }, ruleMessage(bytes)),
+      h('meter', { id: 'rules-meter', min: 0, max: 32768, low: 29491, high: 32768, optimum: 0, value: bytes, 'aria-label': '规则字节数' }),
+      'UTF-8', segmented('rules-eol', '换行', [['lf', 'LF'], ['crlf', 'CRLF']], draft.eol, value => {
+        draft.eol = value; updateRuleDraft({ target: { value: draft.text } }, draft, layer);
+      }), layer.eol === 'mixed' && '保存会统一换行'),
+    h('div', { class: 'editor-bar' }, h('span', { class: 'muted' }, `保存到：${key}`),
+      layer.exists && (state.confirm === 'rule' ? confirmCell('rule', '先备份再删除？', '删除', () => submit(true)) :
+        button('删除文件', 'btn-text', () => askConfirm('rule'), { id: 'rule-remove', disabled: writeDisabled() })),
+      button('放弃修改', 'btn-secondary', reset, { id: 'rules-discard', disabled: !draft.dirty || writeDisabled() }),
+      button('保存', 'btn-primary', save, { id: 'rules-save', disabled: !draft.dirty || bytes > 32768 || writeDisabled() }))];
+}
+
+function configPage() {
+  const views = { settings: settingsView, transfer: transferView, backups: backupsView, apps: appsView };
+  return [pageHeading('配置'), h('nav', { class: 'subtabs seg', 'aria-label': '配置分类' },
+    CONFIG_TABS.map(([key, label]) => h('button', { type: 'button', 'aria-pressed': String(key === state.tab),
+      onclick: () => setPage('config/' + key) }, label))), views[state.tab]()];
+}
+
+function invalidPermissions(form) {
+  const patterns = permissionPayload(form).map(row => row.pattern);
+  return form.rows.map(({ pattern }) => !/^[^\s\x00-\x1f\x7f-\x9f]{1,128}$/u.test(pattern) || patterns.indexOf(pattern) !== patterns.lastIndexOf(pattern));
+}
+
+function settingsView() {
+  const box = state.settings, data = box.data;
+  if (box.error || !data) return box.error ? problemBlock(box.error, loadSettings) : loadingBlock();
+  const info = h('div', { class: 'editor-bar' }, h('code', null, data.path), data.error ? '配置有错' : data.exists ? '有效' : '文件不存在',
+    state.base.windows && button('用记事本打开', 'btn-secondary', () => openConfig('skills'), { disabled: writeDisabled() }));
+  if (data.error) return [info, problemBlock(data.error, loadSettings)];
+  const form = box.form ??= { ...permissionRows(data.file.mcpPermission), thinkingCommand: data.file.thinkingCommand };
+  const dirty = () => { box.dirty = true; render(); };
+  const reset = async () => { box.form = null; box.dirty = false; box.conflict = null; await loadSettings(); box.form = null; render(); };
+  const setAction = (row, value) => { row.action = value; dirty(); };
+  const invalid = invalidPermissions(form);
+  const overflow = permissionPayload(form).length > 200;
+  const actionLabel = value => PERMISSIONS.find(([key]) => key === value)?.[1] || '询问';
+  const move = (i, d) => { [form.rows[i], form.rows[i + d]] = [form.rows[i + d], form.rows[i]]; dirty(); };
+  const save = force => configWrite(async () => {
+    try {
+      const expect = force ? (await run('settings.show')).data.sha256 : data.sha256;
+      const body = { ...scopedBody(), expect, mcpPermission: permissionPayload(form) };
+      if (!state.scope && form.thinkingCommand !== data.file.thinkingCommand) body.thinkingCommand = form.thinkingCommand;
+      announce(unwrap(await api('/api/settings/save', body)).data);
+      state.backups.items = null; await reset();
+    } catch (error) { if (error.code === 'conflict') box.conflict = true; else throw error; }
+  });
+  const rows = form.rows.map((row, i) => [
+    h('input', { id: `pattern-${i}`, class: 'field mono', list: 'mcp-patterns', 'aria-label': `第 ${i + 1} 条规则`,
+      'aria-invalid': String(invalid[i]), value: row.pattern, disabled: writeDisabled(), oninput: event => {
+        row.pattern = event.target.value; box.dirty = true;
+        const invalid = invalidPermissions(form);
+        invalid.forEach((bad, n) => document.getElementById(`pattern-${n}`).setAttribute('aria-invalid', String(bad)));
+        document.getElementById('settings-save').disabled = invalid.includes(true) || permissionPayload(form).length > 200 || writeDisabled();
+        document.getElementById('settings-discard').disabled = false;
+        document.getElementById('pattern-hint').hidden = !invalid.includes(true);
+      } }),
+    segmented(`action-${i}`, '授权', PERMISSIONS, row.action, value => setAction(row, value), writeDisabled()),
+    h('div', { class: 'actions' }, button('上移', 'btn-text', () => move(i, -1), { disabled: !i || writeDisabled() }),
+      button('下移', 'btn-text', () => move(i, 1), { disabled: i + 1 === form.rows.length || writeDisabled() }),
+      button('删除', 'btn-text', () => { form.rows.splice(i, 1); dirty(); }, { disabled: writeDisabled() }))]);
+  const effective = data.effective.mcpPermission;
+  return [info, data.warnings.map(w => problemBlock(w)), box.conflict && [problemBlock('文件已被其他程序修改。'),
+    h('div', { class: 'actions' }, button('重新加载（丢弃我的修改）', 'btn-secondary', reset),
+      button('仍然保存', 'btn-danger', () => save(true), { disabled: writeDisabled() || invalid.includes(true) || overflow }))],
+    segmented('default-permission', '默认工具授权', [['', state.scope ? '未设置（继承）' : '未设置（询问）'], ...PERMISSIONS], form.defaultAction,
+      value => { form.defaultAction = value; dirty(); }, writeDisabled()),
+    data.inherited && h('span', { class: 'muted' }, '当前继承安装级：' + actionLabel(data.inherited.mcpPermission.find(r => r.pattern === '*')?.action)),
+    h('p', null, '工具名格式为 <服务名>_<工具名>，* 匹配任意字符；后面的规则优先。'),
+    h('datalist', { id: 'mcp-patterns' }, (state.mcp.rows || []).map(row => h('option', { value: row.name + '_*' }))),
+    dataTable(['通配', '授权', '操作'], rows),
+    h('p', { id: 'pattern-hint', class: 'bad', hidden: !invalid.includes(true) }, '通配不能重复、为空、包含空白或控制字符，最长 128 个字符。'),
+    overflow && problemBlock('最多 200 条授权规则。'),
+    h('div', { class: 'actions' }, button('添加规则', 'btn-secondary', () => { state.focusNext = 'pattern-' + form.rows.length; form.rows.push({ pattern: '', action: 'ask' }); dirty(); },
+      { disabled: writeDisabled() || permissionPayload(form).length >= 200 })),
+    h('details', null, h('summary', null, '当前生效的授权规则'), dataTable(['通配', '授权', '来源'], effective.map(r => [r.pattern, actionLabel(r.action),
+      state.scope && data.applicationPatterns.includes(r.pattern) ? '应用级' : '安装级'])),
+      effective.findIndex(r => r.pattern === '*') > 0 && h('p', { class: 'warn' }, '通配规则会覆盖前面的具体规则。')),
+    h('div', { class: 'editor-bar' }, h('strong', null, '/thinking 命令'), state.scope ? `由安装级设置决定：${data.effective.thinkingCommand ? '开启' : '关闭'}` :
+      toggleButton({ pressed: form.thinkingCommand !== false, label: '/thinking 命令', disabled: writeDisabled() || !data.thinking.supported || data.thinking.hostOverride,
+        onclick: () => { form.thinkingCommand = form.thinkingCommand === false; dirty(); } }),
+      data.thinking.hostOverride ? '宿主已自定义 thinking 命令，开关不生效。' : !data.thinking.supported && '当前 harness 不支持 /thinking。'),
+    data.file.otherKeys.length > 0 && h('p', { class: 'muted' }, `还包含 ${data.file.otherKeys[0]} 等 ${data.file.otherKeys.length} 个字段，保存时会原样保留。Skill 启用状态在 Skills 页管理。`),
+    h('div', { class: 'actions' }, button('放弃修改', 'btn-secondary', reset, { id: 'settings-discard', disabled: !box.dirty || writeDisabled() }),
+      button('保存', 'btn-primary', () => save(false), { id: 'settings-save', disabled: !box.dirty || writeDisabled() || invalid.includes(true) || overflow }))];
+}
+
+function discardTransfer(box = state.transfer) {
+  const stage = box.stage;
+  box.stage = null;
+  box.plan = null;
+  if (stage) return api('/api/config/discard', { stage }).catch(error => toast(error.message, 'error'));
+}
+
+function transferView() {
+  const box = state.transfer;
+  const preview = () => configWrite(async () => {
+    try {
+      box.error = null; box.plan = null;
+      if (!box.stage) {
+        if (!box.text) throw new Error('请选择配置包或粘贴 JSON。');
+        const bundle = JSON.parse(box.text.replace(/^\uFEFF/, ''));
+        if (bundle?.format !== 'shadowbot-switch-config' || bundle.version !== 1 || !Array.isArray(bundle.entries)) throw new Error('不是支持的 ShadowBot Switch 配置包。');
+        const { id } = await apiText('/api/config/stage', box.text);
+        box.stage = id;
+        if (state.transfer !== box) { await discardTransfer(box); return; }
+      }
+      box.plan = unwrap(await api('/api/config/import', { ...scopedBody(), stage: box.stage, replace: box.replace, dryRun: true })).data;
+    } catch (error) { box.error = error.message; }
+  });
+  const summary = box.plan && importSummary(box.plan, box.replace);
+  const apply = () => configWrite(async () => {
+    const { data } = unwrap(await api('/api/config/import', { ...scopedBody(), stage: box.stage, replace: box.replace, dryRun: false }));
+    box.stage = null; announce(data);
+    resetData();
+    state.transfer.receipt = data.backup;
+    await ensureData(state.page); loadCounts();
+  });
+  const requestImport = () => {
+    const warning = hasDrafts() ? '未保存的编辑将保留，保存时会重新检查文件版本。' : '';
+    if (box.replace) confirmDialog('覆盖导入', `将覆盖 ${summary.overwrites} 个文件、新建 ${summary.creates} 个文件。覆盖前会备份到 config-backups。${warning}`, '确认导入', apply);
+    else apply();
+  };
+  const exportFile = () => configWrite(async () => {
+    const result = await api('/api/config/export', scopedBody());
+    const { data } = unwrap(result);
+    const url = URL.createObjectURL(new Blob([result.content], { type: 'application/json' }));
+    const link = h('a', { href: url, download: result.fileName });
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    if (data.warnings?.length) toast('已导出，但跳过了以下规则文件：\n' + data.warnings.join('\n'), 'warn');
+    else toast('已导出 ' + result.fileName);
+  });
+  const kinds = { rules: '规则', settings: '设置', mcp: 'MCP', skill: 'Skill', other: '其它' };
+  return [h('section', { class: 'facts' }, h('h2', null, '导出配置'), h('p', null, '导出范围：' + scopeLabel()),
+    h('div', { class: 'actions' }, button('导出并下载', 'btn-secondary', exportFile, { disabled: writeDisabled() }))),
+    h('section', { class: 'facts' }, h('h2', null, '导入配置'),
+      segmented('import-source', '来源', [['file', '选择文件'], ['paste', '粘贴 JSON']], box.source, value => {
+        if (value !== box.source) { discardTransfer(box); box.source = value; box.text = ''; box.error = null; box.file = ''; render(); }
+      }, writeDisabled()),
+      box.source === 'paste' ? h('textarea', { class: 'field mono', id: 'import-paste', 'aria-label': '配置包 JSON', value: box.text,
+        disabled: writeDisabled(), oninput: event => { const expired = !!box.stage || !!box.error; discardTransfer(box); box.text = event.target.value; box.error = null; if (expired) render(); } }) :
+        h('div', { class: 'editor-bar' }, h('input', { type: 'file', accept: '.json,application/json', 'aria-label': '选择配置包', disabled: writeDisabled(),
+          onchange: event => {
+            const file = event.target.files[0];
+            if (!file) return;
+            configWrite(async () => {
+              await discardTransfer(box); box.error = null; box.text = ''; box.file = file.name;
+              if (file.size > 32 * 1024 * 1024) { box.error = '配置包超过 32 MiB。'; return; }
+              box.text = await file.text();
+            });
+          } }), box.file),
+      segmented('import-mode', '导入模式', [['new', '仅新增（遇到同名文件整体停止）'], ['replace', '覆盖（先备份）']], box.replace ? 'replace' : 'new', value => {
+        box.replace = value === 'replace'; if (box.stage) preview(); else render();
+      }, writeDisabled()),
+      h('div', { class: 'actions' }, button('预览导入', 'btn-secondary', preview, { disabled: writeDisabled() }),
+        box.stage && button('取消导入', 'btn-text', () => { discardTransfer(box); state.transfer = editorState().transfer; render(); }, { disabled: writeDisabled() })),
+      box.error && problemBlock(box.error), box.plan && [dataTable(['目标路径', '类型', '动作'], box.plan.files.map(f => [
+        h('code', null, f.path), kinds[f.kind], h('span', { class: f.action === 'overwrite' ? 'warn' : 'ok' }, ACTIONS[f.action])])),
+        box.plan.warnings.map(w => problemBlock(w)),
+        summary.blocked && h('p', { class: 'warn' }, `有 ${summary.overwrites} 个同名文件，选择覆盖或先处理这些文件。`),
+        h('div', { class: 'actions' }, button('导入', 'btn-primary', requestImport, { disabled: writeDisabled() || summary.blocked }))],
+      box.receipt && h('p', null, '备份编号：', h('code', null, box.receipt), ' ', h('a', { href: '#/config/backups' }, '查看备份')))];
+}
+
+function backupsView() {
+  const box = state.backups;
+  if (box.error || !box.items) return box.error ? problemBlock(box.error, loadBackups) : loadingBlock();
+  if (!box.items.length) return emptyState('folder', '还没有备份', '导入配置、移除 Skill/MCP、保存规则或设置时会自动备份。');
+  const restore = item => configWrite(async () => {
+    const { data } = await run('config.restore', { id: item.id, dryRun: true }, false);
+    confirmDialog('恢复备份', [h('p', null, '恢复前会先把当前文件自动备份，可以再次恢复撤销。'),
+      h('div', { class: 'preview' }, dataTable(['目标路径', '动作'], data.files.map(f => [h('code', null, f.target), ACTIONS[f.action]])))],
+    '确认恢复', () => configWrite(async () => {
+      const { data } = await run('config.restore', { id: item.id, dryRun: false }, false);
+      toast([data.message, '恢复前备份：' + data.backup, data.next].join('\n'));
+      resetData(); await ensureData(state.page); loadCounts();
+    }));
+  });
+  const list = box.items.map(item => {
+    const expanded = box.expanded === item.id;
+    return [new Date(item.createdAt).toLocaleString(), item.damaged ? '清单损坏' : BACKUP_KINDS[item.kind], item.scope?.app || (item.scope ? '安装级' : '未知'),
+      item.restorable ? item.fileCount : '—', h('div', { class: 'facts' },
+        h('div', { class: 'actions' }, item.restorable && button(expanded ? '收起' : '展开', 'btn-text', () => { box.expanded = expanded ? null : item.id; render(); }),
+          item.restorable && button('恢复', 'btn-secondary', () => restore(item), { disabled: writeDisabled() }),
+          state.base.windows && button('打开文件夹', 'btn-text', () => openPath('folder', state.base.home + '/config-backups/' + item.id))),
+        expanded && h('div', { class: 'preview' }, item.files.map(f => h('div', null, h('code', null, f.target), ' · ', ACTIONS[f.action])),
+          item.truncated && '仅显示前 50 项。'))];
+  });
+  return [dataTable(['时间', '来源', '范围', '文件数', '操作'], list),
+    box.items.length < box.total && button('加载更多', 'btn-secondary', () => loadBackups(true), { disabled: box.loading })];
+}
+
+function openAppDialog() {
+  const input = h('input', { id: 'app-path', class: 'field mono', autocomplete: 'off', spellcheck: 'false' });
+  const hint = h('div', { class: 'hint', role: 'status' });
+  const pick = button('选择文件夹', 'btn-secondary', async () => {
+    try { const { path } = await api('/api/pick-folder', { purpose: 'app' }); if (path) input.value = path; }
+    catch (error) { setHint(hint, 'bad', error.message); }
+  });
+  let registered = false;
+  const submit = h('button', { type: 'submit', class: 'btn btn-primary' }, '添加');
+  const dialog = openDialog('手动添加应用路径', 'add-app-title',
+    h('div', { class: 'form-row' }, h('label', { for: 'app-path' }, '应用根目录'), h('div', { class: 'inline' }, input, state.base.windows && pick), hint),
+    h('div', { class: 'dialog-foot' }, button('关闭', 'btn-secondary', () => dialog.close()), submit), async () => {
+      if (registered) { dialog.close(); return; }
+      if (!input.value.trim() || writeDisabled() || submit.disabled) return;
+      submit.disabled = true;
+      try {
+        const { data } = await run('apps.add', { path: input.value.trim() }, false);
+        await loadApps();
+        if (data.warnings.length) {
+          registered = true; input.disabled = true; pick.disabled = true; submit.textContent = '完成';
+          setHint(hint, 'warn', data.warnings.join('\n'));
+        } else dialog.close();
+        changeScope(data.path);
+      } catch (error) { setHint(hint, 'bad', error.message); }
+      finally { submit.disabled = false; }
+    });
+  input.focus();
+}
+
+function appsView() {
+  const sources = { running: '运行中', discovered: '自动发现', custom: '手动添加' };
+  return [h('div', { class: 'actions' }, button('添加应用路径', 'btn-primary', openAppDialog, { disabled: writeDisabled() })),
+    state.appsError ? problemBlock(state.appsError, loadApps) : state.apps.length ? dataTable(['名称', '路径', '来源', '状态', '操作'], state.apps.map((app, i) => {
+      const key = 'custom-app-' + i;
+      return [app.name, h('code', null, app.path), sources[app.source], app.exists ? '可用' : h('span', { class: 'bad' }, '目录不存在'),
+        app.custom && (state.confirm === key ? confirmCell(key, '移除手动登记？', '移除', () => configWrite(async () => {
+          announce((await run('apps.remove', { path: app.path }, false)).data); state.confirm = null; await loadApps();
+        })) : button('移除', 'btn-text', () => askConfirm(key), { id: key + '-remove', disabled: writeDisabled() }))];
+    })) : h('p', { class: 'muted' }, '还没有应用。')];
+}
+
+function runtimeSection() {
+  const box = state.runtime;
+  return h('section', { class: 'facts' }, h('h2', null, '运行中的 Copilot'),
+    box.error ? problemBlock(box.error, loadRuntime) : !box.apps ? loadingBlock() : !box.apps.length ?
+      h('p', { class: 'muted' }, '没有运行中的 Copilot。打开影刀 Copilot 后点重新检查。') : box.apps.map(app => {
+        const names = new Set([...Object.keys(app.mcp || {}), ...Object.keys(app.errors || {})]);
+        return h('article', { class: 'facts' }, h('strong', null, app.app),
+          h('div', null, `PID ${app.pid} · ${app.harness || 'Copilot'} · ${app.configuration} · ${app.active} 个请求 · ${Math.max(0, Math.floor((Date.now() - app.updated) / 1000))} 秒前更新`),
+          app.configurationError && problemBlock(app.configurationError), app.menuReconnect && h('p', { class: 'warn' }, '请重新连接 Copilot 以刷新菜单。'),
+          names.size > 0 && dataTable(['MCP', '状态', '错误'], [...names].map(name => [name, app.mcp?.[name]?.status || '—', app.errors?.[name] || app.mcp?.[name]?.error || '—'])));
+      }));
+}
+
+function logSection() {
+  const box = state.log;
+  return h('section', { class: 'facts' }, h('h2', null, '最近切换'),
+    box.error ? problemBlock(box.error, loadLog) : !box.entries ? loadingBlock() :
+      box.entries.length ? dataTable(['时间', '动作', '后端'], box.entries.map(e => [new Date(e.at).toLocaleString(), logLabel(e.action), e.from + ' → ' + e.to])) : '还没有切换记录。',
+    box.skipped > 0 && h('p', { class: 'muted' }, `${box.skipped} 行记录无法解析，已跳过。`),
+    box.entries && box.total > box.entries.length && button('加载更多', 'btn-secondary', () => loadLog(true), { disabled: box.loading }));
 }
 
 boot();

@@ -59,6 +59,53 @@ try {
     if ((ConvertTo-UiJobArguments @{cmd = 'uninstall'}) -contains '--purge-data') { throw 'Uninstall must preserve history by default.' }
     Assert-Throws { ConvertTo-UiJobArguments @{cmd = 'uninstall'; purgeData = 'false'} } '布尔值' 'Invalid purge option accepted.'
 
+    # JSON arrays preserve permission precedence across PowerShell 7 versions.
+    & {
+        function Invoke-UiControl([string[]]$Arguments) {
+            $script:capturedArgs = $Arguments
+            $pos = [array]::IndexOf($Arguments, '--from')
+            if ($pos -ge 0) {
+                $script:capturedStage = $Arguments[$pos + 1]
+                $script:capturedBytes = [IO.File]::ReadAllBytes($script:capturedStage)
+            }
+            @{ exitCode = 0; stdout = '{"data":{}}'; stderr = '' }
+        }
+        $digest = 'a' * 64
+        $out = Invoke-UiApi '/api/rules/save' @{ scope='installation'; content="甲`r`n乙"; expect=$digest }
+        if ($out.exitCode -ne 0 -or (Test-Path -LiteralPath $script:capturedStage) -or [Text.Encoding]::UTF8.GetString($script:capturedBytes) -cne "甲`r`n乙") { throw 'Rule staging failed.' }
+        [void](Invoke-UiApi '/api/settings/save' @{ expect='absent'; thinkingCommand=$false; unrelated=1; mcpPermission=@(@{pattern='*'; action='ask'}, @{pattern='docs_*'; action='allow'}) })
+        $patch = [Text.Encoding]::UTF8.GetString($script:capturedBytes) | ConvertFrom-Json -AsHashtable
+        if ($patch.thinkingCommand -ne $false -or $patch.ContainsKey('unrelated') -or ($patch.mcpPermission.pattern -join ',') -cne '*,docs_*') { throw 'Settings staging changed order or fields.' }
+        $stage = Invoke-UiApi '/api/config/stage' @{content='{"version":1}'}
+        $file = Get-UiStagePath $stage.id
+        [void](Invoke-UiApi '/api/config/import' @{stage=$stage.id; replace=$false; dryRun=$true})
+        if (!(Test-Path -LiteralPath $file) -or '--dry-run' -notin $script:capturedArgs) { throw 'Preview lost stage.' }
+        [void](Invoke-UiApi '/api/config/import' @{stage=$stage.id; replace=$true; dryRun=$false})
+        if (Test-Path -LiteralPath $file) { throw 'Committed import kept stage.' }
+        Assert-Throws { Get-UiStagePath $stage.id } '过期' 'Missing stage accepted.'
+        Assert-Throws { Get-UiStagePath '../bad' } '编号' 'Bad stage id accepted.'
+        Assert-Throws { New-UiStageFile ([string][char]0xD800) } '编码' 'Unpaired surrogate accepted.'
+        Assert-Throws { ConvertTo-UiCommand @{cmd='config.restore'; id=[guid]::NewGuid().ToString(); dryRun='false'} } '布尔' 'Non-boolean accepted.'
+        Assert-Throws { ConvertTo-UiCommand @{cmd='config.backups'; limit='5'} } '分页' 'Invalid limit accepted.'
+        Assert-Throws { ConvertTo-UiCommand @{cmd='rules.remove'; scope='other'; expect=$digest} } '范围' 'Bad scope accepted.'
+        Assert-Throws { ConvertTo-UiCommand @{cmd='rules.remove'; scope='application'; expect='wrong'} } '摘要' 'Bad digest accepted.'
+        $script:Ui.Job = @{ Done = $false }
+        Assert-Throws { Invoke-UiApi '/api/rules/save' @{} } '任务运行中' 'Rules save during a job accepted.'
+        Assert-Throws { ConvertTo-UiCommand @{cmd='apps.add'; path=$root} } '任务运行中' 'App write during a job accepted.'
+        $script:Ui.Job = $null
+    }
+    & {
+        function Invoke-UiProcess($FileName, [string[]]$Arguments) { $Arguments -join '|' }
+        $fake = Join-Path $state 'shadowbot-pi.exe'
+        [IO.File]::WriteAllText($fake, '')
+        try {
+            foreach ($cmd in 'rules.show','settings.show','log') {
+                $argsForControl = ConvertTo-UiCommand @{ cmd=$cmd }
+                $route = Invoke-UiControl $argsForControl
+                if ($route -cne ('config|' + ($argsForControl -join '|'))) { throw "Wrong launcher route for $cmd" }
+            }
+        } finally { [IO.File]::Delete($fake) }
+    }
     # Tokens are random hex and compared in full.
     $token = New-UiToken
     if ($token -cnotmatch '^[0-9a-f]{64}$' -or $token -eq (New-UiToken)) { throw 'Tokens must be 64 random hex characters.' }
@@ -306,6 +353,16 @@ try {
     $headers = @{ 'X-Token' = $serverToken }
     $answer = Invoke-WebRequest -Uri "${url}api/state" -Method Post -Body '{}' -ContentType 'application/json' -Headers $headers -SkipHttpErrorCheck
     if ($answer.StatusCode -ne 200 -or ($answer.Content | ConvertFrom-Json).installed) { throw 'The token must unlock the state endpoint.' }
+    $raw = '{"note":"' + ('x' * 1MB) + '"}'
+    $stageResponse = Invoke-WebRequest -Uri "${url}api/config/stage" -Method Post -Body $raw -ContentType 'application/json' -Headers $headers
+    $staged = $stageResponse.Content | ConvertFrom-Json
+    if ($staged.bytes -ne $raw.Length -or $staged.id -cnotmatch '^[0-9a-f]{32}$') { throw 'Large raw stage body was changed.' }
+    $discard = Invoke-WebRequest -Uri "${url}api/config/discard" -Method Post -Body (@{stage=$staged.id} | ConvertTo-Json) -ContentType 'application/json' -Headers $headers
+    if (!($discard.Content | ConvertFrom-Json).ok) { throw 'Discard failed.' }
+    $large = Invoke-WebRequest -Uri "${url}api/run" -Method Post -Body $raw -ContentType 'application/json' -Headers $headers -SkipHttpErrorCheck
+    if ($large.StatusCode -ne 413) { throw 'Normal endpoints must retain their 1 MiB limit.' }
+    $badRule = Invoke-WebRequest -Uri "${url}api/rules/save" -Method Post -Body '{"content":"\ud800","expect":"absent","scope":"installation"}' -ContentType 'application/json' -Headers $headers -SkipHttpErrorCheck
+    if ($badRule.StatusCode -ne 400 -or $badRule.Content -notmatch '无法编码') { throw 'Invalid surrogate accepted.' }
     $refused = Invoke-WebRequest -Uri "${url}api/run" -Method Post -Body '{"cmd":"apps.select"}' -ContentType 'application/json' -Headers $headers -SkipHttpErrorCheck
     if ($refused.StatusCode -ne 400 -or ($refused.Content | ConvertFrom-Json).error -notmatch '不支持的操作') { throw 'Unknown commands must come back as errors.' }
     $missing = Invoke-WebRequest -Uri "${url}../switch.ps1" -SkipHttpErrorCheck
