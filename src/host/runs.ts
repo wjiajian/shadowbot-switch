@@ -336,6 +336,7 @@ class HostRuns<Model, Native> {
       return true;
     } catch (error) {
       const cancelled = abort.signal.aborted;
+      if (!cancelled && databaseBusy(error)) throw error;
       const reported = cancelled ? new RequestError(409, '会话摘要已取消，可以重试。')
         : isRequestError(error) || isUserError(error) ? error : new UserError(this.driver.fallbackError);
       this.store.event(session.id, 'session.error', { sessionID: session.id, error: failure(reported.message, cancelled) });

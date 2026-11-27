@@ -59,9 +59,11 @@ flowchart LR
 > [!IMPORTANT]
 > 启动器只接管已验证的影刀版本，会校验原版 `opencode.exe`。影刀升级后，需等本项目完成兼容验证再切换。
 
-影刀升级会创建新的版本目录。升级后先看 `status` 或 `doctor`。如果提示仍关联旧目录，请保存工作、退出影刀并执行 `.\switch.ps1 use pi --wait`。如果影刀和本项目同时升级，先拉取源码，退出影刀并运行 `.\switch.ps1 update pi --local-only --wait`。该命令会保留 Pi 版本、重建兼容服务并接入新目录。用 `status` 确认；当前后端已是 Pi 且目录正确时即可启动影刀。若要从原版切到 Pi，再运行 `.\switch.ps1 use pi --wait`。
+影刀升级后常会自动启动客户端。**如果之前在用 Pi，请在打开 Copilot 前先从托盘完全退出影刀**，运行 `.\switch.ps1 use pi --wait` 重新接入。如果本项目也有更新，先拉取源码，再运行 `.\switch.ps1 update pi --local-only --wait`，保留 Pi 版本并重建兼容服务。用 `.\switch.ps1 status` 确认当前后端为 Pi、影刀目录正确后，再启动影刀。如果当前选中原版，仍需运行 `.\switch.ps1 use pi --wait` 才会切到 Pi。
 
-如果升级期间打开过原版 Copilot，切换前会核对活动会话与托管后端的记录。发现混用时会停止。请退出影刀，完整备份活动数据库及其 WAL、用户目录下的 `current-session.json` 和 `.shadowbot-switch`。保留升级期间的原版会话副本，再用同一时间点的托管数据库、适配器历史和会话指针恢复后重试。
+使用 Pi 时，最新会话直接写入 `opencode.db`，切走时才保存 Pi 快照。如果重新接入前打开过原版 Copilot，它可能创建空白草稿或改写会话的 `metadata`，导致归属检查未通过。请先退出影刀，备份 `opencode.db`、同目录下现有的 `opencode.db-wal` 和 `opencode.db-shm`、`users/.../current-session.json` 及整个 `.shadowbot-switch`。
+
+有升级前的一致备份时，从同一时间点恢复数据库、适配器历史和会话指针。否则，在副本中按 Pi 适配器的会话 ID 核对，只分离原版新增且没有 Pi 映射的会话，确认不要的空草稿才删除。如果原有会话内容未变、仅元数据有差异，可按 Pi 记录同步对应字段，再重新接入。
 
 ### 安装并切换
 

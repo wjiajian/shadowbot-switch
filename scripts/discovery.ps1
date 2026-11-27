@@ -115,9 +115,11 @@ function Get-ShadowBotAttachment($State, $RecordedPath, $Selected, $Bundled = 'o
         $hostAgent = Resolve-ShadowBotAgent (Split-Path (Split-Path $RecordedPath)) -WarningAction SilentlyContinue
         $path = $hostAgent.agentPath
         $locator = "$path.shadowbot-pi.json"
-        $attached = if (!(Test-Path -LiteralPath $locator)) { 'bundled' }
-            elseif (Test-ShadowBotPathEqual (Get-ShadowBotLocatorHome $locator) $State) { 'managed' }
-            else { 'other' }
+        $attached = 'bundled'
+        if (Test-Path -LiteralPath $locator) {
+            try { $attached = if (Test-ShadowBotPathEqual (Get-ShadowBotLocatorHome $locator) $State) { 'managed' } else { 'other' } }
+            catch { $attached = 'invalid' }
+        }
         $action = $null
         $hint = if ($attached -eq 'other') {
             $action = 'repair'
@@ -125,6 +127,9 @@ function Get-ShadowBotAttachment($State, $RecordedPath, $Selected, $Bundled = 'o
         } elseif (!(Test-ShadowBotPathEqual $path $RecordedPath)) {
             $action = 'use'
             "影刀 $($hostAgent.hostVersion) 的当前程序在 $path，安装记录仍指向 $RecordedPath。退出影刀后运行 .\switch.ps1 use $Selected --wait。"
+        } elseif ($attached -eq 'invalid') {
+            $action = 'repair'
+            '当前启动器定位文件已损坏或无效。退出影刀后运行 repair。'
         } elseif (($Selected -ne $Bundled) -ne ($attached -eq 'managed')) {
             $action = 'use'
             "当前影刀目录的启动器与所选后端不匹配。退出影刀后运行 .\switch.ps1 use $Selected --wait。"

@@ -80,6 +80,16 @@ test('driver, HTTP, translation, refresh and database errors use the shared fini
   }
 });
 
+test('compaction propagates SQLite busy after claiming the session and releases the lease', async t => {
+  const { driver, runs, session, store, frames } = fixture(t);
+  const busy = Object.assign(new Error('database is locked'), { code: 'ERR_SQLITE_ERROR', errcode: 5 });
+  driver.summarize = async () => { throw busy; };
+  await assert.rejects(runs.summarize(session, { providerID: 'fixture', modelID: 'model' }), error => error === busy);
+  assert.equal(frames.some(frame => frame.type === 'session.error'), false);
+  assert.equal(runs.active.size, 0);
+  assert.equal(store.meta(session.id).running, 0);
+});
+
 test('explicit cancellation takes priority over an uncertain tool', async t => {
   const { driver, session, runs, send } = fixture(t);
   const entered = Promise.withResolvers();

@@ -82,7 +82,7 @@ function value(input: unknown, field: string) {
 type Listener = { res: ServerResponse; global: boolean; root: string };
 type Workspace = { heartbeat?: NodeJS.Timeout; disposing?: Promise<void>; disposed?: boolean; mcp: McpConnection; runs: HarnessRuns; revision: string; queue: Promise<void>; configurationError?: string; menuReconnect?: boolean };
 
-class Bridge {
+export class Bridge {
   readonly server;
   private readonly config: HostConfig;
   private listeners = new Set<Listener>();
@@ -144,6 +144,7 @@ class Bridge {
   }
 
   private publish(root: string, local: Workspace) {
+    if (local.disposed) return;
     try { publishRuntimeState(this.home, { harness: this.harness.id, root, active: local.runs.active.size, revision: local.revision,
       mcp: local.mcp.status(), errors: local.mcp.configurationErrors(), configurationError: local.configurationError, menuReconnect: local.menuReconnect }); }
     catch { console.error('ShadowBot Switch 无法写入运行状态，请检查安装数据目录的权限。'); }
@@ -304,13 +305,12 @@ class Bridge {
           if (!client.global) client.res.end();
         }
       };
-      const loading = this.workspaces.get(key);
-      if (loading) {
-        const local = await loading;
+      const local = await this.workspaces.get(key)?.catch(() => undefined);
+      if (local) {
         local.disposing ??= this.configureMcp(local, async () => {
           try {
-            await local.mcp.close();
-            this.config.reload?.();
+            try { await local.mcp.close(); }
+            finally { this.config.reload?.(); }
           } finally {
             local.disposed = true;
             clearInterval(local.heartbeat);
@@ -511,7 +511,7 @@ async function main() {
   });
 }
 
-void main().catch(error => {
+if (import.meta.main) void main().catch(error => {
   console.error(`ShadowBot Switch startup failed: ${error instanceof Error ? error.message : 'unknown error'}`);
   process.exitCode = 1;
 });

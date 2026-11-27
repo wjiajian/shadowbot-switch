@@ -145,6 +145,11 @@ test('checks, local rebuilds and uninstall send their requested options', async 
     let click;
     context.button = (name, _style, handler) => { if (name === label) click = handler; return name; };
     assert.match(run('harnessColumn(spec)'), new RegExp(label));
+    if (action === 'repair') {
+      for (const installed of [true, false]) {
+        assert.doesNotMatch(run(`harnessColumn({...spec,selected:false,installed:${installed}})`), /切换到此|安装并切换/);
+      }
+    }
     await click();
     assert.equal(calls.at(-1)[1].cmd, command);
     assert.equal(calls.at(-1)[1].harness, command === 'use' ? spec.id : undefined);

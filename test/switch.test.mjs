@@ -165,6 +165,32 @@ test('same-backend reattachment and switching away reject mixed histories before
   } finally { store.db.close(); }
 });
 
+test('standalone ownership preflight handles a missing adapter and sessions without metadata', t => {
+  const root = mkdtempSync(join(tmpdir(), 'switch-cli-'));
+  const database = join(root, 'opencode.db');
+  const adapter = join(root, 'adapter.db');
+  const db = new DatabaseSync(database);
+  t.after(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
+  db.exec('CREATE TABLE session(id TEXT, title TEXT, time_updated INTEGER)');
+  const check = expected => {
+    const result = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', 'src/history-ownership.ts', database, adapter],
+      { encoding: 'utf8', windowsHide: true });
+    assert.equal(result.status, expected, result.stderr);
+    if (expected) assert.match(result.stderr, /活动会话库/);
+  };
+  check(0);
+  db.exec("INSERT INTO session VALUES ('one', 'draft', 1)");
+  check(1);
+  assert.equal(existsSync(adapter), false);
+  const history = new DatabaseSync(adapter);
+  history.exec('CREATE TABLE session(id TEXT, session TEXT)');
+  history.prepare('INSERT INTO session VALUES (?, ?)').run('one', JSON.stringify({ title: 'draft', time: { updated: 1 } }));
+  history.close();
+  check(0);
+  db.exec("UPDATE session SET title = 'changed'");
+  check(1);
+});
+
 test('schema verification identifies the missing required column', t => {
   const root = mkdtempSync(join(tmpdir(), 'switch-schema-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

@@ -71,10 +71,12 @@ function Read-LocalStatus([switch]$InspectHost) {
             $result.backend = "$($backend.mode) $($record.version)".Trim()
             $result.recoveryPending = (Test-Path -LiteralPath (Join-Path $state 'activation.pending.json')) -or (Test-Path -LiteralPath (Join-Path $state 'switch.pending.json'))
             if ($InspectHost) {
-                . (Join-Path $project 'scripts/discovery.ps1')
-                $bundled = $installation.bundled.id ?? 'original'
-                $selected = if ($backend.mode -eq 'observe') { $bundled } else { $backend.mode }
-                $result.attachment = Get-ShadowBotAttachment $state $installation.agentPath $selected $bundled
+                try {
+                    . (Join-Path $project 'scripts/discovery.ps1')
+                    $bundled = $installation.bundled.id ?? 'original'
+                    $selected = if ($backend.mode -eq 'observe') { $bundled } else { $backend.mode }
+                    $result.attachment = Get-ShadowBotAttachment $state $installation.agentPath $selected $bundled
+                } catch { }
             }
             $result.next = if ($result.recoveryPending) { '.\switch.ps1 repair' } else { '.\switch.ps1 doctor' }
         } catch { $result.next = '安装记录无法读取。保留 .shadowbot-switch 数据，恢复安装记录后运行 .\switch.ps1 repair。' }

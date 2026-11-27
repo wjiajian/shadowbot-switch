@@ -3,16 +3,20 @@
 . (Join-Path $PSScriptRoot 'runtime.ps1')
 
 function Repair-InstallationLocator($State, [scriptblock]$CheckStopped) {
+    $State = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($State))
     $manifest = Join-Path $State 'install.json'
     $installation = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json -AsHashtable
     if (!(Test-Path -LiteralPath (Join-Path $State 'original/opencode.exe') -PathType Leaf)) { throw '原程序备份缺失，不能修复。' }
     $locator = "$($installation.agentPath).shadowbot-pi.json"
-    if (Test-Path -LiteralPath $locator) {
-        $oldState = Get-ShadowBotLocatorHome $locator
-        if ($oldState -ne $State -and (Test-Path -LiteralPath $oldState)) { throw "原项目仍存在：$oldState。请从原项目操作，避免接管另一套会话。" }
+    $hasLocator = Test-Path -LiteralPath $locator
+    $oldState = $null
+    if ($hasLocator) {
+        try { $oldState = Get-ShadowBotLocatorHome $locator }
+        catch { $oldState = $null }
+        if ($oldState -and !(Test-ShadowBotPathEqual $oldState $State) -and (Test-Path -LiteralPath $oldState)) { throw "原项目仍存在：$oldState。请从原项目操作，避免接管另一套会话。" }
     }
     & $CheckStopped
-    if ($oldState -and $oldState -ne $State -and (Test-Path -LiteralPath (Join-Path $State 'activation.pending.json'))) {
+    if ($hasLocator -and !(Test-ShadowBotPathEqual $oldState $State) -and (Test-Path -LiteralPath (Join-Path $State 'activation.pending.json'))) {
         Write-AtomicJson $locator @{ home = $State }
     }
     Complete-Activation $State $CheckStopped

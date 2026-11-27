@@ -78,6 +78,9 @@ function Read-Installation($StateDirectory) {
     $path = Join-Path $StateDirectory 'install.json'
     if (!(Test-Path -LiteralPath $path)) { return $null }
     $existing = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
+    if ($existing.agentPath -isnot [string] -or [string]::IsNullOrWhiteSpace($existing.agentPath)) {
+        throw '安装记录缺少有效的 opencode.exe 路径。'
+    }
     $recordedAgent = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($existing.agentPath))
     if ((Split-Path -Leaf $recordedAgent) -ne 'opencode.exe' -or !(Test-ShadowBotPathEqual (Split-Path (Split-Path $recordedAgent)) $shadowBot) -or
         $existing.database -ne $database -or $existing.users -ne $users) {
@@ -150,7 +153,7 @@ function Install-SelectedHarness {
                 $projectInstall = Read-Installation $state
             }
             $owner = if (Test-Path -LiteralPath $locator) { Get-ShadowBotLocatorHome $locator }
-            if ($Update -and $projectInstall.agentPath -eq $agentExe -and
+            if ($Update -and (Test-ShadowBotPathEqual $projectInstall.agentPath $agentExe) -and
                 (($owner -eq $state) -or (!$owner -and (Get-SelectedHarness $state $project) -eq $bundled.id)) -and $record.release -and !$record.legacy -and !$plan.needsLock -and
                 [bool]$record.dependencies.explicit -eq [bool]$plan.explicit -and
                 !(Test-Path -LiteralPath (Join-Path $state 'switch.pending.json')) -and
@@ -197,15 +200,19 @@ function Install-SelectedHarness {
         $migrateLegacy = $true
     }
     $upgraded = $projectInstall -and !(Test-ShadowBotPathEqual $projectInstall.agentPath $agentExe)
-    if ($upgraded) {
+    if ($projectInstall -and ($upgraded -or !$activeHome)) {
         $selected = Get-SelectedHarness $state $project
         if ($selected -ne $bundled.id) {
             # Existing installations can still dispatch "backend" to the old release.
             # Check before replacing either launcher, the backup, or the manifest.
             $runtime = if ($projectInstall.runtime -or $projectInstall.runtimeRelease) { Get-InstallationRuntime $state $projectInstall } else { $state }
-            & (Join-Path $runtime 'node.exe') --disable-warning=ExperimentalWarning (Join-Path $project 'src/history-ownership.ts') $projectInstall.database (Join-Path $state "backends/$selected/adapter.db")
+            $nodeExe = Join-Path $runtime 'node.exe'
+            if (!(Test-Path -LiteralPath $nodeExe -PathType Leaf)) { throw "缺少运行时 Node 程序，无法核对会话归属：$nodeExe" }
+            & $nodeExe --disable-warning=ExperimentalWarning (Join-Path $project 'src/history-ownership.ts') $projectInstall.database (Join-Path $state "backends/$selected/adapter.db")
             if ($LASTEXITCODE -ne 0) { throw '会话归属检查未通过，已停止重新接入。请保留当前数据库及两个后端快照。' }
         }
+    }
+    if ($upgraded) {
         $oldAgent = $projectInstall.agentPath
         Write-Warning "检测到影刀已升级：$oldAgent → $agentExe，将重新备份原版。"
         $oldLocator = "$oldAgent.shadowbot-pi.json"

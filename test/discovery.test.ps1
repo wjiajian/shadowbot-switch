@@ -12,10 +12,17 @@ try {
         if ((Resolve-ShadowBotAgent $root).agentPath -ne (Join-Path $root "shadowbot-$expected/opencode.exe")) { throw 'Wrong host directory selected.' }
     }
     # Generate a real Windows version resource for the pwsh -File stdout test.
-    $source = Join-Path $root 'OldHost.cs'
-    Set-Content $source '[assembly: System.Reflection.AssemblyInformationalVersion("5.0.0")] public class OldHost { public static void Main() {} }'
-    & "$env:SystemRoot/Microsoft.NET/Framework/v4.0.30319/csc.exe" /nologo "/out:$(Join-Path $root 'ShadowBot.exe')" $source
-    if ($LASTEXITCODE -ne 0) { throw 'Unable to build low-version host fixture.' }
+    $source = '[assembly: System.Reflection.AssemblyInformationalVersion("5.0.0")] public class OldHost { public static void Main() {} }'
+    $hostFile = Join-Path $root 'ShadowBot.exe'
+    if ($IsWindows) {
+        $sourceFile = Join-Path $root 'OldHost.cs'
+        Set-Content $sourceFile $source
+        & "$env:SystemRoot/Microsoft.NET/Framework/v4.0.30319/csc.exe" /nologo "/out:$hostFile" $sourceFile
+        if ($LASTEXITCODE -ne 0) { throw 'Unable to build low-version host fixture.' }
+    } else {
+        Remove-Item $hostFile
+        Add-Type -TypeDefinition $source -OutputAssembly $hostFile
+    }
     $agent = Join-Path $root 'shadowbot-6.10.0/opencode.exe'
     @{ agentPath = (Join-Path (Split-Path $agent) './opencode.exe') } | ConvertTo-Json | Set-Content (Join-Path $root 'install.json')
     $scriptPath = Join-Path (Split-Path $PSScriptRoot) 'scripts/discovery.ps1'
@@ -27,6 +34,15 @@ try {
         if ($owner -eq "$root/") {
             if ($data.attachment -ne 'managed' -or $data.warning) { throw 'Equivalent locator and executable paths must match.' }
         } elseif ($data.attachment -ne 'other' -or $data.action -ne 'repair') { throw 'Expected repair for a different locator.' }
+    }
+    foreach ($invalid in '{', '{"home":""}', '{"home":1}') {
+        Set-Content -LiteralPath "$agent.shadowbot-pi.json" $invalid
+        $binding = Get-ShadowBotAttachment $root $agent pi
+        if ($binding.hostVersion -ne '5.0.0' -or $binding.agentPath -ne $agent -or $binding.action -ne 'repair' -or $binding.warning -notmatch '定位文件已损坏') {
+            throw 'A corrupt locator must retain the detected host and offer repair.'
+        }
+        $old = Join-Path $root 'shadowbot-6.4.0/opencode.exe'
+        if ((Get-ShadowBotAttachment $root $old pi).action -ne 'use') { throw 'An upgraded host must offer reattachment.' }
     }
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }
 
@@ -77,6 +93,24 @@ function Get-OpenCodeVersion($Path,$Fallback) { Get-Content -LiteralPath $Path }
         if ((Get-Content $old) -ne 'launcher' -or (Get-Content $backup) -ne '1.19.0' -or !(Test-Path "$old.shadowbot-pi.json")) { throw 'Mixed history preflight modified the installation.' }
         if ((Get-Content (Join-Path $state 'install.json') -Raw | ConvertFrom-Json).agentPath -ne $old) { throw 'Manifest changed on failed preflight.' }
     }
+    $manifest = Join-Path $state 'install.json'
+    $record = Get-Content $manifest -Raw | ConvertFrom-Json
+    $record.agentPath = $null
+    $record | ConvertTo-Json | Set-Content $manifest
+    try { & $installer -Harness pi -ShadowBotDirectory $hostDir; throw 'Expected invalid agent path to fail.' }
+    catch { if ($_.Exception.Message -notmatch '安装记录缺少有效的 opencode.exe 路径') { throw } }
+    $record.agentPath = $new
+    $record | ConvertTo-Json | Set-Content $manifest
+    try {
+        & $installer -Harness pi -ShadowBotDirectory $hostDir
+        throw 'Expected mixed history to block in-place reattachment.'
+    } catch { if ($_.Exception.Message -notmatch '会话归属检查未通过') { throw } }
+    if ((Get-Content $backup) -ne '1.19.0') { throw 'In-place preflight replaced the previous backup.' }
+    Remove-Item (Join-Path $state 'node.exe')
+    try { & $installer -Harness pi -ShadowBotDirectory $hostDir; throw 'Expected preflight to require a runtime.' }
+    catch { if ($_.Exception.Message -notmatch '缺少运行时 Node 程序') { throw } }
+    $record.agentPath = $old
+    $record | ConvertTo-Json | Set-Content $manifest
     @{ mode = 'original' } | ConvertTo-Json | Set-Content (Join-Path $state 'backend.json')
     & (Join-Path $project 'install.ps1') -Harness original -ShadowBotDirectory $hostDir
     $install = Get-Content (Join-Path $state 'install.json') -Raw | ConvertFrom-Json

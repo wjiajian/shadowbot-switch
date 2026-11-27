@@ -682,7 +682,7 @@ function harnessColumn(spec) {
   const attachment = state.base.shadowbot?.attachment;
   if (spec.selected && attachment?.action === 'repair') {
     actions.push(button('修复', 'btn-primary', () => startJob('repair'), { disabled: Boolean(job) }));
-  } else if (!spec.selected || attachment?.action === 'use') {
+  } else if (attachment?.action !== 'repair' && (!spec.selected || attachment?.action === 'use')) {
     const host = state.base.shadowbot;
     const needsHost = !state.base.installed && !(host.directory && host.version);
     actions.push(button(spec.selected ? '重新接入' : spec.installed ? '切换到此' : '安装并切换', 'btn-primary', () => startJob('use', spec.id),

@@ -7,6 +7,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { json as readJsonBody } from 'node:stream/consumers';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { NoMcp } from '../dist/service/adapter.js';
+import { Bridge } from '../dist/service/main.js';
 import { syncSkillCommands } from '../dist/service/skill-commands.js';
 import { listen, modelFixture, mcpFixture, tempFixture, start, stream, get } from './helpers/bridge.mjs';
 
@@ -131,6 +133,42 @@ test('compaction on a reverted session is cancellable, retryable and visible on 
     model.server.close();
     rmSync(fixture.root, { recursive: true, force: true });
   }
+});
+
+test('a refresh finishing after disposal cannot recreate the runtime state', async t => {
+  const fixture = tempFixture();
+  const root = realpathSync.native(fixture.workspace);
+  const mcp = new NoMcp();
+  const reloadConfig = t.mock.fn();
+  const bridge = new Bridge(fixture.home, { database: fixture.database, resources: fixture.root }, new Set(),
+    { id: 'fixture', capabilities: { mcp: true } }, {
+      createConfig: () => ({ value: {}, reload: reloadConfig }), mcp: { create: () => mcp },
+      createRuns: () => ({ active: new Map(), start(_session, _prompt, _run) {} }),
+    });
+  const url = await listen(bridge.server);
+  const local = await bridge.local(root);
+  const resume = Promise.withResolvers();
+  t.after(async () => {
+    resume.resolve();
+    clearInterval(local.heartbeat);
+    await new Promise(resolve => bridge.server.close(resolve));
+    bridge.store.db.close();
+    rmSync(fixture.root, { recursive: true, force: true });
+  });
+  const states = () => readdirSync(join(fixture.home, 'running'));
+  assert.equal(states().length, 1);
+  const reload = t.mock.method(mcp, 'reloadCustom', () => resume.promise);
+  writeFileSync(join(fixture.home, 'reload.request'), 'refresh');
+  const refreshing = bridge.refresh(root, local);
+  assert.equal(reload.mock.callCount(), 1);
+  t.mock.method(mcp, 'close', async () => { throw new Error('MCP close failed'); });
+  const disposed = await get(fetch(url + '/instance/dispose?directory=' + encodeURIComponent(root), { method: 'POST' }), 500);
+  assert.equal(disposed.name, 'UnknownError');
+  assert.equal(reloadConfig.mock.callCount(), 1);
+  assert.deepEqual(states(), []);
+  resume.resolve();
+  await refreshing;
+  assert.deepEqual(states(), []);
 });
 
 test('disposing one workspace preserves live config and auth without starting idle MCP servers', async () => {
@@ -634,6 +672,10 @@ test('SQLite busy rejects admission and status recovers an abandoned local run l
     writer.exec('BEGIN IMMEDIATE');
     const error = await get(prompt(), 503);
     assert.equal(error.name, 'DatabaseBusyError');
+    const summary = await get(api(`/session/${session.id}/summarize`, {
+      method: 'POST', data: { providerID: 'fixture', modelID: 'model' },
+    }), 503);
+    assert.equal(summary.name, 'DatabaseBusyError');
     assert.equal(model.requests.length, 0);
     writer.exec('ROLLBACK');
     writer.prepare('UPDATE session SET running=1, owner_pid=? WHERE id=?').run(bridge.pid, session.id);

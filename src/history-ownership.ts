@@ -1,6 +1,5 @@
 import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { pathToFileURL } from 'node:url';
 
 // The installer also runs this standalone file with the previous release's Node
 // before changing its launcher or manifest. Keep it independent of compiled modules.
@@ -12,7 +11,7 @@ export function verifyHistoryOwnership(database: string, adapterPath: string) {
     if (!existsSync(adapterPath)) {
       mismatch = db.prepare('SELECT 1 FROM main.session LIMIT 1').get();
     } else {
-      db.prepare('ATTACH DATABASE ? AS adapter').run(pathToFileURL(adapterPath).href + '?mode=ro');
+      db.prepare('ATTACH DATABASE ? AS adapter').run(adapterPath);
       const hasMetadata = db.prepare('PRAGMA main.table_info(session)').all().some(column => column.name === 'metadata');
       const checkMarker = hasMetadata ? `OR json_extract(s.metadata, '$.shadowbotContextCompatibility')
         IS NOT json_extract(a.session, '$.metadata.shadowbotContextCompatibility')` : '';
