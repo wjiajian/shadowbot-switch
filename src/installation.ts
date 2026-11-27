@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { UserError } from './errors.js';
 import { harnessID } from './harnesses.js';
@@ -72,12 +73,17 @@ export function ownsAgent(home: string, install: Installation) {
   } catch { return false; }
 }
 
-export function hostAttachment(home: string, selected: string) {
-  const script = join(dirname(home), 'scripts', 'discovery.ps1');
+type Attachment = { attachment: string; action?: string; recordedPath?: string; agentPath?: string; hostVersion?: string; warning?: string };
+export function hostAttachment(home: string, selected: string): Attachment {
   try {
-    const result = execFileSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', script, '-InspectInstallation', home, '-SelectedHarness', selected],
+    const cached = process.env.SHADOWBOT_SWITCH_ATTACHMENT;
+    if (cached) return JSON.parse(cached);
+    const scripts = [join(dirname(home), 'scripts', 'discovery.ps1'), fileURLToPath(new URL('../discovery.ps1', import.meta.url))];
+    const script = scripts.find(existsSync);
+    if (!script || process.platform !== 'win32') return { attachment: 'unknown', warning: '当前环境无法检测 Windows 影刀安装目录。' };
+    const result = execFileSync(process.env.SHADOWBOT_SWITCH_PWSH || 'pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', script, '-InspectInstallation', home, '-SelectedHarness', selected],
       { windowsHide: true, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
-    return JSON.parse(result) as { attachment: string; recordedPath?: string; agentPath?: string; hostVersion?: string; warning?: string };
+    return JSON.parse(result);
   } catch {
     return { attachment: 'unknown', warning: '无法确认当前影刀程序。检查 PowerShell 7 和项目的 scripts/discovery.ps1。' };
   }

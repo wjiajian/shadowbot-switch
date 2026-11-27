@@ -1,6 +1,6 @@
 import { appConfigFiles } from './config-paths.js';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWrite, readJson } from './installation.js';
 
@@ -18,9 +18,17 @@ export type RuntimeState = {
   mcp: Record<string, unknown>; errors: Record<string, string>; configurationError?: string; menuReconnect?: boolean;
 };
 
+function runtimeStatePath(home: string, root: string) {
+  const key = createHash('sha256').update(root.toLowerCase()).digest('hex').slice(0, 20);
+  return join(home, 'running', `${process.pid}-${key}.json`);
+}
+
+export function removeRuntimeState(home: string, root: string) {
+  rmSync(runtimeStatePath(home, root), { force: true });
+}
+
 export function publishRuntimeState(home: string, state: Omit<RuntimeState, 'pid' | 'updated'>) {
-  const key = createHash('sha256').update(state.root.toLowerCase()).digest('hex').slice(0, 20);
-  atomicWrite(join(home, 'running', `${process.pid}-${key}.json`), JSON.stringify({ ...state, pid: process.pid, updated: Date.now() }));
+  atomicWrite(runtimeStatePath(home, state.root), JSON.stringify({ ...state, pid: process.pid, updated: Date.now() }));
 }
 
 export function runtimeStates(home: string, includeStopped = false) {

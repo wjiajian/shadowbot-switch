@@ -22,7 +22,7 @@ import { ShadowBotContext, skills, workspace } from './shadowbot.js';
 import { databaseBusy, id, Store } from './store.js';
 import type { Frame } from './store.js';
 import { verifySchema } from './switch.js';
-import { configurationRevision, publishRuntimeState } from './runtime-state.js';
+import { configurationRevision, publishRuntimeState, removeRuntimeState } from './runtime-state.js';
 import { installationThinkingSetting, skillInventory } from './shadowbot.js';
 import { thinkingMenuCommand, skillCommand, syncSkillCommands } from './skill-commands.js';
 import { thinkingEnabled } from './thinking-command.js';
@@ -30,7 +30,7 @@ import { userMessage } from './errors.js';
 import { agentRules } from './agent-rules.js';
 
 function metadata(input: unknown) {
-  if (input == null) return undefined;
+  if (input === undefined) return undefined;
   if (!object(input)) throw new RequestError(400, 'Invalid session metadata');
   return input;
 }
@@ -80,11 +80,11 @@ function value(input: unknown, field: string) {
 }
 
 type Listener = { res: ServerResponse; global: boolean; root: string };
-type Workspace = { heartbeat?: NodeJS.Timeout; disposed?: boolean; mcp: McpConnection; runs: HarnessRuns; revision: string; queue: Promise<void>; configurationError?: string; menuReconnect?: boolean };
+type Workspace = { heartbeat?: NodeJS.Timeout; disposing?: Promise<void>; disposed?: boolean; mcp: McpConnection; runs: HarnessRuns; revision: string; queue: Promise<void>; configurationError?: string; menuReconnect?: boolean };
 
 class Bridge {
   readonly server;
-  private config: HostConfig;
+  private readonly config: HostConfig;
   private listeners = new Set<Listener>();
   private workspaces = new Map<string, Promise<Workspace>>();
   private store: Store;
@@ -295,24 +295,39 @@ class Bridge {
     if (path === '/command' && method === 'GET') return json(res, Object.entries(commands).map(([name, command]) => ({ ...command, name, hints: [] })));
     if (path === '/skill' && method === 'GET') return json(res, this.harness.capabilities.skills ? skills(this.agentDir, root, this.skillSources, this.config.value) : []);
 
-    const local = await this.local(root);
-    const { mcp, runs } = local;
     if (path === '/instance/dispose' && method === 'POST') {
-      await this.configureMcp(local, async () => {
-        const config = this.adapter.createConfig();
-        await mcp.close();
-        local.disposed = true;
-        clearInterval(local.heartbeat);
-        this.config = config;
-        this.workspaces.delete(root.toLowerCase());
+      const key = root.toLowerCase();
+      const notify = () => {
         for (const client of this.listeners) {
-          if (client.root.toLowerCase() !== root.toLowerCase()) continue;
+          if (client.root.toLowerCase() !== key) continue;
           this.frame(client, { id: id('evt'), type: 'server.instance.disposed', properties: { directory } }, directory);
           if (!client.global) client.res.end();
         }
-      });
+      };
+      const loading = this.workspaces.get(key);
+      if (loading) {
+        const local = await loading;
+        local.disposing ??= this.configureMcp(local, async () => {
+          try {
+            await local.mcp.close();
+            this.config.reload?.();
+          } finally {
+            local.disposed = true;
+            clearInterval(local.heartbeat);
+            this.workspaces.delete(key);
+            notify();
+            removeRuntimeState(this.home, root);
+          }
+        }).finally(() => { local.disposing = undefined; });
+        await local.disposing;
+      } else {
+        this.config.reload?.();
+        notify();
+      }
       return json(res, true);
     }
+    const local = await this.local(root);
+    const { mcp, runs } = local;
     if (resource === 'mcp') {
       if (!this.adapter.mcp) throw new RequestError(501, 'This harness does not support host MCP');
       if (path === '/mcp' && method === 'GET') return json(res, mcp.status());
@@ -376,6 +391,7 @@ class Bridge {
       if (!action && method === 'DELETE') return json(res, runs.delete(session));
       if (!action && method === 'PATCH') {
         const input = await body(req);
+        if (Object.keys(input).some(key => key !== 'title' && key !== 'metadata')) throw new RequestError(501, 'Unsupported session update field');
         const fields = metadata(input.metadata);
         const title = input.title === undefined ? undefined : value(input.title, 'title');
         if (title !== undefined && !fields) return json(res, runs.rename(session, title));
@@ -401,7 +417,9 @@ class Bridge {
         const model = { providerID: value(input.providerID, 'provider ID'), modelID: value(input.modelID, 'model ID') };
         const { result } = await this.enqueue(local, () => {
           if (!runs.summarize) throw new RequestError(501, 'This harness does not support session compaction');
-          return { result: runs.summarize(session, model) };
+          const current = this.store.get(identifier);
+          if (!current) throw new RequestError(404, 'Session not found');
+          return { result: runs.summarize(current, model) };
         });
         return json(res, await result);
       }

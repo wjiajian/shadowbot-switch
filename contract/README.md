@@ -18,7 +18,7 @@
 
 [新版面板请求样本](shadowbot-6.4.14.jsonl) 保留了原版 OpenCode 1.18.12 在空白草稿中处理的关键请求结构和状态码。新建会话的 POST 同时带有标题和 `metadata.shadowbotContextCompatibility`，实测初始值为 `{"version":1,"state":"completed"}`。没有标记且已有一轮对话时，面板用仅含 metadata 的 PATCH 保存迁移进度，释放工作区实例，重新连接 MCP，通过 `POST /session/{id}/summarize` 压缩上下文，再更新标记、重新连接并发送原消息。
 
-会话更新保留未提供的字段；显式传入的 metadata 对象整体替换旧对象。Pi 为迁移生成原生上下文摘要，并将摘要消息投影到共享会话库。6.3.39 的创建、改名和消息片段更新仍沿用原有接口。
+会话更新保留未提供的字段；显式传入的 metadata 对象整体替换旧对象。Pi 将 `agent.compaction.prompt` 作为附加要求传给 SDK，保留 SDK 自带的摘要模板。Pi 为迁移生成原生上下文摘要，并将摘要消息投影到共享会话库。6.3.39 的创建、改名和消息片段更新仍沿用原有接口。
 
 2026-11-27 在 Windows 影刀 6.4.14、Pi 1.6.1 上实测：
 

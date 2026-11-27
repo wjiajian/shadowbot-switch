@@ -1,7 +1,6 @@
 ﻿. (Join-Path $PSScriptRoot 'activation.ps1')
 . (Join-Path $PSScriptRoot 'processes.ps1')
 . (Join-Path $PSScriptRoot 'runtime.ps1')
-. (Join-Path $PSScriptRoot 'discovery.ps1')
 
 function Repair-InstallationLocator($State, [scriptblock]$CheckStopped) {
     $manifest = Join-Path $State 'install.json'
@@ -9,7 +8,7 @@ function Repair-InstallationLocator($State, [scriptblock]$CheckStopped) {
     if (!(Test-Path -LiteralPath (Join-Path $State 'original/opencode.exe') -PathType Leaf)) { throw '原程序备份缺失，不能修复。' }
     $locator = "$($installation.agentPath).shadowbot-pi.json"
     if (Test-Path -LiteralPath $locator) {
-        $oldState = (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json -AsHashtable).home
+        $oldState = Get-ShadowBotLocatorHome $locator
         if ($oldState -ne $State -and (Test-Path -LiteralPath $oldState)) { throw "原项目仍存在：$oldState。请从原项目操作，避免接管另一套会话。" }
     }
     & $CheckStopped

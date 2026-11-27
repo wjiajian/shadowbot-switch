@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import type { AssistantMessage, Part, Session, UserMessage } from '@opencode-ai/sdk/v2';
 import type { AdapterContext, HarnessRuns, Prompt, RunInput } from '../adapter.js';
 import { copilot, emptyTokens } from '../config.js';
-import { RequestError, UserError, userMessage } from '../errors.js';
+import { isRequestError, isUserError, RequestError, UserError, userMessage } from '../errors.js';
 import { Interactions } from '../interactions.js';
 import type { HostTool } from '../mcp/hub.js';
 import { installationThinkingSetting, skills } from '../shadowbot.js';
@@ -304,6 +304,7 @@ class HostRuns<Model, Native> {
       const summary = await this.driver.summarize(meta, model, abort.signal);
       abort.signal.throwIfAborted();
       if (summary.leaf !== meta.native_leaf) {
+        this.store.commitRevert(session.id);
         const now = Date.now();
         const user: UserMessage = { id: id('msg'), sessionID: session.id, role: 'user', agent: copilot, model, summary: { diffs: [] }, time: { created: started } };
         const assistant: AssistantMessage = { id: id('msg'), sessionID: session.id, role: 'assistant', parentID: user.id,
@@ -330,8 +331,15 @@ class HostRuns<Model, Native> {
           }
         }
       }
+      this.store.patchSession(session.id, {});
       this.store.event(session.id, 'session.compacted', { sessionID: session.id });
       return true;
+    } catch (error) {
+      const cancelled = abort.signal.aborted;
+      const reported = cancelled ? new RequestError(409, '会话摘要已取消，可以重试。')
+        : isRequestError(error) || isUserError(error) ? error : new UserError(this.driver.fallbackError);
+      this.store.event(session.id, 'session.error', { sessionID: session.id, error: failure(reported.message, cancelled) });
+      throw reported;
     } finally {
       this.active.delete(session.id);
       done.resolve(undefined);

@@ -43,12 +43,25 @@ function initialConfig(): Config {
 
 export class HostConfig {
   value = initialConfig();
-  protected auth = new Map<string, Auth>();
+  private overrides: ObjectMap = {};
+  private authOverrides = new Map<string, Auth | null>();
+  protected auth = this.readAuth();
 
-  constructor() {
+  private readAuth() {
     const data = process.env.XDG_DATA_HOME;
     const path = data && join(data, 'opencode', 'auth.json');
-    if (path && existsSync(path)) this.auth = new Map(Object.entries(readJson<Record<string, Auth>>(path)));
+    const auth = new Map(Object.entries(path && existsSync(path) ? readJson<Record<string, Auth>>(path) : {}));
+    for (const [id, value] of this.authOverrides) {
+      if (value) auth.set(id, value);
+      else auth.delete(id);
+    }
+    return auth;
+  }
+
+  reload() {
+    const value = merge(initialConfig() as ObjectMap, this.overrides) as Config;
+    this.auth = this.readAuth();
+    this.value = value;
   }
 
   patch(value: ObjectMap) {
@@ -58,16 +71,21 @@ export class HostConfig {
     }
     if (object(updated.provider) && Object.values(updated.provider).some(provider => !object(provider) ||
       (provider.models !== undefined && !object(provider.models)))) throw new Error('Invalid provider configuration');
+    this.overrides = merge(this.overrides, value);
     this.value = updated as Config;
     return this.publicConfig();
   }
 
   setAuth(id: string, auth: Auth) {
     if (auth.type !== 'api' || typeof auth.key !== 'string' || !auth.key) throw new Error('Only API credentials are supported by this bridge');
+    this.authOverrides.set(id, auth);
     this.auth.set(id, auth);
   }
 
-  removeAuth(id: string) { this.auth.delete(id); }
+  removeAuth(id: string) {
+    this.authOverrides.set(id, null);
+    this.auth.delete(id);
+  }
 
   publicConfig() {
     const config = structuredClone(this.value);

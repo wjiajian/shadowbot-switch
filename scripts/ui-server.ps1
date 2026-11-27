@@ -354,6 +354,7 @@ function Get-UiState($Request) {
         }
         $directory = $script:Ui.Detected.value
     }
+    $attachment = $null
     if ($installed -and $installation.agentPath) {
         $attachment = Get-ShadowBotAttachment $state $installation.agentPath $selected $bundled.id
     }

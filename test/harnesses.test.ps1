@@ -16,7 +16,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $repository 'switch.ps1') -Destination $project
     Copy-Item -LiteralPath (Join-Path $repository 'scripts/harnesses.ps1') -Destination (Join-Path $project 'scripts')
     Copy-Item -LiteralPath (Join-Path $repository 'scripts/toolchain.ps1') -Destination (Join-Path $project 'scripts')
-    foreach ($name in 'upstream.ps1','runtime.ps1') { Copy-Item (Join-Path $repository "scripts/$name") -Destination (Join-Path $project 'scripts') }
+    foreach ($name in 'upstream.ps1','runtime.ps1','discovery.ps1') { Copy-Item (Join-Path $repository "scripts/$name") -Destination (Join-Path $project 'scripts') }
     foreach ($name in @('go.mod', 'go.sum', 'tsconfig.json', 'contract/schema.sql')) { Copy-Item -LiteralPath (Join-Path $repository $name) -Destination (Join-Path $project $name) }
     Write-AtomicJson (Join-Path $project 'package.json') @{ name = 'harness-test'; version = '1.0.0'; type = 'module' }
     Write-AtomicJson (Join-Path $project 'package-lock.json') @{ name = 'harness-test'; version = '1.0.0'; lockfileVersion = 3; packages = @{ '' = @{ name = 'harness-test'; version = '1.0.0' } } }

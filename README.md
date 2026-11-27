@@ -59,7 +59,9 @@ flowchart LR
 > [!IMPORTANT]
 > 启动器只接管已验证的影刀版本，会校验原版 `opencode.exe`。影刀升级后，需等本项目完成兼容验证再切换。
 
-影刀升级会创建新的版本目录。升级后先看 `status` 或 `doctor`。如果提示仍关联旧目录，请保存工作、退出影刀并执行 `.\switch.ps1 use pi --wait`。从旧版 ShadowBot Switch 首次安装 6.4 兼容修复时，请先更新项目源码，再执行 `.\switch.ps1 update pi --local-only --wait`，以保留当前 Pi 版本并重建兼容服务。
+影刀升级会创建新的版本目录。升级后先看 `status` 或 `doctor`。如果提示仍关联旧目录，请保存工作、退出影刀并执行 `.\switch.ps1 use pi --wait`。如果影刀和本项目同时升级，先拉取源码，退出影刀并运行 `.\switch.ps1 update pi --local-only --wait`。该命令会保留 Pi 版本、重建兼容服务并接入新目录。用 `status` 确认；当前后端已是 Pi 且目录正确时即可启动影刀。若要从原版切到 Pi，再运行 `.\switch.ps1 use pi --wait`。
+
+如果升级期间打开过原版 Copilot，切换前会核对活动会话与托管后端的记录。发现混用时会停止。请退出影刀，完整备份活动数据库及其 WAL、用户目录下的 `current-session.json` 和 `.shadowbot-switch`。保留升级期间的原版会话副本，再用同一时间点的托管数据库、适配器历史和会话指针恢复后重试。
 
 ### 安装并切换
 

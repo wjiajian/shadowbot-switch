@@ -11,7 +11,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'scripts/activation.ps1')
-. (Join-Path $PSScriptRoot 'scripts/discovery.ps1')
 . (Join-Path $PSScriptRoot 'scripts/toolchain.ps1')
 . (Join-Path $PSScriptRoot 'scripts/processes.ps1')
 . (Join-Path $PSScriptRoot 'scripts/runtime.ps1')
@@ -79,7 +78,8 @@ function Read-Installation($StateDirectory) {
     $path = Join-Path $StateDirectory 'install.json'
     if (!(Test-Path -LiteralPath $path)) { return $null }
     $existing = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
-    if ((Split-Path -Leaf $existing.agentPath) -ne 'opencode.exe' -or (Split-Path (Split-Path $existing.agentPath)) -ne $shadowBot -or
+    $recordedAgent = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($existing.agentPath))
+    if ((Split-Path -Leaf $recordedAgent) -ne 'opencode.exe' -or !(Test-ShadowBotPathEqual (Split-Path (Split-Path $recordedAgent)) $shadowBot) -or
         $existing.database -ne $database -or $existing.users -ne $users) {
         throw '本项目的安装记录属于另一个影刀安装目录，不能用于当前影刀。'
     }
@@ -149,7 +149,7 @@ function Install-SelectedHarness {
                 Complete-Activation $state ${function:Assert-HostStopped}
                 $projectInstall = Read-Installation $state
             }
-            $owner = if (Test-Path -LiteralPath $locator) { (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json).home }
+            $owner = if (Test-Path -LiteralPath $locator) { Get-ShadowBotLocatorHome $locator }
             if ($Update -and $projectInstall.agentPath -eq $agentExe -and
                 (($owner -eq $state) -or (!$owner -and (Get-SelectedHarness $state $project) -eq $bundled.id)) -and $record.release -and !$record.legacy -and !$plan.needsLock -and
                 [bool]$record.dependencies.explicit -eq [bool]$plan.explicit -and
@@ -179,7 +179,7 @@ function Install-SelectedHarness {
     Complete-Activation $state ${function:Assert-HostStopped}
     $projectInstall = Read-Installation $state
     $activeHome = if (Test-Path -LiteralPath $locator) {
-        $owner = (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json).home
+        $owner = Get-ShadowBotLocatorHome $locator
         if ($owner -notin $state, $legacy) { throw '此影刀安装由其他项目目录管理。如果移动了本项目，请运行 .\switch.ps1 repair。' }
         $owner
     }
@@ -196,13 +196,21 @@ function Install-SelectedHarness {
         }
         $migrateLegacy = $true
     }
-    $upgraded = $projectInstall -and $projectInstall.agentPath -ne $agentExe
+    $upgraded = $projectInstall -and !(Test-ShadowBotPathEqual $projectInstall.agentPath $agentExe)
     if ($upgraded) {
+        $selected = Get-SelectedHarness $state $project
+        if ($selected -ne $bundled.id) {
+            # Existing installations can still dispatch "backend" to the old release.
+            # Check before replacing either launcher, the backup, or the manifest.
+            $runtime = if ($projectInstall.runtime -or $projectInstall.runtimeRelease) { Get-InstallationRuntime $state $projectInstall } else { $state }
+            & (Join-Path $runtime 'node.exe') --disable-warning=ExperimentalWarning (Join-Path $project 'src/history-ownership.ts') $projectInstall.database (Join-Path $state "backends/$selected/adapter.db")
+            if ($LASTEXITCODE -ne 0) { throw '会话归属检查未通过，已停止重新接入。请保留当前数据库及两个后端快照。' }
+        }
         $oldAgent = $projectInstall.agentPath
         Write-Warning "检测到影刀已升级：$oldAgent → $agentExe，将重新备份原版。"
         $oldLocator = "$oldAgent.shadowbot-pi.json"
         if (Test-Path -LiteralPath $oldLocator) {
-            $oldOwner = (Get-Content -LiteralPath $oldLocator -Raw | ConvertFrom-Json).home
+            $oldOwner = Get-ShadowBotLocatorHome $oldLocator
             if ($oldOwner -in $state,$legacy) {
                 if (Test-Path -LiteralPath $oldAgent) { Copy-Executable (Join-Path $oldOwner 'original/opencode.exe') $oldAgent -BeforeReplace ${function:Assert-HostStopped} }
                 Remove-Item -LiteralPath $oldLocator
@@ -237,7 +245,7 @@ function Install-SelectedHarness {
         }
         if ($activeInstall) { Copy-Executable $original $agentExe -BeforeReplace ${function:Assert-HostStopped} }
         if (Test-Path -LiteralPath $locator) {
-            $owner = (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json).home
+            $owner = Get-ShadowBotLocatorHome $locator
             if ($owner -in $state, $legacy) { Remove-Item -LiteralPath $locator -Force }
         }
         Write-Output "已切换到 $($spec.name)。"

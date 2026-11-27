@@ -21,6 +21,39 @@ test('tool output limits preserve UTF-8 and exempt trees and task handoffs', () 
   assert.equal(limitToolText('task', text(original)), undefined);
 });
 
+test('manual Pi compaction honors the same snapshot projection settings as normal turns', async t => {
+  const { tempFixture, modelFixture, listen } = await import('./helpers/bridge.mjs');
+  const { rmSync } = await import('node:fs');
+  const { HostConfig } = await import('../dist/service/adapters/pi/config.js');
+  const { PiDriver } = await import('../dist/service/adapters/pi/driver.js');
+  const fixture = tempFixture(), model = modelFixture();
+  const url = await listen(model.server);
+  const prior = process.env.SHADOWBOT_OPENCODE_CONTEXT_CONFIG_B64;
+  t.after(() => {
+    if (prior === undefined) delete process.env.SHADOWBOT_OPENCODE_CONTEXT_CONFIG_B64;
+    else process.env.SHADOWBOT_OPENCODE_CONTEXT_CONFIG_B64 = prior;
+    model.server.close();
+    rmSync(fixture.root, { recursive: true, force: true });
+  });
+  const config = new HostConfig();
+  config.patch({ provider: { fixture: { npm: '@ai-sdk/openai-compatible', options: { baseURL: url, apiKey: 'fixture' }, models: { model: {} } } } });
+  const driver = new PiDriver({ home: fixture.home, root: fixture.workspace, config });
+  const meta = { id: 'fixture' };
+  const manager = driver.history.prepareTurn(meta);
+  for (const [key, result] of [['old', 'obsolete-snapshot '.repeat(80)], ['new', 'current-snapshot']]) {
+    for (const message of call('studio-mcp_flow_blocks_list', key, {}, result)) manager.appendMessage({ ...message, timestamp: Date.now() });
+  }
+  meta.native_file = manager.getSessionFile();
+  meta.native_leaf = manager.getLeafId();
+  for (const [enabled, compress] of [[true, true], [true, false], [false, true]]) {
+    process.env.SHADOWBOT_OPENCODE_CONTEXT_CONFIG_B64 = Buffer.from(JSON.stringify({ enabled, compress_tool_results: compress })).toString('base64');
+    await driver.summarize(meta, { providerID: 'fixture', modelID: 'model' }, new AbortController().signal);
+    const prompt = JSON.stringify(model.requests.at(-1).request.messages);
+    assert.equal(prompt.includes('obsolete-snapshot'), !(enabled && compress));
+    assert.match(prompt, /current-snapshot/);
+  }
+});
+
 test('only newer successful snapshots of the same query supersede old results', () => {
   const name = 'studio-mcp_flow_blocks_list';
   const old = call(name, 'one', { flow_id: 'app-flow' }, 'old snapshot '.repeat(80));

@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { Store } from '../dist/service/store.js';
 import { switchBackend, verifySchema } from '../dist/service/switch.js';
 
 const schema = readFileSync('contract/schema.sql', 'utf8');
@@ -120,6 +121,48 @@ test('busy and interrupted pre-replacement switches preserve the active history'
     original.close();
     rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
+});
+
+test('same-backend reattachment and switching away reject mixed histories before saving snapshots', async t => {
+  const home = mkdtempSync(join(tmpdir(), 'switch-mixed-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const database = join(home, 'active.db');
+  const install = { database, users: join(home, 'users') };
+  const db = new DatabaseSync(database);
+  db.exec(schema);
+  db.close();
+  writeFileSync(join(home, 'backend.json'), '{"mode":"original"}');
+  const change = destination => switchBackend(home, install, destination, schema, () => {});
+  await change('pi');
+  const snapshot = () => readFileSync(join(home, 'backends', 'pi', 'snapshot.json'), 'utf8');
+  const before = snapshot();
+  const store = new Store(database, join(home, 'backends', 'pi', 'adapter.db'), () => {});
+  try {
+    const session = store.create(home, home, { metadata: { marker: 1 } });
+    store.patchSession(session.id, { title: undefined, metadata: undefined });
+    assert.deepEqual(store.get(session.id).metadata, { marker: 1 });
+    assert.equal(store.get(session.id).title, session.title);
+    writeFileSync(join(home, 'install.json'), JSON.stringify({ ...install, resources: home, agentPath: join(home, 'opencode.exe') }));
+    const assertStopped = async () => {
+      for (const destination of ['pi', 'original']) await assert.rejects(change(destination), /活动会话库/);
+      const doctor = spawnSync(process.execPath, ['dist/service/control.js', 'doctor', '--json'], {
+        env: { ...process.env, SHADOWBOT_SWITCH_HOME: home }, encoding: 'utf8', windowsHide: true,
+      });
+      const check = JSON.parse(doctor.stdout).data.find(row => row.check === '会话数据库');
+      assert.equal(check.status, '失败');
+      assert.match(check.detail, /活动会话库/);
+      assert.equal(snapshot(), before);
+      assert.equal(JSON.parse(readFileSync(join(home, 'backend.json'))).mode, 'pi');
+      assert.equal(existsSync(join(home, 'switch.pending.json')), false);
+    };
+    store.db.prepare("UPDATE main.session SET metadata=? WHERE id=?").run('{"shadowbotContextCompatibility":{"state":"completed"}}', session.id);
+    await assertStopped();
+    store.patchSession(session.id, { metadata: { marker: 1 } });
+    await change('pi');
+    store.db.prepare('DELETE FROM adapter.session WHERE id=?').run(session.id);
+    await assertStopped();
+    assert.ok(store.db.prepare('SELECT 1 FROM main.session WHERE id=?').get(session.id));
+  } finally { store.db.close(); }
 });
 
 test('schema verification identifies the missing required column', t => {

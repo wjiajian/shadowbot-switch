@@ -679,7 +679,10 @@ function harnessColumn(spec) {
   else if (spec.selected) badge = h('span', { class: 'harness-state ok' }, '正在使用');
   else badge = h('span', { class: 'harness-state muted' }, spec.installed ? '未使用' : '未安装');
   const actions = [];
-  if (!spec.selected || state.base.shadowbot?.attachment?.warning) {
+  const attachment = state.base.shadowbot?.attachment;
+  if (spec.selected && attachment?.action === 'repair') {
+    actions.push(button('修复', 'btn-primary', () => startJob('repair'), { disabled: Boolean(job) }));
+  } else if (!spec.selected || attachment?.action === 'use') {
     const host = state.base.shadowbot;
     const needsHost = !state.base.installed && !(host.directory && host.version);
     actions.push(button(spec.selected ? '重新接入' : spec.installed ? '切换到此' : '安装并切换', 'btn-primary', () => startJob('use', spec.id),

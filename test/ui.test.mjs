@@ -117,7 +117,7 @@ test('checks, local rebuilds and uninstall send their requested options', async 
   const functions = ['startJob', 'checkUpdates', 'jobSteps', 'harnessColumn'].map(name =>
     new RegExp('(?:async )?function ' + name + '\\([^)]*\\) \\{[\\s\\S]+?\\n}').exec(script)[0]).join('\n');
   const calls = [];
-  const spec = { kind: 'managed', installed: true, selected: true, upstreamCapable: true, version: '1.6.0',
+  const spec = { id: 'fixture', kind: 'managed', installed: true, selected: true, upstreamCapable: true, version: '1.6.0',
     pinnedVersion: '1.5.2', availableVersion: '1.6.0', dependencySource: 'upstream', updateStatus: 'current' };
   const context = vm.createContext({ spec, state: { base: { installed: true } }, jobRunning: () => false,
     withBusy: (_, fn) => fn(), refreshBase() {}, toast() {}, newJob() {}, setPage() {}, pollJob() {},
@@ -140,6 +140,15 @@ test('checks, local rebuilds and uninstall send their requested options', async 
   assert.match(run('harnessColumn(spec)'), /1.6.0 · 上游版本.*仓库锁定 1.5.2.*与本地构建一致/);
   assert.match(run("harnessColumn({...spec,upstream:{candidate:'1.6.3'}})"), /更新到 1.6.3/);
   assert.match(run("harnessColumn({...spec,upstream:{status:'error'}})"), /仅本地重建/);
+  for (const [action, label, command] of [['repair', '修复', 'repair'], ['use', '重新接入', 'use']]) {
+    context.state.base.shadowbot = { attachment: { warning: 'fixture', action } };
+    let click;
+    context.button = (name, _style, handler) => { if (name === label) click = handler; return name; };
+    assert.match(run('harnessColumn(spec)'), new RegExp(label));
+    await click();
+    assert.equal(calls.at(-1)[1].cmd, command);
+    assert.equal(calls.at(-1)[1].harness, command === 'use' ? spec.id : undefined);
+  }
 });
 
 test('only versions below the minimum trigger the host version warning', () => {

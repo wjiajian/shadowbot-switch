@@ -1,4 +1,5 @@
 ﻿. (Join-Path $PSScriptRoot 'harnesses.ps1')
+. (Join-Path $PSScriptRoot 'discovery.ps1')
 function Get-OpenCodeVersion($Path, $Fallback) {
     try {
         $version = (& $Path --version 2>$null | Out-String).Trim()
@@ -82,7 +83,7 @@ function Complete-Activation($State, [scriptblock]$CheckStopped) {
     if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "缺少激活文件：$source" }
     $locator = "$agentPath.shadowbot-pi.json"
     if (Test-Path -LiteralPath $locator) {
-        $owner = (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json).home
+        $owner = Get-ShadowBotLocatorHome $locator
         $legacy = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'ShadowBotPi'
         if ($owner -notin $State,$legacy) { throw '活动程序不属于此项目，请运行 repair。' }
     }
@@ -91,7 +92,7 @@ function Complete-Activation($State, [scriptblock]$CheckStopped) {
     Publish-Release $State $release
     if ($bundled) {
         Write-AtomicJson (Join-Path $State 'backend.json') @{ mode = $bundled }
-        if ((Test-Path -LiteralPath $locator) -and (Get-Content -LiteralPath $locator -Raw | ConvertFrom-Json).home -in $State,$legacy) { Remove-Item -LiteralPath $locator -Force }
+        if ((Test-Path -LiteralPath $locator) -and (Get-ShadowBotLocatorHome $locator) -in $State,$legacy) { Remove-Item -LiteralPath $locator -Force }
     }
     Remove-Item -LiteralPath $path -Force
 }

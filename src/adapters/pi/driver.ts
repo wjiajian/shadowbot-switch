@@ -8,7 +8,7 @@ import type { AssistantMessage as PiAssistant, ModelThinkingLevel, Usage } from 
 import type { UserMessage } from '@opencode-ai/sdk/v2';
 import type { AdapterContext } from '../../adapter.js';
 import { copilot, object } from '../../config.js';
-import { modelError, RequestError } from '../../errors.js';
+import { modelError, RequestError, UserError } from '../../errors.js';
 import type { DriverTurn, HarnessDriver, ThinkingCapability } from '../../host/runs.js';
 import type { ToolDescriptor } from '../../host/types.js';
 import { atomicWrite } from '../../installation.js';
@@ -16,7 +16,7 @@ import type { HostTool } from '../../mcp/hub.js';
 import type { Meta, Store } from '../../store.js';
 import type { McpHub } from './mcp.js';
 import type { HostConfig } from './config.js';
-import { projectToolContext, runtimeContextEntry, withRuntimeContext } from './context.js';
+import { contextSettings, projectToolContext, runtimeContextEntry, withRuntimeContext } from './context.js';
 import { initialThinkingLevel } from './thinking.js';
 
 type Model = Awaited<ReturnType<HostConfig['model']>>;
@@ -26,7 +26,7 @@ type PiHostTool = HostTool & { definition: ToolDefinition };
 function string(value: unknown) { return typeof value === 'string' ? value : ''; }
 
 function usageTotals(usage?: Usage) {
-  return { cost: usage?.cost.total ?? 0, tokens: { total: usage?.totalTokens ?? 0, input: usage?.input ?? 0,
+  return { cost: usage?.cost?.total ?? 0, tokens: { total: usage?.totalTokens ?? 0, input: usage?.input ?? 0,
     output: usage?.output ?? 0, reasoning: usage?.reasoning ?? 0, cache: { read: usage?.cacheRead ?? 0, write: usage?.cacheWrite ?? 0 } } };
 }
 
@@ -157,14 +157,18 @@ export class PiDriver implements HarnessDriver<Model, SessionManager> {
   async summarize(meta: Meta, selection: UserMessage['model'], signal: AbortSignal) {
     const manager = this.manager(meta);
     const file = manager.getSessionFile()!;
-    const messages = manager.buildSessionContext().messages;
+    const history = manager.buildSessionContext().messages;
+    const rewrite = contextSettings();
+    const messages = rewrite.enabled ? projectToolContext(history, rewrite.compressSnapshots) : history;
     const { handle } = await this.resolveModel(selection, copilot);
     const instructions = this.ctx.config.value.agent?.compaction?.prompt ??
       '用中文按以下 Markdown 标题整理会话：## 目标、## 重要信息、## 工作状态（### 已完成、### 进行中、### 阻塞）、## 下一步、## 相关文件。';
     const { text, usage } = await generateSummaryWithUsage(messages, handle.resolved, undefined, undefined, undefined, signal,
-      instructions, undefined, undefined, (model, context, options) => handle.runtime.streamSimple(model, context, options));
+      instructions, undefined, undefined, (model, context, options) => handle.runtime.streamSimple(model, context, options)).catch(error => {
+        throw new UserError(modelError(error instanceof Error ? error.message : ''));
+      });
     signal.throwIfAborted();
-    if (!text.trim()) throw new Error('Pi returned an empty session summary');
+    if (!text.trim()) throw new UserError('模型返回了空摘要，请重试或更换模型。');
     const tokens = messages.reduce((total, message) => total + estimateTokens(message), 0);
     const entry = manager.appendCompaction(text, null, tokens, undefined, false, usage);
     // Pi delays writing new files until the first assistant message (e.g. command-only sessions).

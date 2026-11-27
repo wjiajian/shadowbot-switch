@@ -21,6 +21,7 @@ export { applicationList } from './app-registry.js';
 import { backupScope, createBackup, listBackups, restoreBackup } from './config-backups.js';
 import { appThinkingWarnings, editRules, ruleLayers, saveSettings, showSettings } from './config-editor.js';
 import { thinkingEnabled } from './thinking-command.js';
+import { verifyHistoryOwnership } from './history-ownership.js';
 import { verifySchema } from './switch.js';
 import { decodeRuleContent, loadAgentRules } from './agent-rules.js';
 
@@ -659,14 +660,23 @@ async function manageOptions(home: string, install: Installation, opts: Options)
     if (appError) await check('应用范围', () => { throw appError; }, '所选应用目录无效。运行 apps clear 清除记忆。');
     await check('原程序备份', () => { if (!existsSync(join(home, 'original', 'opencode.exe'))) throw new Error(); }, '原程序备份缺失。恢复正确安装包后运行 use <harness>。');
     await check('运行时', async () => { const harness = selected(); if (process.version !== 'v24.22.3') throw new Error(); if (harness.kind === 'managed') await (await loadAdapter(home, install, harness)).verify(installedVersion(install, harness.id)); }, '运行时版本或依赖不匹配。运行 update <harness> 从当前源码重建。');
-    await check('当前影刀目录', () => {
-      const attachment = hostAttachment(home, selected().id);
-      if (attachment.warning) throw new UserError(attachment.warning);
-    }, '检查当前影刀安装目录。');
+    if (process.platform === 'win32') {
+      await check('当前影刀目录', () => {
+        const attachment = hostAttachment(home, selected().id);
+        if (attachment.warning) throw new UserError(attachment.warning);
+      }, '检查当前影刀安装目录。');
+    } else checks.push({ check: '当前影刀目录', status: '未检查', detail: '仅适用于 Windows 影刀客户端。' });
     await check('活动程序', () => {
       if (!existsSync(install.agentPath) || ownsAgent(home, install) !== (selected().kind === 'managed')) throw new Error();
     }, '活动程序与当前后端不匹配。关闭影刀后运行 repair。');
-    await check('会话数据库', () => verifySchema(install.database), '会话库结构或完整性不匹配。确认影刀版本不低于 6.3.39，并保留数据进行恢复。');
+    await check('会话数据库', () => {
+      verifySchema(install.database);
+      const harness = selected();
+      if (harness.kind === 'managed') {
+        try { verifyHistoryOwnership(install.database, join(home, 'backends', harness.id, 'adapter.db')); }
+        catch (error) { throw new UserError(error instanceof Error ? error.message : '会话归属检查失败。'); }
+      }
+    }, '会话库结构或完整性不匹配。确认影刀版本不低于 6.3.39，并保留数据进行恢复。');
     await check('Skills 配置', () => { const errors = skillRows(home, install, app).filter(r => r.status === 'invalid'); if (errors.length) throw new UserError(errors.map(r => `${r.path}：${r.reason}`).join('\n')); }, '运行 skills 查看配置问题。');
     await check('MCP 配置', () => { for (const [name, raw] of customMcp(join(home, 'agent'), app)) validateCustomMcp(name, raw); }, '运行 config open mcp 修复配置。');
     await check('AGENTS.md 规则', () => {
@@ -683,7 +693,7 @@ async function manageOptions(home: string, install: Installation, opts: Options)
         for (const line of rest) say(`        ${line}`);
       }
       const failures = checks.filter(c => c.status === '失败').length;
-      say(failures ? `${failures} 项未通过，按上面的提示处理后再运行 doctor。` : '全部通过。');
+      say(failures ? `${failures} 项未通过，按上面的提示处理后再运行 doctor。` : checks.some(c => c.status === '未检查') ? '已执行的检查全部通过。' : '全部通过。');
     }
     if (checks.some(c => c.status === '失败')) process.exitCode = 1;
     return;

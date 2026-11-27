@@ -174,10 +174,10 @@ export class Store {
     this.transaction(() => {
       this.db.prepare('INSERT INTO main.project (id, worktree, time_created, time_updated, sandboxes) VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING')
         .run(projectID, root, time, time, '[]');
-      this.db.prepare(`INSERT INTO main.session (id, project_id, parent_id, directory, path, slug, version, title, permission, time_created, time_updated)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(sessionID, projectID, session.parentID ?? null, directory, '.', session.slug,
-        session.version, session.title, options.permission ? JSON.stringify(options.permission) : null, time, time);
-      if (options.metadata && this.hasSessionMetadata) this.db.prepare('UPDATE main.session SET metadata=? WHERE id=?').run(JSON.stringify(options.metadata), sessionID);
+      const metadata = this.hasSessionMetadata ? [options.metadata === undefined ? null : JSON.stringify(options.metadata)] : [];
+      this.db.prepare(`INSERT INTO main.session (id, project_id, parent_id, directory, path, slug, version, title, permission, time_created, time_updated${this.hasSessionMetadata ? ', metadata' : ''})
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${this.hasSessionMetadata ? ', ?' : ''})`).run(sessionID, projectID, session.parentID ?? null, directory, '.', session.slug,
+        session.version, session.title, options.permission ? JSON.stringify(options.permission) : null, time, time, ...metadata);
       this.db.prepare('INSERT INTO adapter.session (id, root, session) VALUES (?, ?, ?)').run(sessionID, root, JSON.stringify(session));
     });
     this.event(sessionID, 'session.created', { info: session });
@@ -187,8 +187,11 @@ export class Store {
   private writeSession(id: string, patch: Partial<Pick<Session, 'title' | 'metadata' | 'revert'>>) {
     const current = this.get(id);
     if (!current) throw new RequestError(404, 'Session not found');
-    const session = { ...current, ...patch, time: { ...current.time, updated: Date.now() } };
-    if (patch.metadata && this.hasSessionMetadata) {
+    const session = { ...current, time: { ...current.time, updated: Date.now() } };
+    if ('revert' in patch) session.revert = patch.revert;
+    if (patch.title !== undefined) session.title = patch.title;
+    if (patch.metadata !== undefined) session.metadata = patch.metadata;
+    if (patch.metadata !== undefined && this.hasSessionMetadata) {
       this.db.prepare('UPDATE main.session SET metadata=? WHERE id=?').run(JSON.stringify(patch.metadata), id);
     }
     this.saveSession(session);
